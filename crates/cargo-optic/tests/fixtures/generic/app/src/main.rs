@@ -1,0 +1,14 @@
+//! Instantiates two concrete versions of the acceptance-test kernel.
+//!
+//! Cargo Optic must distinguish both versions and retain a body for each version.
+
+use std::hint::black_box;
+
+use optic_mvp_kernel::outlined_sum;
+
+fn main() {
+    let u32_sum = outlined_sum::<u32, 4>(black_box([1, 2, 3, 4]));
+    let u64_sum = outlined_sum::<u64, 8>(black_box([1, 2, 3, 4, 5, 6, 7, 8]));
+
+    black_box((u32_sum, u64_sum));
+}

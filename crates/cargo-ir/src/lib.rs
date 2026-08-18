@@ -1,4 +1,22 @@
-//! Internal compiler-evidence support for `cargo-optic`.
+//! Captures compiler evidence for `cargo-optic`.
 //!
-//! This crate will capture and interpret evidence from Cargo, rustc, and LLVM. It does not own the
-//! Optic project store, capture history, user interfaces, or client state.
+//! This crate owns the nightly Cargo and LLVM boundary. [`capture`] runs one selected Cargo target
+//! and returns an [`EvidenceBundle`] whose paths belong to the caller-provided analysis directory.
+//! It does not assign Optic capture IDs or persist evidence.
+
+mod capture;
+pub use capture::{BodyRange, CaptureOutcome, EvidenceBundle, ModuleEvidence, capture};
+
+mod error;
+pub use error::{Error, Result};
+
+mod llvm;
+
+mod mono;
+pub use mono::MonoItem;
+
+mod request;
+pub use request::{BuildRequest, CargoTarget};
+
+mod toolchain;
+pub use toolchain::{Toolchain, inspect_toolchain};

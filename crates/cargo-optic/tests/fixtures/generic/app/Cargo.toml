@@ -1,0 +1,8 @@
+[package]
+name = "optic-mvp-app"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+optic-mvp-kernel = { path = "../kernel" }

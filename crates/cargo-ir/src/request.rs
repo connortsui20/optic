@@ -1,0 +1,68 @@
+//! Describes one Cargo analysis request.
+//!
+//! [`BuildRequest`] contains only the target selection that `cargo rustc` understands. The caller
+//! owns persistence and supplies a stable analysis directory for rustc temporaries.
+
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+/// One Cargo target kind and optional target name.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "kind", content = "name")]
+pub enum CargoTarget {
+    /// The package library target.
+    Library,
+
+    /// A named binary target.
+    Binary(String),
+
+    /// A named benchmark target.
+    Benchmark(String),
+
+    /// A named example target.
+    Example(String),
+}
+
+/// A normalized request for one enriched Cargo analysis.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BuildRequest {
+    /// The Cargo workspace in which the command runs.
+    pub workspace_root: PathBuf,
+
+    /// An optional manifest path passed to Cargo.
+    pub manifest_path: Option<PathBuf>,
+
+    /// An optional selected package.
+    pub package: Option<String>,
+
+    /// An optional selected Cargo target.
+    pub target: Option<CargoTarget>,
+
+    /// An optional Cargo profile name.
+    pub profile: Option<String>,
+
+    /// Enabled Cargo features.
+    pub features: Vec<String>,
+
+    /// Whether Cargo enables every declared feature.
+    pub all_features: bool,
+
+    /// Whether Cargo disables default features.
+    pub no_default_features: bool,
+
+    /// An optional compiler target triple.
+    pub target_triple: Option<String>,
+
+    /// Whether Cargo must use the lock file without changing it.
+    pub locked: bool,
+
+    /// Whether Cargo must avoid network access.
+    pub offline: bool,
+
+    /// Whether Cargo must use both locked and offline behavior.
+    pub frozen: bool,
+
+    /// The directory in which rustc writes mutable analysis artifacts.
+    pub analysis_directory: PathBuf,
+}

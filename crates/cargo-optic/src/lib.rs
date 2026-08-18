@@ -1,4 +1,27 @@
-//! Application library for `cargo-optic`.
+//! Persistent compiler-evidence workflows for `cargo-optic`.
 //!
-//! This crate will own the Optic project store, capture history, queries, comparisons, and client
-//! state. The `cargo-optic` binary and terminal interface will use this library.
+//! [`Application`] connects the internal `cargo-ir` collector to a project-local evidence store.
+//! The command-line binary is a thin renderer over these typed workflows. A future terminal client
+//! can use the same application without parsing command output.
+
+mod app;
+pub use app::Application;
+
+mod cli;
+pub use cli::run_cli;
+
+mod error;
+pub use error::{Error, Result};
+
+mod ids;
+pub use ids::{CaptureId, InstanceId};
+
+mod model;
+pub use model::{
+    BodyView, BuildSpec, CachePolicy, CaptureSummary, FindResult, InstanceSummary, ShowView,
+    SourceView,
+};
+
+mod source;
+
+mod store;

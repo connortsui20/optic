@@ -6,9 +6,22 @@ resolver = "3"
 [workspace.package]
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/<placeholder>/optic"
+repository = "https://github.com/connortsui20/optic"
 
 [workspace.dependencies]
+blake3 = "1.8.2"
 cargo-ir = { path = "crates/cargo-ir", version = "0.0.1" }
+cargo_metadata = "0.23.1"
+clap = { version = "4.5.48", features = ["derive"] }
+fs2 = "0.4.3"
+proc-macro2 = { version = "1.0.101", features = ["span-locations"] }
+rusqlite = { version = "0.37.0", features = ["bundled"] }
+rustc-demangle = "0.1.26"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+syn = { version = "2.0.106", features = ["full", "visit"] }
+thiserror = "2.0.17"
+uuid = { version = "1.18.1", features = ["serde", "v7"] }
+walkdir = "2.5.0"
 
 [workspace.lints.clippy]
