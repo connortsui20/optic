@@ -23,6 +23,18 @@ cargo install --path crates/cargo-optic
 Cargo Optic uses the active compiler. Use `cargo +nightly optic` to select the installed nightly
 toolchain.
 
+## Try the included example
+
+Run these commands from the Optic repository. They work in Fish.
+
+```console
+cd crates/cargo-optic/tests/fixtures/generic
+cargo +nightly optic show optic_mvp_kernel::outlined_sum -p optic-mvp-app --bin optic-mvp-app --release --source
+```
+
+The example creates `u32` and `u64` instances of the same generic function. Cargo Optic lists both
+instances and prints a complete `show` command for each one. Copy either `show` command.
+
 ## Inspect a function
 
 Run `show` with the Cargo target options and a Rust definition path:

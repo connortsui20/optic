@@ -20,7 +20,7 @@ use crate::{
     InstanceSummary, Result, ShowView,
 };
 
-const STORE_VERSION: u32 = 1;
+const STORE_VERSION: u32 = 2;
 
 pub(crate) struct Store {
     root: PathBuf,
@@ -550,16 +550,18 @@ fn initialize_schema(connection: &Connection) -> Result<()> {
     let version =
         connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))?;
 
-    if version != 0 && version != STORE_VERSION {
-        return Err(Error::StoreVersion {
+    match version {
+        0 => create_schema(connection),
+        1 => migrate_schema_v1(connection),
+        STORE_VERSION => Ok(()),
+        actual => Err(Error::StoreVersion {
             expected: STORE_VERSION,
-            actual: version,
-        });
+            actual,
+        }),
     }
-    if version == STORE_VERSION {
-        return Ok(());
-    }
+}
 
+fn create_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(
         "BEGIN;
          CREATE TABLE captures(
@@ -607,11 +609,47 @@ fn initialize_schema(connection: &Connection) -> Result<()> {
              request_key TEXT PRIMARY KEY,
              capture_id TEXT NOT NULL REFERENCES captures(id)
          );
-         PRAGMA user_version = 1;
+         PRAGMA user_version = 2;
          COMMIT;",
     )?;
 
     Ok(())
+}
+
+fn migrate_schema_v1(connection: &Connection) -> Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    let has_capture_cache = table_exists(&transaction, "capture_cache")?;
+    let has_analysis_cache = table_exists(&transaction, "analysis_cache")?;
+
+    if !has_capture_cache {
+        if has_analysis_cache {
+            transaction.execute_batch("ALTER TABLE analysis_cache RENAME TO capture_cache;")?;
+        } else {
+            transaction.execute_batch(
+                "CREATE TABLE capture_cache(
+                     request_key TEXT PRIMARY KEY,
+                     capture_id TEXT NOT NULL REFERENCES captures(id)
+                 );",
+            )?;
+        }
+    }
+
+    transaction.pragma_update(None, "user_version", STORE_VERSION)?;
+    transaction.commit()?;
+
+    Ok(())
+}
+
+fn table_exists(connection: &Connection, table: &str) -> Result<bool> {
+    let exists = connection.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1
+         )",
+        [table],
+        |row| row.get(0),
+    )?;
+
+    Ok(exists)
 }
 
 fn insert_capture(
@@ -837,7 +875,9 @@ fn create_private_directory(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{definition_name, unique_prefix_length};
+    use rusqlite::Connection;
+
+    use super::{STORE_VERSION, Store, definition_name, table_exists, unique_prefix_length};
     use crate::{CaptureId, Error, InstanceId};
 
     #[test]
@@ -860,6 +900,59 @@ mod tests {
             9
         );
         assert_eq!(unique_prefix_length("cap_abcdef", None, None), 5);
+    }
+
+    #[test]
+    fn migrates_the_analysis_cache_table_from_schema_v1() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let store = Store::open(temporary.path()).expect("the test can create a current store");
+        store
+            .connection
+            .execute_batch(
+                "INSERT INTO captures(
+                     id, created_at_ms, request_key, request_json, rustc_release, rustc_commit,
+                     llvm_version, target, profile
+                 ) VALUES (
+                     'cap_0123456789abcdef0123456789abcdef', 0, 'request', '{}',
+                     'nightly', '', 'LLVM', 'target', 'release'
+                 );
+                 INSERT INTO capture_cache(request_key, capture_id) VALUES (
+                     'request', 'cap_0123456789abcdef0123456789abcdef'
+                 );",
+            )
+            .expect("the test can insert cached evidence");
+        drop(store);
+
+        let catalog = temporary.path().join(".optic/catalog.sqlite");
+        let connection = Connection::open(&catalog).expect("the test can open the catalog");
+        connection
+            .execute_batch(
+                "ALTER TABLE capture_cache RENAME TO analysis_cache;
+                 PRAGMA user_version = 1;",
+            )
+            .expect("the test can create the version 1 layout");
+        drop(connection);
+
+        let store = Store::open(temporary.path()).expect("the store can migrate schema version 1");
+        let version = store
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+            .expect("the migrated schema has a version");
+        let cached = store
+            .cached_capture("request")
+            .expect("the migrated cache is readable")
+            .expect("the migration preserves the cached capture");
+
+        assert_eq!(version, STORE_VERSION);
+        assert_eq!(cached.id.as_str(), "cap_0123456789abcdef0123456789abcdef");
+        assert!(
+            table_exists(&store.connection, "capture_cache")
+                .expect("the test can inspect the migrated schema")
+        );
+        assert!(
+            !table_exists(&store.connection, "analysis_cache")
+                .expect("the test can inspect the migrated schema")
+        );
     }
 
     #[test]
