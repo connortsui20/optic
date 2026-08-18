@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "cargo-ir"
 version = "0.0.1"
+
+[[package]]
+name = "cargo-optic"
+version = "0.0.1"
+dependencies = [
+ "cargo-ir",
+]

@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/*"]
+default-members = ["crates/cargo-optic"]
 resolver = "3"
 
 [workspace.package]
@@ -8,5 +9,6 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/<placeholder>/optic"
 
 [workspace.dependencies]
+cargo-ir = { path = "crates/cargo-ir", version = "0.0.1" }
 
 [workspace.lints.clippy]
