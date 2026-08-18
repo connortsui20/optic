@@ -41,8 +41,8 @@ fn captures_finds_and_shows_concrete_generic_instances() {
     assert_success(&second);
     let first = json(&first);
     let second = json(&second);
-    let capture = string(&first, "/result/id");
-    assert_eq!(string(&second, "/result/id"), capture);
+    let first_capture = string(&first, "/result/id");
+    assert_eq!(string(&second, "/result/id"), first_capture);
     assert_ne!(first["result"]["reused"], second["result"]["reused"]);
 
     fixture.append_source_comment();
@@ -59,7 +59,7 @@ fn captures_finds_and_shows_concrete_generic_instances() {
     assert_success(&changed);
     let changed = json(&changed);
     let changed_capture = string(&changed, "/result/id");
-    assert_ne!(changed_capture, capture);
+    assert_ne!(changed_capture, first_capture);
     assert_eq!(changed["result"]["reused"], false);
 
     let refreshed = fixture.run([
@@ -78,12 +78,14 @@ fn captures_finds_and_shows_concrete_generic_instances() {
     let capture = string(&refreshed, "/result/id");
     assert_ne!(capture, changed_capture);
     assert_eq!(refreshed["result"]["reused"], false);
+    let capture_prefix =
+        shortest_unique_prefix(capture, &[first_capture, changed_capture, capture]);
 
     let ambiguous = fixture.run([
         "show",
         "optic_mvp_kernel::outlined_sum",
         "--capture",
-        capture,
+        capture_prefix,
         "--format",
         "json",
     ]);
@@ -98,10 +100,24 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         2
     );
 
+    let ambiguous_text = fixture.run([
+        "show",
+        "optic_mvp_kernel::outlined_sum",
+        "--capture",
+        capture_prefix,
+        "--output",
+        "llvm-pre-opt",
+        "--source",
+    ]);
+    assert_eq!(ambiguous_text.status.code(), Some(2));
+    let ambiguous_text = String::from_utf8_lossy(&ambiguous_text.stdout);
+    assert!(ambiguous_text.contains("Run one command"));
+    assert!(ambiguous_text.contains("--output llvm-pre-opt --source"));
+
     let found = fixture.run([
         "find",
         "--capture",
-        capture,
+        capture_prefix,
         "optic_mvp_kernel::outlined_sum",
         "--format",
         "json",
@@ -117,6 +133,11 @@ fn captures_finds_and_shows_concrete_generic_instances() {
             .iter()
             .all(|instance| instance["has_body"] == true)
     );
+    let instance_ids = [first_capture, changed_capture, capture]
+        .into_iter()
+        .flat_map(|capture_id| stored_instance_ids(&fixture, capture_id))
+        .collect::<Vec<_>>();
+    let instance_id_refs = instance_ids.iter().map(String::as_str).collect::<Vec<_>>();
     let instance = instances
         .iter()
         .find(|instance| {
@@ -126,42 +147,96 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         })
         .expect("the fixture creates a u64 instance");
     let instance = instance["id"].as_str().expect("instances have string IDs");
+    let instance_prefix = shortest_unique_prefix(instance, &instance_id_refs);
 
-    let plain = fixture.run(["show", "--capture", capture, "--instance", instance]);
+    let found_text = fixture.run([
+        "find",
+        "--capture",
+        capture_prefix,
+        "optic_mvp_kernel::outlined_sum",
+    ]);
+    assert_success(&found_text);
+    let found_text = String::from_utf8_lossy(&found_text.stdout);
+    assert!(found_text.contains(&format!("cargo optic show --instance {instance_prefix}")));
+    assert!(ambiguous_text.contains(&format!(
+        "cargo optic show --instance {instance_prefix} --output llvm-pre-opt --source"
+    )));
+
+    let plain = fixture.run(["show", "--instance", instance_prefix]);
     assert_success(&plain);
     let plain = String::from_utf8_lossy(&plain.stdout);
-    assert!(plain.contains("===== llvm-pre-optimization:"));
-    assert!(plain.contains("===== llvm-optimized:"));
-    assert!(!plain.contains("===== source:"));
+    assert!(plain.contains(&format!("  Capture   {capture_prefix}")));
+    assert!(plain.contains(&format!("  Instance  {instance_prefix}")));
+    assert!(plain.contains("LLVM (optimized)  "));
+    assert!(!plain.contains("llvm-pre-opt"));
+    assert!(!plain.contains("Source  "));
+    assert!(!plain.contains('\x1b'));
+
+    let colored = fixture.run([
+        "show",
+        "--instance",
+        instance_prefix,
+        "--source",
+        "--color",
+        "always",
+    ]);
+    assert_success(&colored);
+    let colored = String::from_utf8_lossy(&colored.stdout);
+    assert!(colored.contains("\x1b["));
+    assert!(colored.contains("\x1b[38;2;"));
+    assert!(colored.contains("Source  "));
 
     let shown = fixture.run([
         "show",
-        "--capture",
-        capture,
         "--instance",
-        instance,
+        instance_prefix,
         "--format",
         "json",
+        "--color",
+        "always",
     ]);
     assert_success(&shown);
+    assert!(!String::from_utf8_lossy(&shown.stdout).contains("\\u001b"));
     let shown = json(&shown);
+    assert_eq!(shown["result"]["capture_id"], capture);
+    assert_eq!(shown["result"]["instance"]["id"], instance);
+    assert_eq!(shown["result"]["output"], "llvm");
     assert!(shown["result"]["source"].is_null());
     let bodies = shown["result"]["bodies"]
         .as_array()
         .expect("show returns a body array");
     assert!(!bodies.is_empty());
-    assert!(bodies.iter().any(|body| {
+    assert!(bodies.iter().all(|body| body["stage"] == "llvm-optimized"));
+    assert!(bodies.iter().all(|body| {
         body["text"]
             .as_str()
             .is_some_and(|text| text.starts_with("define "))
     }));
 
+    let pre_optimization = fixture.run([
+        "show",
+        "--instance",
+        instance_prefix,
+        "--output",
+        "llvm-pre-opt",
+        "--format",
+        "json",
+    ]);
+    assert_success(&pre_optimization);
+    let pre_optimization = json(&pre_optimization);
+    assert_eq!(pre_optimization["result"]["output"], "llvm-pre-opt");
+    assert!(
+        pre_optimization["result"]["bodies"]
+            .as_array()
+            .expect("show returns a body array")
+            .iter()
+            .all(|body| body["stage"] == "llvm-pre-optimization")
+    );
+
     let with_source = fixture.run([
         "show",
-        "--capture",
-        capture,
         "--instance",
-        instance,
+        instance_prefix,
         "--source",
         "--format",
         "json",
@@ -178,6 +253,21 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         "pub fn outlined_sum",
     );
     assert!(source.starts_with(expected_source));
+
+    let redundant_capture = fixture.run([
+        "show",
+        "--capture",
+        capture_prefix,
+        "--instance",
+        instance_prefix,
+        "--format",
+        "json",
+    ]);
+    assert!(!redundant_capture.status.success());
+    assert!(
+        string(&json(&redundant_capture), "/error/message")
+            .contains("--instance cannot be combined with --capture")
+    );
 
     let failed = fixture.run(["capture", "-p", "missing-package", "--format", "json"]);
     assert!(!failed.status.success());
@@ -290,4 +380,38 @@ fn string<'a>(value: &'a Value, pointer: &str) -> &'a str {
         .pointer(pointer)
         .and_then(Value::as_str)
         .expect("the JSON pointer selects a string")
+}
+
+fn stored_instance_ids(fixture: &Fixture, capture_id: &str) -> Vec<String> {
+    let output = fixture.run(["find", "--capture", capture_id, "", "--format", "json"]);
+    assert_success(&output);
+    let output = json(&output);
+
+    output["result"]["instances"]
+        .as_array()
+        .expect("an empty query returns all instances")
+        .iter()
+        .map(|instance| {
+            instance["id"]
+                .as_str()
+                .expect("instances have string IDs")
+                .to_owned()
+        })
+        .collect()
+}
+
+fn shortest_unique_prefix<'a>(identifier: &'a str, candidates: &[&str]) -> &'a str {
+    for length in 5..identifier.len() {
+        let prefix = &identifier[..length];
+        let match_count = candidates
+            .iter()
+            .filter(|candidate| candidate.starts_with(prefix))
+            .count();
+
+        if match_count == 1 {
+            return prefix;
+        }
+    }
+
+    identifier
 }

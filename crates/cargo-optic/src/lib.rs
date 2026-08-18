@@ -18,10 +18,12 @@ pub use ids::{CaptureId, InstanceId};
 
 mod model;
 pub use model::{
-    BodyView, BuildSpec, CachePolicy, CaptureSummary, FindResult, InstanceSummary, ShowView,
-    SourceView,
+    BodyView, BuildSpec, CachePolicy, CaptureSummary, CompilerOutput, FindResult, InstanceSummary,
+    ShowView, SourceView,
 };
 
 mod source;
 
 mod store;
+
+mod terminal;

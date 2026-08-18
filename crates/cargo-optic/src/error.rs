@@ -46,18 +46,34 @@ pub enum Error {
         message: String,
     },
 
-    /// The requested capture does not exist in this project store.
-    #[error("capture {capture_id} does not exist")]
+    /// No stored capture matches the requested full ID or prefix.
+    #[error("capture ID must match one stored capture, got {capture_id}")]
     UnknownCapture {
-        /// The unknown capture identifier.
+        /// The unmatched capture ID or prefix.
         capture_id: CaptureId,
     },
 
-    /// The requested instance does not exist in this project store.
-    #[error("instance {instance_id} does not exist")]
+    /// No stored instance matches the requested full ID or prefix.
+    #[error("instance ID must match one stored instance, got {instance_id}")]
     UnknownInstance {
-        /// The unknown instance identifier.
+        /// The unmatched instance ID or prefix.
         instance_id: InstanceId,
+    },
+
+    /// An ID prefix matches more than one stored ID.
+    #[error(
+        "{kind} ID prefix must match only one stored ID. Use more characters. \
+         Matches include {candidates}, got {prefix}"
+    )]
+    AmbiguousIdentifier {
+        /// The type of ID that was matched.
+        kind: &'static str,
+
+        /// The ambiguous user-supplied prefix.
+        prefix: String,
+
+        /// Example matching full IDs.
+        candidates: String,
     },
 
     /// A known build input changed while the compiler was reading it.

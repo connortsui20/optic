@@ -3,9 +3,11 @@
 //! These types contain product concepts rather than database rows or compiler artifact paths. Both
 //! the CLI and future terminal interface consume the same views.
 
+use std::fmt;
 use std::path::PathBuf;
 
 use cargo_ir::CargoTarget;
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
 use crate::{CaptureId, InstanceId};
@@ -19,6 +21,49 @@ pub enum CachePolicy {
 
     /// Runs the compiler and publishes a new capture.
     Refresh,
+}
+
+/// One compiler output that an inspection command can show.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum CompilerOutput {
+    /// Optimized LLVM IR from the saved code-generation unit.
+    #[default]
+    #[value(name = "llvm")]
+    Llvm,
+
+    /// LLVM IR before the LLVM optimization pipeline.
+    #[value(name = "llvm-pre-opt")]
+    LlvmPreOpt,
+}
+
+impl CompilerOutput {
+    pub(crate) const fn stage(self) -> &'static str {
+        match self {
+            Self::Llvm => "llvm-optimized",
+            Self::LlvmPreOpt => "llvm-pre-optimization",
+        }
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Llvm => "llvm",
+            Self::LlvmPreOpt => "llvm-pre-opt",
+        }
+    }
+
+    pub(crate) const fn title(self) -> &'static str {
+        match self {
+            Self::Llvm => "LLVM (optimized)",
+            Self::LlvmPreOpt => "LLVM (before optimization)",
+        }
+    }
+}
+
+impl fmt::Display for CompilerOutput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.name())
+    }
 }
 
 /// A normalized Cargo target selection for an enriched capture.
@@ -147,7 +192,10 @@ pub struct ShowView {
     /// The concrete instance.
     pub instance: InstanceSummary,
 
-    /// Every supported standalone body.
+    /// The selected compiler output.
+    pub output: CompilerOutput,
+
+    /// Every standalone body for the selected compiler output.
     pub bodies: Vec<BodyView>,
 
     /// Captured source when the caller requested it and Optic found one item.

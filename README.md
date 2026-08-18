@@ -3,10 +3,10 @@
 Cargo Optic shows the Rust source and LLVM output for concrete compiler instances. It records this
 evidence in the Cargo workspace, so later queries do not compile the same inputs again.
 
-This prototype supports these compiler stages:
+This prototype supports these compiler outputs:
 
-- `llvm-pre-optimization` is the LLVM IR before the LLVM optimization pipeline.
-- `llvm-optimized` is the saved LLVM IR after the optimization pipeline.
+- `llvm` is the saved LLVM IR after the optimization pipeline. This output is the default.
+- `llvm-pre-opt` is the LLVM IR before the LLVM optimization pipeline.
 
 The evidence is enriched output. Cargo Optic enables v0 symbol names and line-table debug
 information. Therefore, the output does not exactly match a normal Cargo build.
@@ -32,17 +32,25 @@ cargo +nightly optic show my_crate::kernel -p my-crate --lib --release --source
 ```
 
 Cargo Optic captures the selected target and finds its concrete compiler instances. If the query is
-ambiguous, the command lists each candidate and stops. Use the instance ID to request one result:
+ambiguous, the command prints a complete `show` command for each candidate. Copy one command to
+request that result. The command keeps your `--source` and `--output` options.
 
 ```console
 cargo +nightly optic show \
-  --capture cap_0123456789abcdef0123456789abcdef \
-  --instance ins_0123456789abcdef0123456789abcdef \
+  --instance ins_01234567 \
   --source
 ```
 
-The default output is plain text. The source is absent unless you add `--source`. Add
-`--format json` to get a versioned JSON envelope.
+The default command shows only optimized LLVM IR. Use `--output llvm-pre-opt` to show the
+pre-optimization LLVM IR. The source is absent unless you add `--source`.
+
+The default format is plain text. Add `--format json` to get a versioned JSON envelope.
+
+Cargo Optic highlights interface text, Rust source, and LLVM IR when standard output is a terminal.
+Use `--color always` to keep color in redirected output. Use `--color never` to disable color.
+
+The `NO_COLOR` environment variable also disables automatic color. JSON output never contains ANSI
+escape sequences.
 
 ## Capture and query separately
 
@@ -50,10 +58,19 @@ Use these commands when an agent or another program controls the workflow:
 
 ```console
 cargo +nightly optic capture -p my-crate --lib --release --format json
-cargo +nightly optic find --capture CAPTURE_ID my_crate::kernel --format json
-cargo +nightly optic show --capture CAPTURE_ID --instance INSTANCE_ID --format json
+cargo +nightly optic find --capture CAPTURE_ID_PREFIX my_crate::kernel --format json
+cargo +nightly optic show --instance INSTANCE_ID_PREFIX --format json
 cargo +nightly optic captures --format json
 ```
+
+Omit `--format json` for an interactive workflow. Plain `find` output prints a complete `show`
+command after each instance. You do not need to copy an ID into a new command.
+
+Plain `capture` output prints `find` and `show` command templates for the new capture. Replace
+`QUERY` with a definition path.
+
+Plain output shows the shortest unique prefix for each capture and instance ID. JSON output keeps
+the full IDs. You can use any longer unique prefix. Cargo Optic reports an error for a collision.
 
 Use `--fresh` with `capture` or a build-based `show` command to create new evidence. This option
 does not use a matching completed capture.
@@ -64,7 +81,7 @@ Cargo Optic stores immutable captures in `.optic`. The SQLite catalog uses WAL m
 serializes capture writers, but read-only queries can use completed captures in parallel.
 
 There is no current capture and no session state. Each read-only command uses an explicit capture
-ID. Content-addressed blobs hold source, bitcode, and textual LLVM modules.
+or instance ID. An instance ID identifies its capture. Content-addressed blobs hold the evidence.
 
 The cache key includes these inputs:
 

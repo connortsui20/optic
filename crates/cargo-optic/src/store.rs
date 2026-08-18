@@ -16,8 +16,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::source::{SourceBaseline, StoredSource};
 use crate::{
-    BodyView, BuildSpec, CaptureId, CaptureSummary, Error, FindResult, InstanceId, InstanceSummary,
-    Result, ShowView,
+    BodyView, BuildSpec, CaptureId, CaptureSummary, CompilerOutput, Error, FindResult, InstanceId,
+    InstanceSummary, Result, ShowView,
 };
 
 const STORE_VERSION: u32 = 1;
@@ -151,13 +151,39 @@ impl Store {
         Ok(captures)
     }
 
-    pub(crate) fn find(&self, capture_id: &CaptureId, query: &str) -> Result<FindResult> {
-        self.ensure_capture(capture_id)?;
+    pub(crate) fn unique_capture_prefix(&self, capture_id: &CaptureId) -> Result<CaptureId> {
+        let prefix = self.shortest_unique_prefix(
+            capture_id.as_str(),
+            "SELECT
+                 (SELECT id FROM captures WHERE id < ?1 ORDER BY id DESC LIMIT 1),
+                 (SELECT id FROM captures WHERE id > ?1 ORDER BY id LIMIT 1)",
+        )?;
+
+        Ok(prefix
+            .parse()
+            .expect("the capture prefix comes from a validated stored capture ID"))
+    }
+
+    pub(crate) fn unique_instance_prefix(&self, instance_id: &InstanceId) -> Result<InstanceId> {
+        let prefix = self.shortest_unique_prefix(
+            instance_id.as_str(),
+            "SELECT
+                 (SELECT id FROM instances WHERE id < ?1 ORDER BY id DESC LIMIT 1),
+                 (SELECT id FROM instances WHERE id > ?1 ORDER BY id LIMIT 1)",
+        )?;
+
+        Ok(prefix
+            .parse()
+            .expect("the instance prefix comes from a validated stored instance ID"))
+    }
+
+    pub(crate) fn find(&self, capture_prefix: &CaptureId, query: &str) -> Result<FindResult> {
+        let capture_id = self.resolve_capture(capture_prefix)?;
         let exact =
-            self.query_instances(capture_id, "definition = ?2 OR display_name = ?2", query)?;
+            self.query_instances(&capture_id, "definition = ?2 OR display_name = ?2", query)?;
         let instances = if exact.is_empty() {
             self.query_instances(
-                capture_id,
+                &capture_id,
                 "instr(definition, ?2) > 0 OR instr(display_name, ?2) > 0",
                 query,
             )?
@@ -166,46 +192,35 @@ impl Store {
         };
 
         Ok(FindResult {
-            capture_id: capture_id.clone(),
+            capture_id,
             instances,
         })
     }
 
     pub(crate) fn show(
         &self,
-        capture_id: &CaptureId,
-        instance_id: &InstanceId,
+        instance_prefix: &InstanceId,
+        output: CompilerOutput,
     ) -> Result<ShowView> {
-        let instance = self
-            .connection
-            .query_row(
-                "SELECT id, definition, display_name, has_body
-                 FROM instances WHERE id = ?1 AND capture_id = ?2",
-                params![instance_id.as_str(), capture_id.as_str()],
-                instance_from_row,
-            )
-            .optional()?
-            .ok_or_else(|| Error::UnknownInstance {
-                instance_id: instance_id.clone(),
-            })?;
+        let resolved = self.resolve_instance(instance_prefix)?;
+        let instance = self.connection.query_row(
+            "SELECT id, definition, display_name, has_body
+             FROM instances WHERE id = ?1",
+            [resolved.instance_id.as_str()],
+            instance_from_row,
+        )?;
         let mut statement = self.connection.prepare(
             "SELECT modules.stage, modules.name, bodies.symbol, modules.text_blob,
                     bodies.start, bodies.end
              FROM bodies
              JOIN modules ON modules.id = bodies.module_id
-             WHERE bodies.instance_id = ?1
-             ORDER BY modules.stage, modules.name, bodies.start",
+             WHERE bodies.instance_id = ?1 AND modules.stage = ?2
+             ORDER BY modules.name, bodies.start",
         )?;
-        let rows = statement.query_map([instance_id.as_str()], |row| {
-            Ok(StoredBody {
-                stage: row.get(0)?,
-                module: row.get(1)?,
-                symbol: row.get(2)?,
-                text_blob: row.get(3)?,
-                start: row.get::<_, i64>(4)?,
-                end: row.get::<_, i64>(5)?,
-            })
-        })?;
+        let rows = statement.query_map(
+            params![resolved.instance_id.as_str(), output.stage()],
+            stored_body_from_row,
+        )?;
         let mut bodies = Vec::new();
 
         for row in rows {
@@ -220,15 +235,15 @@ impl Store {
         }
 
         Ok(ShowView {
-            capture_id: capture_id.clone(),
+            capture_id: resolved.capture_id,
             instance,
+            output,
             bodies,
             source: None,
         })
     }
 
     pub(crate) fn sources(&self, capture_id: &CaptureId) -> Result<Vec<StoredSource>> {
-        self.ensure_capture(capture_id)?;
         let mut statement = self
             .connection
             .prepare("SELECT path, blob FROM sources WHERE capture_id = ?1 ORDER BY path")?;
@@ -299,20 +314,86 @@ impl Store {
             })
     }
 
-    fn ensure_capture(&self, capture_id: &CaptureId) -> Result<()> {
-        let exists = self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM captures WHERE id = ?1)",
-            [capture_id.as_str()],
-            |row| row.get::<_, bool>(0),
+    fn resolve_capture(&self, prefix: &CaptureId) -> Result<CaptureId> {
+        let mut statement = self.connection.prepare(
+            "SELECT id FROM captures
+             WHERE id >= ?1 AND id < ?2
+             ORDER BY id LIMIT 2",
         )?;
+        let upper_bound = hexadecimal_prefix_upper_bound(prefix.as_str());
+        let candidates = statement
+            .query_map(params![prefix.as_str(), upper_bound], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
-        if !exists {
-            return Err(Error::UnknownCapture {
-                capture_id: capture_id.clone(),
-            });
+        match candidates.as_slice() {
+            [] => Err(Error::UnknownCapture {
+                capture_id: prefix.clone(),
+            }),
+            [capture_id] => Ok(capture_id
+                .parse()
+                .expect("stored capture IDs are validated on insert")),
+            _ => Err(ambiguous_identifier(
+                "capture",
+                prefix.as_str(),
+                &candidates,
+            )),
         }
+    }
 
-        Ok(())
+    fn resolve_instance(&self, prefix: &InstanceId) -> Result<ResolvedInstance> {
+        let mut statement = self.connection.prepare(
+            "SELECT capture_id, id FROM instances
+             WHERE id >= ?1 AND id < ?2
+             ORDER BY id LIMIT 2",
+        )?;
+        let upper_bound = hexadecimal_prefix_upper_bound(prefix.as_str());
+        let candidates = statement
+            .query_map(params![prefix.as_str(), upper_bound], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        match candidates.as_slice() {
+            [] => Err(Error::UnknownInstance {
+                instance_id: prefix.clone(),
+            }),
+            [(capture_id, instance_id)] => Ok(ResolvedInstance {
+                capture_id: capture_id
+                    .parse()
+                    .expect("stored capture IDs are validated on insert"),
+                instance_id: instance_id
+                    .parse()
+                    .expect("stored instance IDs are validated on insert"),
+            }),
+            _ => {
+                let instance_ids = candidates
+                    .iter()
+                    .map(|(_, instance_id)| instance_id.clone())
+                    .collect::<Vec<_>>();
+
+                Err(ambiguous_identifier(
+                    "instance",
+                    prefix.as_str(),
+                    &instance_ids,
+                ))
+            }
+        }
+    }
+
+    fn shortest_unique_prefix(&self, identifier: &str, neighbors_sql: &str) -> Result<String> {
+        let (previous, next) = self
+            .connection
+            .query_row(neighbors_sql, [identifier], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            })?;
+        let length = unique_prefix_length(identifier, previous.as_deref(), next.as_deref());
+
+        Ok(identifier[..length].to_owned())
     }
 
     fn query_instances(
@@ -399,6 +480,43 @@ fn lock_file(path: &Path) -> Result<FileLock> {
     Ok(FileLock { _file: file })
 }
 
+fn ambiguous_identifier(kind: &'static str, prefix: &str, candidates: &[String]) -> Error {
+    Error::AmbiguousIdentifier {
+        kind,
+        prefix: prefix.to_owned(),
+        candidates: candidates.join(", "),
+    }
+}
+
+/// Returns the exclusive upper bound for IDs that start with a hexadecimal prefix.
+///
+/// `g` is the first ASCII character after the largest valid lowercase hexadecimal character.
+fn hexadecimal_prefix_upper_bound(prefix: &str) -> String {
+    format!("{prefix}g")
+}
+
+/// Uses the adjacent sorted IDs because every ID with a shared prefix is contiguous.
+fn unique_prefix_length(identifier: &str, previous: Option<&str>, next: Option<&str>) -> usize {
+    let minimum_length = identifier.find('_').map_or(1, |index| index + 2);
+    let shared_length = [previous, next]
+        .into_iter()
+        .flatten()
+        .map(|neighbor| common_prefix_length(identifier, neighbor))
+        .max()
+        .unwrap_or(0);
+
+    minimum_length
+        .max(shared_length.saturating_add(1))
+        .min(identifier.len())
+}
+
+fn common_prefix_length(left: &str, right: &str) -> usize {
+    left.bytes()
+        .zip(right.bytes())
+        .take_while(|(left, right)| left == right)
+        .count()
+}
+
 struct PublishedModule {
     name: String,
     stage: String,
@@ -421,6 +539,11 @@ struct StoredBody {
     text_blob: String,
     start: i64,
     end: i64,
+}
+
+struct ResolvedInstance {
+    capture_id: CaptureId,
+    instance_id: InstanceId,
 }
 
 fn initialize_schema(connection: &Connection) -> Result<()> {
@@ -676,6 +799,17 @@ fn instance_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstanceSummar
     })
 }
 
+fn stored_body_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredBody> {
+    Ok(StoredBody {
+        stage: row.get(0)?,
+        module: row.get(1)?,
+        symbol: row.get(2)?,
+        text_blob: row.get(3)?,
+        start: row.get(4)?,
+        end: row.get(5)?,
+    })
+}
+
 fn now_ms() -> Result<u64> {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -703,7 +837,8 @@ fn create_private_directory(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::definition_name;
+    use super::{definition_name, unique_prefix_length};
+    use crate::{CaptureId, Error, InstanceId};
 
     #[test]
     fn removes_only_the_final_generic_arguments() {
@@ -716,5 +851,58 @@ mod tests {
             "crate::kernel::{closure#0}"
         );
         assert_eq!(definition_name("crate::plain"), "crate::plain");
+    }
+
+    #[test]
+    fn includes_one_character_after_the_longest_neighbor_match() {
+        assert_eq!(
+            unique_prefix_length("ins_01234567", Some("ins_0122ffff"), Some("ins_01239abc"),),
+            9
+        );
+        assert_eq!(unique_prefix_length("cap_abcdef", None, None), 5);
+    }
+
+    #[test]
+    fn rejects_ambiguous_capture_and_instance_prefixes() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let store = super::Store::open(temporary.path()).expect("the test can open a store");
+        store
+            .connection
+            .execute_batch(
+                "INSERT INTO captures(
+                     id, created_at_ms, request_key, request_json, rustc_release, rustc_commit,
+                     llvm_version, target, profile
+                 ) VALUES
+                     ('cap_00000000000000000000000000000000', 0, 'a', '{}', '', '', '', '', ''),
+                     ('cap_0fffffffffffffffffffffffffffffff', 0, 'b', '{}', '', '', '', '', '');
+                 INSERT INTO instances(id, capture_id, definition, display_name, has_body) VALUES
+                     ('ins_00000000000000000000000000000000',
+                      'cap_00000000000000000000000000000000', '', '', 0),
+                     ('ins_0fffffffffffffffffffffffffffffff',
+                      'cap_0fffffffffffffffffffffffffffffff', '', '', 0);",
+            )
+            .expect("the test can insert colliding IDs");
+
+        let capture_prefix = "cap_0"
+            .parse::<CaptureId>()
+            .expect("the capture prefix is valid");
+        let instance_prefix = "ins_0"
+            .parse::<InstanceId>()
+            .expect("the instance prefix is valid");
+
+        assert!(matches!(
+            store.resolve_capture(&capture_prefix),
+            Err(Error::AmbiguousIdentifier {
+                kind: "capture",
+                ..
+            })
+        ));
+        assert!(matches!(
+            store.resolve_instance(&instance_prefix),
+            Err(Error::AmbiguousIdentifier {
+                kind: "instance",
+                ..
+            })
+        ));
     }
 }

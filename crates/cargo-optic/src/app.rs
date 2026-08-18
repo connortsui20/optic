@@ -13,7 +13,8 @@ use cargo_ir::{BuildRequest, CaptureOutcome};
 use crate::source::{SourceBaseline, find_item};
 use crate::store::Store;
 use crate::{
-    BuildSpec, CachePolicy, CaptureId, CaptureSummary, FindResult, InstanceId, Result, ShowView,
+    BuildSpec, CachePolicy, CaptureId, CaptureSummary, CompilerOutput, FindResult, InstanceId,
+    Result, ShowView,
 };
 
 /// Product workflows for one Cargo workspace and its `.optic` store.
@@ -118,17 +119,25 @@ impl Application {
         self.store.find(capture_id, query)
     }
 
-    /// Loads exact LLVM bodies and optional captured source for one instance.
+    pub(crate) fn unique_capture_prefix(&self, capture_id: &CaptureId) -> Result<CaptureId> {
+        self.store.unique_capture_prefix(capture_id)
+    }
+
+    pub(crate) fn unique_instance_prefix(&self, instance_id: &InstanceId) -> Result<InstanceId> {
+        self.store.unique_instance_prefix(instance_id)
+    }
+
+    /// Loads one compiler output and optional captured source for one instance.
     pub fn show(
         &self,
-        capture_id: &CaptureId,
         instance_id: &InstanceId,
+        output: CompilerOutput,
         include_source: bool,
     ) -> Result<ShowView> {
-        let mut view = self.store.show(capture_id, instance_id)?;
+        let mut view = self.store.show(instance_id, output)?;
 
         if include_source {
-            let sources = self.store.sources(capture_id)?;
+            let sources = self.store.sources(&view.capture_id)?;
             view.source = find_item(&view.instance.definition, &sources);
         }
 
