@@ -48,9 +48,8 @@ pub(crate) fn scan(path: &Path) -> Result<Vec<BodyRange>> {
             offset += line.len() as u64;
         }
 
-        let demangled = try_demangle(&symbol)
-            .map(|name| format!("{name:#}"))
-            .unwrap_or_else(|_| symbol.clone());
+        let demangled =
+            try_demangle(&symbol).map_or_else(|_| symbol.clone(), |name| format!("{name:#}"));
         bodies.push(BodyRange {
             raw_symbol: symbol,
             demangled,
@@ -100,7 +99,7 @@ fn global_name(line: &[u8]) -> Option<String> {
     Some(String::from_utf8_lossy(&line[start..end]).into_owned())
 }
 
-fn is_identifier_byte(byte: u8) -> bool {
+const fn is_identifier_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'$' | b'.' | b'_')
 }
 
@@ -149,7 +148,7 @@ mod tests {
         );
         assert_eq!(
             global_name(br#"define void @"name with \22 escape"() {"#),
-            Some(r#"name with \22 escape"#.to_owned())
+            Some(r"name with \22 escape".to_owned())
         );
     }
 

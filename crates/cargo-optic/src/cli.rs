@@ -6,8 +6,10 @@
 
 use std::env;
 use std::ffi::OsString;
+use std::fmt::Write as _;
+use std::io::Write as _;
 use std::io::{self, IsTerminal};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use cargo_ir::CargoTarget;
@@ -16,11 +18,14 @@ use serde::Serialize;
 
 use crate::terminal::{CodeSyntax, Terminal};
 use crate::{
-    Application, BuildSpec, CachePolicy, CaptureId, CaptureSummary, CompilerOutput, FindResult,
-    InstanceId, InstanceSummary, ShowView,
+    Application, BuildSpec, CachePolicy, CaptureId, CaptureSummary, CleanSummary, CompilerOutput,
+    FindResult, InstanceId, InstanceSummary, ShowView,
 };
 
+const MINIMUM_DISPLAY_ID_HEX_DIGITS: usize = 12;
+
 /// Runs the Cargo Optic CLI and returns its process exit code.
+#[must_use]
 pub fn run_cli() -> ExitCode {
     let arguments = normalized_arguments();
     let mut cli = match Cli::try_parse_from(arguments) {
@@ -35,9 +40,10 @@ pub fn run_cli() -> ExitCode {
     let directory = match env::current_dir() {
         Ok(directory) => directory,
         Err(error) => {
-            eprintln!("error: failed to read the current directory: {error}");
-
-            return ExitCode::FAILURE;
+            return print_error(
+                cli.command.format(),
+                &format!("failed to read the current directory: {error}"),
+            );
         }
     };
     if let Some(path) = &mut cli.manifest_path
@@ -45,16 +51,31 @@ pub fn run_cli() -> ExitCode {
     {
         *path = directory.join(&*path);
     }
+    if let Command::Clean { format } = &cli.command {
+        return finish(execute_clean(
+            &directory,
+            cli.manifest_path.as_deref(),
+            *format,
+            cli.color,
+        ));
+    }
     let mut application = match Application::discover(&directory, cli.manifest_path.as_deref()) {
         Ok(application) => application,
         Err(error) => return print_error(cli.command.format(), &error.to_string()),
     };
 
-    match execute(&mut application, cli) {
-        Ok(execution) => {
-            print!("{}", execution.output);
-            ExitCode::from(execution.code)
-        }
+    finish(execute(&mut application, cli))
+}
+
+fn finish(result: Result<Execution, Failure>) -> ExitCode {
+    match result {
+        Ok(execution) => match write_stdout(&execution.output) {
+            Ok(()) => ExitCode::from(execution.code),
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+                ExitCode::from(execution.code)
+            }
+            Err(error) => print_error(Format::Text, &format!("failed to write output: {error}")),
+        },
         Err(failure) => print_error(failure.format, &failure.message),
     }
 }
@@ -99,6 +120,17 @@ enum Command {
 
     /// Lists the completed captures in this workspace.
     Captures {
+        /// Selects plain text or versioned JSON output.
+        #[arg(long, value_enum, default_value_t)]
+        format: Format,
+    },
+
+    /// Removes all stored Optic evidence for this workspace.
+    #[command(after_long_help = concat!(
+        "Example:\n  cargo optic clean\n\n",
+        "This command does not remove the Cargo target directory."
+    ))]
+    Clean {
         /// Selects plain text or versioned JSON output.
         #[arg(long, value_enum, default_value_t)]
         format: Format,
@@ -167,10 +199,11 @@ enum Command {
 }
 
 impl Command {
-    fn format(&self) -> Format {
+    const fn format(&self) -> Format {
         match self {
             Self::Capture { format, .. }
             | Self::Captures { format }
+            | Self::Clean { format }
             | Self::Find { format, .. }
             | Self::Show { format, .. } => *format,
         }
@@ -244,7 +277,7 @@ struct BuildOptions {
 }
 
 impl BuildOptions {
-    fn cache_policy(&self) -> CachePolicy {
+    const fn cache_policy(&self) -> CachePolicy {
         if self.fresh {
             CachePolicy::Refresh
         } else {
@@ -285,7 +318,7 @@ impl BuildOptions {
         }
     }
 
-    fn has_build_selection(&self) -> bool {
+    const fn has_build_selection(&self) -> bool {
         self.package.is_some()
             || self.fresh
             || self.lib
@@ -342,9 +375,91 @@ struct Execution {
     output: String,
 }
 
+#[derive(Serialize)]
+struct SuccessEnvelope<'a, T> {
+    version: u8,
+    ok: bool,
+    result: &'a T,
+}
+
+#[derive(Serialize)]
+struct SelectionEnvelope<'a, T> {
+    version: u8,
+    ok: bool,
+    error: SelectionEnvelopeError<'a, T>,
+}
+
+#[derive(Serialize)]
+struct SelectionEnvelopeError<'a, T> {
+    code: &'static str,
+    message: &'static str,
+    result: &'a T,
+}
+
+#[derive(Serialize)]
+struct OperationErrorEnvelope<'a> {
+    version: u8,
+    ok: bool,
+    error: OperationError<'a>,
+}
+
+#[derive(Serialize)]
+struct OperationError<'a> {
+    code: &'static str,
+    message: &'a str,
+}
+
 struct Failure {
     format: Format,
     message: String,
+}
+
+/// A validated identifier prepared for plain-text output.
+struct DisplayIdentifier {
+    /// The fixed-width or collision-expanded prefix shown to the user.
+    text: String,
+
+    /// The byte length that uniquely identifies the full ASCII identifier.
+    unique_prefix_length: usize,
+}
+
+#[derive(Clone, Copy)]
+enum SelectionFailure {
+    NotFound,
+    Ambiguous,
+}
+
+impl SelectionFailure {
+    const fn code(self) -> &'static str {
+        match self {
+            Self::NotFound => "not_found",
+            Self::Ambiguous => "ambiguous",
+        }
+    }
+}
+
+impl DisplayIdentifier {
+    fn new(full: &str, unique_prefix: &str) -> Self {
+        assert!(
+            full.starts_with(unique_prefix),
+            "full ID must start with its unique prefix, got {full} and {unique_prefix}"
+        );
+        let type_prefix_length = full
+            .find('_')
+            .map(|index| index + 1)
+            .expect("validated IDs contain a type prefix separator");
+        let minimum_length = (type_prefix_length + MINIMUM_DISPLAY_ID_HEX_DIGITS).min(full.len());
+        let display_length = minimum_length.max(unique_prefix.len());
+
+        Self {
+            text: full[..display_length].to_owned(),
+            unique_prefix_length: unique_prefix.len(),
+        }
+    }
+
+    fn full(identifier: &str) -> Self {
+        Self::new(identifier, identifier)
+    }
 }
 
 struct ShowRequest {
@@ -367,6 +482,21 @@ struct ShowRequest {
     color: ColorChoice,
 }
 
+fn execute_clean(
+    directory: &Path,
+    manifest_path: Option<&Path>,
+    format: Format,
+    color: ColorChoice,
+) -> Result<Execution, Failure> {
+    let terminal = Terminal::new(color.enabled(format));
+    let summary = Application::clean(directory, manifest_path).map_err(|error| Failure {
+        format,
+        message: error.to_string(),
+    })?;
+
+    success(format, &summary, clean_text(&summary, &terminal))
+}
+
 fn execute(application: &mut Application, cli: Cli) -> Result<Execution, Failure> {
     let manifest_path = cli.manifest_path;
     let color = cli.color;
@@ -374,7 +504,7 @@ fn execute(application: &mut Application, cli: Cli) -> Result<Execution, Failure
     match cli.command {
         Command::Capture { build, format } => {
             let terminal = Terminal::new(color.enabled(format));
-            eprintln!("Resolving compiler evidence...");
+            write_progress("Resolving compiler evidence...");
             let spec = build.to_spec(manifest_path);
             let summary = application
                 .capture(&spec, build.cache_policy())
@@ -388,11 +518,11 @@ fn execute(application: &mut Application, cli: Cli) -> Result<Execution, Failure
                     message: error.to_string(),
                 })?;
 
-            Ok(success(
+            success(
                 format,
                 &summary,
                 capture_text(&summary, &display_id, &terminal),
-            ))
+            )
         }
         Command::Captures { format } => {
             let terminal = Terminal::new(color.enabled(format));
@@ -409,11 +539,14 @@ fn execute(application: &mut Application, cli: Cli) -> Result<Execution, Failure
                     message: error.to_string(),
                 })?;
 
-            Ok(success(
+            success(
                 format,
                 &captures,
                 captures_text(&captures, &display_ids, &terminal),
-            ))
+            )
+        }
+        Command::Clean { .. } => {
+            unreachable!("clean executes before the application opens its store")
         }
         Command::Find {
             capture,
@@ -432,19 +565,17 @@ fn execute(application: &mut Application, cli: Cli) -> Result<Execution, Failure
                     format,
                     message: error.to_string(),
                 })?;
-            let display_instances =
-                unique_instance_prefixes(application, &result.instances, format).map_err(
-                    |error| Failure {
-                        format,
-                        message: error.to_string(),
-                    },
-                )?;
+            let display_instances = display_instance_ids(application, &result.instances, format)
+                .map_err(|error| Failure {
+                    format,
+                    message: error.to_string(),
+                })?;
 
-            Ok(success(
+            success(
                 format,
                 &result,
                 find_text(&result, &display_capture, &display_instances, &terminal),
-            ))
+            )
         }
         Command::Show {
             query,
@@ -526,11 +657,11 @@ fn execute_show(application: &mut Application, request: ShowRequest) -> Result<E
                 message: error.to_string(),
             })?;
 
-        return Ok(success(
+        return success(
             format,
             &view,
             show_text(&view, &display_capture, &display_instance, &terminal),
-        ));
+        );
     }
 
     let Some(query) = query else {
@@ -558,7 +689,7 @@ fn execute_show(application: &mut Application, request: ShowRequest) -> Result<E
 
         capture
     } else {
-        eprintln!("Resolving compiler evidence...");
+        write_progress("Resolving compiler evidence...");
         application
             .capture(&build.to_spec(manifest_path), build.cache_policy())
             .map_err(|error| Failure {
@@ -576,7 +707,7 @@ fn execute_show(application: &mut Application, request: ShowRequest) -> Result<E
 
     select_and_show(
         application,
-        result,
+        &result,
         output,
         include_source,
         format,
@@ -586,17 +717,17 @@ fn execute_show(application: &mut Application, request: ShowRequest) -> Result<E
 
 fn select_and_show(
     application: &Application,
-    result: FindResult,
+    result: &FindResult,
     output: CompilerOutput,
     include_source: bool,
     format: Format,
     terminal: &Terminal,
 ) -> Result<Execution, Failure> {
     if result.instances.len() != 1 {
-        let code = if result.instances.is_empty() {
-            "not_found"
+        let failure = if result.instances.is_empty() {
+            SelectionFailure::NotFound
         } else {
-            "ambiguous"
+            SelectionFailure::Ambiguous
         };
         let display_capture =
             display_capture_id(application, &result.capture_id, format).map_err(|error| {
@@ -605,14 +736,14 @@ fn select_and_show(
                     message: error.to_string(),
                 }
             })?;
-        let display_instances = unique_instance_prefixes(application, &result.instances, format)
+        let display_instances = display_instance_ids(application, &result.instances, format)
             .map_err(|error| Failure {
                 format,
                 message: error.to_string(),
             })?;
         let text = selection_text(
-            &result,
-            code,
+            result,
+            failure,
             &display_capture,
             &display_instances,
             output,
@@ -620,7 +751,7 @@ fn select_and_show(
             terminal,
         );
 
-        return Ok(selection(format, &result, code, text));
+        return selection(format, result, failure, text);
     }
 
     let instance = &result.instances[0];
@@ -641,18 +772,18 @@ fn select_and_show(
             message: error.to_string(),
         })?;
 
-    Ok(success(
+    success(
         format,
         &view,
         show_text(&view, &display_capture, &display_instance, terminal),
-    ))
+    )
 }
 
-fn unique_instance_prefixes(
+fn display_instance_ids(
     application: &Application,
     instances: &[InstanceSummary],
     format: Format,
-) -> crate::Result<Vec<InstanceId>> {
+) -> crate::Result<Vec<DisplayIdentifier>> {
     instances
         .iter()
         .map(|instance| display_instance_id(application, &instance.id, format))
@@ -663,10 +794,17 @@ fn display_capture_id(
     application: &Application,
     capture_id: &CaptureId,
     format: Format,
-) -> crate::Result<CaptureId> {
+) -> crate::Result<DisplayIdentifier> {
     match format {
-        Format::Text => application.unique_capture_prefix(capture_id),
-        Format::Json => Ok(capture_id.clone()),
+        Format::Text => {
+            let unique_prefix = application.unique_capture_prefix(capture_id)?;
+
+            Ok(DisplayIdentifier::new(
+                capture_id.as_str(),
+                unique_prefix.as_str(),
+            ))
+        }
+        Format::Json => Ok(DisplayIdentifier::full(capture_id.as_str())),
     }
 }
 
@@ -674,80 +812,126 @@ fn display_instance_id(
     application: &Application,
     instance_id: &InstanceId,
     format: Format,
-) -> crate::Result<InstanceId> {
+) -> crate::Result<DisplayIdentifier> {
     match format {
-        Format::Text => application.unique_instance_prefix(instance_id),
-        Format::Json => Ok(instance_id.clone()),
+        Format::Text => {
+            let unique_prefix = application.unique_instance_prefix(instance_id)?;
+
+            Ok(DisplayIdentifier::new(
+                instance_id.as_str(),
+                unique_prefix.as_str(),
+            ))
+        }
+        Format::Json => Ok(DisplayIdentifier::full(instance_id.as_str())),
     }
 }
 
-fn success<T: Serialize>(format: Format, result: &T, text: String) -> Execution {
+fn success<T: Serialize>(format: Format, result: &T, text: String) -> Result<Execution, Failure> {
     let output = match format {
         Format::Text => text,
         Format::Json => {
-            serde_json::to_string_pretty(&serde_json::json!({
-                "version": 1,
-                "ok": true,
-                "result": result,
-            }))
-            .expect("serializable application views produce JSON")
-                + "\n"
+            let envelope = SuccessEnvelope {
+                version: 1,
+                ok: true,
+                result,
+            };
+
+            serde_json::to_string_pretty(&envelope).map_err(|error| Failure {
+                format,
+                message: format!("failed to encode JSON output: {error}"),
+            })? + "\n"
         }
     };
 
-    Execution { code: 0, output }
+    Ok(Execution { code: 0, output })
 }
 
-fn selection<T: Serialize>(format: Format, result: &T, code: &str, text: String) -> Execution {
+fn selection<T: Serialize>(
+    format: Format,
+    result: &T,
+    failure: SelectionFailure,
+    text: String,
+) -> Result<Execution, Failure> {
     let output = match format {
         Format::Text => text,
         Format::Json => {
-            serde_json::to_string_pretty(&serde_json::json!({
-                "version": 1,
-                "ok": false,
-                "error": {
-                    "code": code,
-                    "message": "the query must match exactly one compiler instance",
-                    "result": result,
+            let envelope = SelectionEnvelope {
+                version: 1,
+                ok: false,
+                error: SelectionEnvelopeError {
+                    code: failure.code(),
+                    message: "the query must match exactly one compiler instance",
+                    result,
                 },
-            }))
-            .expect("serializable selection results produce JSON")
-                + "\n"
+            };
+
+            serde_json::to_string_pretty(&envelope).map_err(|error| Failure {
+                format,
+                message: format!("failed to encode JSON output: {error}"),
+            })? + "\n"
         }
     };
 
-    Execution { code: 2, output }
+    Ok(Execution { code: 2, output })
 }
 
 fn print_error(format: Format, message: &str) -> ExitCode {
-    match format {
-        Format::Text => eprintln!("error: {message}"),
-        Format::Json => println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "version": 1,
-                "ok": false,
-                "error": {
-                    "code": "operation_failed",
-                    "message": message,
+    let _ = match format {
+        Format::Text => write_stderr(&format!("error: {message}\n")),
+        Format::Json => {
+            let envelope = OperationErrorEnvelope {
+                version: 1,
+                ok: false,
+                error: OperationError {
+                    code: "operation_failed",
+                    message,
                 },
-            }))
-            .expect("static error envelopes produce JSON")
-        ),
-    }
+            };
+            let output = serde_json::to_string_pretty(&envelope)
+                .expect("operation error envelopes contain only strings and integers");
+
+            write_stdout(&format!("{output}\n"))
+        }
+    };
 
     ExitCode::FAILURE
 }
 
-fn capture_text(summary: &CaptureSummary, display_id: &CaptureId, terminal: &Terminal) -> String {
+fn write_progress(message: &str) {
+    let _ = write_stderr(&format!("{message}\n"));
+}
+
+fn write_stdout(output: &str) -> io::Result<()> {
+    io::stdout().lock().write_all(output.as_bytes())
+}
+
+fn write_stderr(output: &str) -> io::Result<()> {
+    io::stderr().lock().write_all(output.as_bytes())
+}
+
+fn capture_text(
+    summary: &CaptureSummary,
+    display_id: &DisplayIdentifier,
+    terminal: &Terminal,
+) -> String {
     let status = if summary.reused { "reused" } else { "captured" };
-    let find = format!("cargo optic find --capture {display_id} QUERY");
-    let show = format!("cargo optic show QUERY --capture {display_id}");
+    let find = terminal.command_with_identifier(
+        "cargo optic find --capture ",
+        &display_id.text,
+        display_id.unique_prefix_length,
+        " QUERY",
+    );
+    let show = terminal.command_with_identifier(
+        "cargo optic show QUERY --capture ",
+        &display_id.text,
+        display_id.unique_prefix_length,
+        "",
+    );
 
     format!(
         "{} {}\n{}{}\n{}{}\n{}{}\n{}{}\n\n{}\n  {}\n  {}\n",
         terminal.heading("Capture"),
-        terminal.identifier(&display_id.to_string()),
+        terminal.identifier(&display_id.text, display_id.unique_prefix_length),
         terminal.label("  Status     "),
         terminal.positive(status),
         terminal.label("  Toolchain  "),
@@ -760,14 +944,30 @@ fn capture_text(summary: &CaptureSummary, display_id: &CaptureId, terminal: &Ter
         terminal.label("  Instances  "),
         summary.instance_count,
         terminal.heading("Next commands"),
-        terminal.command(&find),
-        terminal.command(&show),
+        find,
+        show,
     )
+}
+
+fn clean_text(summary: &CleanSummary, terminal: &Terminal) -> String {
+    if summary.removed {
+        format!(
+            "{} at {}.\n",
+            terminal.positive("Removed the Optic cache"),
+            summary.path.display(),
+        )
+    } else {
+        format!(
+            "{} at {}.\n",
+            terminal.warning("No Optic cache exists"),
+            summary.path.display(),
+        )
+    }
 }
 
 fn captures_text(
     captures: &[CaptureSummary],
-    display_ids: &[CaptureId],
+    display_ids: &[DisplayIdentifier],
     terminal: &Terminal,
 ) -> String {
     if captures.is_empty() {
@@ -776,13 +976,15 @@ fn captures_text(
 
     let mut output = format!("{}\n", terminal.heading("Captures"));
     for (capture, display_id) in captures.iter().zip(display_ids) {
-        output.push_str(&format!(
-            "{}  {}  {}  {} instances\n",
-            terminal.identifier(&display_id.to_string()),
+        writeln!(
+            output,
+            "{}  {}  {}  {} instances",
+            terminal.identifier(&display_id.text, display_id.unique_prefix_length),
             capture.rustc_release,
             capture.target,
             capture.instance_count,
-        ));
+        )
+        .expect("writing capture text to a String cannot fail");
     }
 
     output
@@ -790,29 +992,31 @@ fn captures_text(
 
 fn find_text(
     result: &FindResult,
-    display_capture: &CaptureId,
-    display_instances: &[InstanceId],
+    display_capture: &DisplayIdentifier,
+    display_instances: &[DisplayIdentifier],
     terminal: &Terminal,
 ) -> String {
     if result.instances.is_empty() {
         return format!(
             "{} {}.\n",
             terminal.warning("No matching instances in"),
-            terminal.identifier(&display_capture.to_string()),
+            terminal.identifier(&display_capture.text, display_capture.unique_prefix_length),
         );
     }
 
     let mut output = format!(
         "{} {}\n",
         terminal.heading("Capture"),
-        terminal.identifier(&display_capture.to_string()),
+        terminal.identifier(&display_capture.text, display_capture.unique_prefix_length),
     );
     for (instance, display_id) in result.instances.iter().zip(display_instances) {
         output.push_str(&instance_text(instance, display_id, terminal));
-        output.push_str(&format!(
-            "  {}\n",
-            terminal.command(&show_command(display_id, CompilerOutput::default(), false))
-        ));
+        writeln!(
+            output,
+            "  {}",
+            show_command(terminal, display_id, CompilerOutput::default(), false)
+        )
+        .expect("writing instance text to a String cannot fail");
     }
 
     output
@@ -820,7 +1024,7 @@ fn find_text(
 
 fn instance_text(
     instance: &InstanceSummary,
-    display_id: &InstanceId,
+    display_id: &DisplayIdentifier,
     terminal: &Terminal,
 ) -> String {
     let state = if instance.has_body {
@@ -831,7 +1035,7 @@ fn instance_text(
 
     format!(
         "{}  {}  {}\n",
-        terminal.identifier(&display_id.to_string()),
+        terminal.identifier(&display_id.text, display_id.unique_prefix_length),
         state,
         terminal.function(&instance.display_name),
     )
@@ -839,59 +1043,67 @@ fn instance_text(
 
 fn selection_text(
     result: &FindResult,
-    code: &str,
-    display_capture: &CaptureId,
-    display_instances: &[InstanceId],
+    failure: SelectionFailure,
+    display_capture: &DisplayIdentifier,
+    display_instances: &[DisplayIdentifier],
     compiler_output: CompilerOutput,
     include_source: bool,
     terminal: &Terminal,
 ) -> String {
-    let mut output = if code == "not_found" {
-        format!(
+    let mut output = match failure {
+        SelectionFailure::NotFound => format!(
             "{} {}.\n",
             terminal.warning("No matching instances in"),
-            terminal.identifier(&display_capture.to_string()),
-        )
-    } else {
-        format!(
+            terminal.identifier(&display_capture.text, display_capture.unique_prefix_length),
+        ),
+        SelectionFailure::Ambiguous => format!(
             "{} {}\n{}\n",
             terminal.warning("Multiple instances match in capture"),
-            terminal.identifier(&display_capture.to_string()),
+            terminal.identifier(&display_capture.text, display_capture.unique_prefix_length),
             terminal.heading("Run one command"),
-        )
+        ),
     };
     for (instance, display_id) in result.instances.iter().zip(display_instances) {
         output.push_str(&instance_text(instance, display_id, terminal));
-        output.push_str(&format!(
-            "  {}\n",
-            terminal.command(&show_command(display_id, compiler_output, include_source))
-        ));
+        writeln!(
+            output,
+            "  {}",
+            show_command(terminal, display_id, compiler_output, include_source)
+        )
+        .expect("writing selection text to a String cannot fail");
     }
 
     output
 }
 
 fn show_command(
-    instance_id: &InstanceId,
+    terminal: &Terminal,
+    instance_id: &DisplayIdentifier,
     compiler_output: CompilerOutput,
     include_source: bool,
 ) -> String {
-    let mut command = format!("cargo optic show --instance {instance_id}");
+    let mut after = String::new();
 
     if compiler_output != CompilerOutput::default() {
-        command.push_str(&format!(" --output {compiler_output}"));
+        write!(after, " --output {compiler_output}")
+            .expect("writing command text to a String cannot fail");
     }
     if include_source {
-        command.push_str(" --source");
+        after.push_str(" --source");
     }
 
-    command
+    terminal.command_with_identifier(
+        "cargo optic show --instance ",
+        &instance_id.text,
+        instance_id.unique_prefix_length,
+        &after,
+    )
 }
 
 fn show_text(
     view: &ShowView,
-    display_capture: &CaptureId,
-    display_instance: &InstanceId,
+    display_capture: &DisplayIdentifier,
+    display_instance: &DisplayIdentifier,
     terminal: &Terminal,
 ) -> String {
     let state = if view.bodies.is_empty() {
@@ -904,9 +1116,12 @@ fn show_text(
         terminal.heading("Function"),
         terminal.function(&view.instance.display_name),
         terminal.label("  Instance  "),
-        terminal.identifier(&display_instance.to_string()),
+        terminal.identifier(
+            &display_instance.text,
+            display_instance.unique_prefix_length,
+        ),
         terminal.label("  Capture   "),
-        terminal.identifier(&display_capture.to_string()),
+        terminal.identifier(&display_capture.text, display_capture.unique_prefix_length),
         terminal.label("  Output    "),
         view.output.title(),
         terminal.label("  State     "),
@@ -962,4 +1177,44 @@ fn normalized_arguments() -> Vec<OsString> {
     }
 
     arguments
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DisplayIdentifier;
+
+    #[test]
+    fn displays_twelve_hexadecimal_characters() {
+        let identifier = DisplayIdentifier::new("cap_0123456789abcdef0123456789abcdef", "cap_0");
+
+        assert_eq!(identifier.text, "cap_0123456789ab");
+        assert_eq!(identifier.unique_prefix_length, 5);
+    }
+
+    #[test]
+    fn expands_to_include_a_long_unique_prefix() {
+        let identifier =
+            DisplayIdentifier::new("ins_0123456789abcdef0123456789abcdef", "ins_0123456789abc");
+
+        assert_eq!(identifier.text, "ins_0123456789abc");
+        assert_eq!(identifier.unique_prefix_length, 17);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reports_non_utf8_json_paths_as_errors() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        use std::path::PathBuf;
+
+        use super::{Format, success};
+        use crate::CleanSummary;
+
+        let summary = CleanSummary {
+            path: PathBuf::from(OsString::from_vec(vec![0xff])),
+            removed: true,
+        };
+
+        assert!(success(Format::Json, &summary, String::new()).is_err());
+    }
 }

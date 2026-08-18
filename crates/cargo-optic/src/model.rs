@@ -10,7 +10,7 @@ use cargo_ir::CargoTarget;
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
-use crate::{CaptureId, InstanceId};
+use crate::{CaptureId, InstanceId, LlvmStage};
 
 /// Controls whether a capture can use matching persistent evidence.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -38,10 +38,10 @@ pub enum CompilerOutput {
 }
 
 impl CompilerOutput {
-    pub(crate) const fn stage(self) -> &'static str {
+    pub(crate) const fn stage(self) -> LlvmStage {
         match self {
-            Self::Llvm => "llvm-optimized",
-            Self::LlvmPreOpt => "llvm-pre-optimization",
+            Self::Llvm => LlvmStage::Optimized,
+            Self::LlvmPreOpt => LlvmStage::PreOptimization,
         }
     }
 
@@ -128,6 +128,16 @@ pub struct CaptureSummary {
     pub instance_count: usize,
 }
 
+/// The result of removing the Optic cache for one workspace.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CleanSummary {
+    /// The cache path selected from Cargo metadata.
+    pub path: PathBuf,
+
+    /// Whether the cache existed and was removed.
+    pub removed: bool,
+}
+
 /// One concrete compiler instance returned by lookup.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InstanceSummary {
@@ -158,7 +168,7 @@ pub struct FindResult {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BodyView {
     /// The captured compiler stage.
-    pub stage: String,
+    pub stage: LlvmStage,
 
     /// The compiler-owned module name.
     pub module: String,

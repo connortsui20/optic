@@ -36,6 +36,11 @@ pub struct Toolchain {
 }
 
 /// Inspects the active rustc and validates the first-release toolchain contract.
+///
+/// # Errors
+///
+/// Returns an error if rustc fails, the active compiler is not nightly, or its matching
+/// `llvm-dis` executable is absent.
 pub fn inspect_toolchain() -> Result<Toolchain> {
     let verbose = run_rustc(["-vV"])?;
     let release = field(&verbose, "release")?.to_owned();

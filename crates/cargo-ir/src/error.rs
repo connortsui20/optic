@@ -67,6 +67,13 @@ pub enum Error {
         source: io::Error,
     },
 
+    /// The analysis directory contains files from an earlier operation.
+    #[error("analysis directory must be empty, got {path}")]
+    AnalysisDirectoryNotEmpty {
+        /// The directory that contains existing files.
+        path: PathBuf,
+    },
+
     /// An LLVM module was not structurally complete.
     #[error("invalid LLVM IR in {path}: {message}")]
     InvalidLlvm {

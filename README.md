@@ -17,7 +17,7 @@ Install a nightly toolchain and its matching LLVM tools:
 
 ```console
 rustup toolchain install nightly --component llvm-tools
-cargo install --path crates/cargo-optic
+cargo +stable install --locked --path crates/cargo-optic
 ```
 
 Cargo Optic uses the active compiler. Use `cargo +nightly optic` to select the installed nightly
@@ -25,7 +25,7 @@ toolchain.
 
 ## Try the included example
 
-Run these commands from the Optic repository. They work in Fish.
+Run these commands from the Optic repository. They work in Fish, Bash, and Zsh.
 
 ```console
 cd crates/cargo-optic/tests/fixtures/generic
@@ -34,6 +34,9 @@ cargo +nightly optic show optic_mvp_kernel::outlined_sum -p optic-mvp-app --bin 
 
 The example creates `u32` and `u64` instances of the same generic function. Cargo Optic lists both
 instances and prints a complete `show` command for each one. Copy either `show` command.
+
+See the [complete fixture guide](crates/cargo-optic/tests/fixtures/generic/example.md) to compare
+evidence before and after a source change.
 
 ## Inspect a function
 
@@ -81,11 +84,25 @@ command after each instance. You do not need to copy an ID into a new command.
 Plain `capture` output prints `find` and `show` command templates for the new capture. Replace
 `QUERY` with a definition path.
 
-Plain output shows the shortest unique prefix for each capture and instance ID. JSON output keeps
-the full IDs. You can use any longer unique prefix. Cargo Optic reports an error for a collision.
+Plain output shows at least 12 hexadecimal characters for each ID. Color highlights the shortest
+unique prefix and dims the remaining characters. JSON output keeps the full IDs.
+
+Each displayed ID is a valid prefix. Cargo Optic reports an error if a shorter prefix matches more
+than one stored ID.
 
 Use `--fresh` with `capture` or a build-based `show` command to create new evidence. This option
 does not use a matching completed capture.
+
+## Remove stored evidence
+
+Run this command from the Cargo workspace that you want to clean:
+
+```console
+cargo +nightly optic clean
+```
+
+The command removes only `.optic` in the workspace. It does not remove the Cargo `target`
+directory. The command succeeds when the Optic cache does not exist.
 
 ## Persistent state
 

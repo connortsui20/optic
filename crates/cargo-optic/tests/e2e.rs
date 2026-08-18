@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use rusqlite::Connection;
 use serde_json::Value;
 use tempfile::TempDir;
 use walkdir::{DirEntry, WalkDir};
@@ -78,8 +79,9 @@ fn captures_finds_and_shows_concrete_generic_instances() {
     let capture = string(&refreshed, "/result/id");
     assert_ne!(capture, changed_capture);
     assert_eq!(refreshed["result"]["reused"], false);
-    let capture_prefix =
-        shortest_unique_prefix(capture, &[first_capture, changed_capture, capture]);
+    let capture_ids = [first_capture, changed_capture, capture];
+    let capture_prefix = shortest_unique_prefix(capture, &capture_ids);
+    let capture_display = displayed_id(capture, &capture_ids);
 
     let ambiguous = fixture.run([
         "show",
@@ -148,6 +150,7 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         .expect("the fixture creates a u64 instance");
     let instance = instance["id"].as_str().expect("instances have string IDs");
     let instance_prefix = shortest_unique_prefix(instance, &instance_id_refs);
+    let instance_display = displayed_id(instance, &instance_id_refs);
 
     let found_text = fixture.run([
         "find",
@@ -157,16 +160,16 @@ fn captures_finds_and_shows_concrete_generic_instances() {
     ]);
     assert_success(&found_text);
     let found_text = String::from_utf8_lossy(&found_text.stdout);
-    assert!(found_text.contains(&format!("cargo optic show --instance {instance_prefix}")));
+    assert!(found_text.contains(&format!("cargo optic show --instance {instance_display}")));
     assert!(ambiguous_text.contains(&format!(
-        "cargo optic show --instance {instance_prefix} --output llvm-pre-opt --source"
+        "cargo optic show --instance {instance_display} --output llvm-pre-opt --source"
     )));
 
     let plain = fixture.run(["show", "--instance", instance_prefix]);
     assert_success(&plain);
     let plain = String::from_utf8_lossy(&plain.stdout);
-    assert!(plain.contains(&format!("  Capture   {capture_prefix}")));
-    assert!(plain.contains(&format!("  Instance  {instance_prefix}")));
+    assert!(plain.contains(&format!("  Capture   {capture_display}")));
+    assert!(plain.contains(&format!("  Instance  {instance_display}")));
     assert!(plain.contains("LLVM (optimized)  "));
     assert!(!plain.contains("llvm-pre-opt"));
     assert!(!plain.contains("Source  "));
@@ -185,6 +188,11 @@ fn captures_finds_and_shows_concrete_generic_instances() {
     assert!(colored.contains("\x1b["));
     assert!(colored.contains("\x1b[38;2;"));
     assert!(colored.contains("Source  "));
+    assert!(colored.contains(&format!("\x1b[1m\x1b[93m{instance_prefix}\x1b[0m")));
+    assert!(colored.contains(&format!(
+        "\x1b[90m{}\x1b[0m",
+        &instance_display[instance_prefix.len()..]
+    )));
 
     let shown = fixture.run([
         "show",
@@ -212,7 +220,6 @@ fn captures_finds_and_shows_concrete_generic_instances() {
             .as_str()
             .is_some_and(|text| text.starts_with("define "))
     }));
-
     let pre_optimization = fixture.run([
         "show",
         "--instance",
@@ -283,6 +290,23 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         3
     );
     assert!(fixture.staging_is_empty());
+
+    let catalog = fixture.root.join(".optic/catalog.sqlite");
+    let connection = Connection::open(catalog).expect("the test can open the evidence catalog");
+    connection
+        .pragma_update(None, "user_version", 999)
+        .expect("the test can create an unsupported store version");
+    drop(connection);
+
+    let clean = fixture.run(["clean", "--format", "json"]);
+    assert_success(&clean);
+    assert_eq!(json(&clean)["result"]["removed"], true);
+    assert!(!fixture.root.join(".optic").exists());
+    assert!(fixture.root.join("target").is_dir());
+
+    let clean_again = fixture.run(["clean", "--format", "json"]);
+    assert_success(&clean_again);
+    assert_eq!(json(&clean_again)["result"]["removed"], false);
 }
 
 struct Fixture {
@@ -315,7 +339,7 @@ impl Fixture {
             .arg("optic")
             .args(arguments)
             .current_dir(&self.root)
-            .env("RUSTUP_TOOLCHAIN", "nightly-aarch64-apple-darwin")
+            .env("RUSTUP_TOOLCHAIN", "nightly")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -358,7 +382,11 @@ fn copy_tree(source: &Path, destination: &Path) {
 }
 
 fn committed_fixture_entry(entry: &DirEntry) -> bool {
-    entry.depth() == 0 || !matches!(entry.file_name().to_str(), Some(".optic" | "target"))
+    entry.depth() == 0
+        || !matches!(
+            entry.file_name().to_str(),
+            Some(".optic" | ".optic.lock" | "target")
+        )
 }
 
 #[track_caller]
@@ -371,10 +399,12 @@ fn assert_success(output: &Output) {
     );
 }
 
+#[track_caller]
 fn json(output: &Output) -> Value {
-    serde_json::from_slice(&output.stdout).expect("successful JSON output is valid")
+    serde_json::from_slice(&output.stdout).expect("command JSON output is valid")
 }
 
+#[track_caller]
 fn string<'a>(value: &'a Value, pointer: &str) -> &'a str {
     value
         .pointer(pointer)
@@ -382,6 +412,7 @@ fn string<'a>(value: &'a Value, pointer: &str) -> &'a str {
         .expect("the JSON pointer selects a string")
 }
 
+#[track_caller]
 fn stored_instance_ids(fixture: &Fixture, capture_id: &str) -> Vec<String> {
     let output = fixture.run(["find", "--capture", capture_id, "", "--format", "json"]);
     assert_success(&output);
@@ -400,6 +431,7 @@ fn stored_instance_ids(fixture: &Fixture, capture_id: &str) -> Vec<String> {
         .collect()
 }
 
+#[track_caller]
 fn shortest_unique_prefix<'a>(identifier: &'a str, candidates: &[&str]) -> &'a str {
     for length in 5..identifier.len() {
         let prefix = &identifier[..length];
@@ -414,4 +446,17 @@ fn shortest_unique_prefix<'a>(identifier: &'a str, candidates: &[&str]) -> &'a s
     }
 
     identifier
+}
+
+#[track_caller]
+fn displayed_id<'a>(identifier: &'a str, candidates: &[&str]) -> &'a str {
+    let unique_prefix = shortest_unique_prefix(identifier, candidates);
+    let type_prefix_length = identifier
+        .find('_')
+        .map(|index| index + 1)
+        .expect("fixture IDs contain a type prefix separator");
+    let minimum_length = (type_prefix_length + 12).min(identifier.len());
+    let display_length = minimum_length.max(unique_prefix.len());
+
+    &identifier[..display_length]
 }

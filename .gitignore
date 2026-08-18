@@ -1,6 +1,7 @@
 /target
 /scratch
 /.optic
+/.optic.lock
 
 *.ll
 *.s

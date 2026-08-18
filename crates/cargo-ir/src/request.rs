@@ -1,7 +1,7 @@
 //! Describes one Cargo analysis request.
 //!
 //! [`BuildRequest`] contains only the target selection that `cargo rustc` understands. The caller
-//! owns persistence and supplies a stable analysis directory for rustc temporaries.
+//! owns persistence and supplies an empty analysis directory for rustc temporaries.
 
 use std::path::PathBuf;
 
@@ -64,5 +64,7 @@ pub struct BuildRequest {
     pub frozen: bool,
 
     /// The directory in which rustc writes mutable analysis artifacts.
+    ///
+    /// This directory **must** be empty when the capture starts.
     pub analysis_directory: PathBuf,
 }

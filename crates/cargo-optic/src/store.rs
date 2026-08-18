@@ -1,6 +1,6 @@
 //! Persists immutable captures and serves byte-range queries.
 //!
-//! [`Store`] owns SQLite schema details and content-addressed blobs. Callers see opaque IDs and
+//! [`Store`] owns `SQLite` schema details and content-addressed blobs. Callers see opaque IDs and
 //! typed views. A capture becomes visible only after every blob is durable and one catalog
 //! transaction commits.
 
@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use cargo_ir::{EvidenceBundle, Toolchain};
 use fs2::FileExt;
+use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::source::{SourceBaseline, StoredSource};
@@ -20,7 +21,7 @@ use crate::{
     InstanceSummary, Result, ShowView,
 };
 
-const STORE_VERSION: u32 = 2;
+const STORE_VERSION: u32 = 3;
 
 pub(crate) struct Store {
     root: PathBuf,
@@ -30,7 +31,26 @@ pub(crate) struct Store {
 }
 
 pub(crate) struct FileLock {
+    /// The operating system releases the lock when this file is dropped.
     _file: File,
+}
+
+/// Prevents cache removal while a command uses the workspace store.
+pub(crate) fn lock_workspace_shared(workspace_root: &Path) -> Result<FileLock> {
+    let path = workspace_root.join(".optic.lock");
+    let file = open_lock_file(&path)?;
+    FileExt::lock_shared(&file).map_err(|source| Error::filesystem("lock", &path, source))?;
+
+    Ok(FileLock { _file: file })
+}
+
+/// Waits for active commands and prevents new commands from opening the workspace store.
+pub(crate) fn lock_workspace_exclusive(workspace_root: &Path) -> Result<FileLock> {
+    let path = workspace_root.join(".optic.lock");
+    let file = open_lock_file(&path)?;
+    FileExt::lock_exclusive(&file).map_err(|source| Error::filesystem("lock", &path, source))?;
+
+    Ok(FileLock { _file: file })
 }
 
 impl Store {
@@ -45,11 +65,11 @@ impl Store {
         }
 
         let _schema_lock = lock_file(&locks.join("schema.lock"))?;
-        let connection = Connection::open(root.join("catalog.sqlite"))?;
+        let mut connection = Connection::open(root.join("catalog.sqlite"))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "foreign_keys", true)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
-        initialize_schema(&connection)?;
+        initialize_schema(&mut connection)?;
 
         Ok(Self {
             root,
@@ -75,7 +95,7 @@ impl Store {
             .query_row(
                 "SELECT capture_id FROM capture_cache WHERE request_key = ?1",
                 [request_key],
-                |row| row.get::<_, String>(0),
+                |row| row.get::<_, CaptureId>(0),
             )
             .optional()?;
 
@@ -86,7 +106,7 @@ impl Store {
 
     pub(crate) fn publish(
         &mut self,
-        capture_id: CaptureId,
+        capture_id: &CaptureId,
         request_key: &str,
         spec: &BuildSpec,
         bundle: &EvidenceBundle,
@@ -102,7 +122,7 @@ impl Store {
             let text_blob = self.publish_blob(&module.text_path)?;
             modules.push(PublishedModule {
                 name: module.name.clone(),
-                stage: module.stage.clone(),
+                stage: module.stage.as_str().to_owned(),
                 bitcode_blob,
                 text_blob,
                 bodies: module.bodies.clone(),
@@ -118,16 +138,16 @@ impl Store {
         let transaction = self.connection.transaction()?;
         insert_capture(
             &transaction,
-            &capture_id,
+            capture_id,
             request_key,
             &request_json,
             &bundle.toolchain,
             target,
             created_at_ms,
         )?;
-        let body_index = insert_modules(&transaction, &capture_id, &modules)?;
-        insert_instances(&transaction, &capture_id, &bundle.mono_items, &body_index)?;
-        insert_sources(&transaction, &capture_id, &published_sources)?;
+        let body_index = insert_modules(&transaction, capture_id, &modules)?;
+        insert_instances(&transaction, capture_id, &bundle.mono_items, &body_index)?;
+        insert_sources(&transaction, capture_id, &published_sources)?;
         transaction.execute(
             "INSERT INTO capture_cache(request_key, capture_id) VALUES (?1, ?2)
              ON CONFLICT(request_key) DO UPDATE SET capture_id = excluded.capture_id",
@@ -135,7 +155,7 @@ impl Store {
         )?;
         transaction.commit()?;
 
-        self.capture_summary(capture_id.as_str(), false)
+        self.capture_summary(capture_id, false)
     }
 
     pub(crate) fn captures(&self) -> Result<Vec<CaptureSummary>> {
@@ -179,14 +199,9 @@ impl Store {
 
     pub(crate) fn find(&self, capture_prefix: &CaptureId, query: &str) -> Result<FindResult> {
         let capture_id = self.resolve_capture(capture_prefix)?;
-        let exact =
-            self.query_instances(&capture_id, "definition = ?2 OR display_name = ?2", query)?;
+        let exact = self.query_instances(&capture_id, InstanceMatch::Exact, query)?;
         let instances = if exact.is_empty() {
-            self.query_instances(
-                &capture_id,
-                "instr(definition, ?2) > 0 OR instr(display_name, ?2) > 0",
-                query,
-            )?
+            self.query_instances(&capture_id, InstanceMatch::Substring, query)?
         } else {
             exact
         };
@@ -210,7 +225,7 @@ impl Store {
             instance_from_row,
         )?;
         let mut statement = self.connection.prepare(
-            "SELECT modules.stage, modules.name, bodies.symbol, modules.text_blob,
+            "SELECT modules.name, bodies.symbol, modules.text_blob,
                     bodies.start, bodies.end
              FROM bodies
              JOIN modules ON modules.id = bodies.module_id
@@ -218,7 +233,7 @@ impl Store {
              ORDER BY modules.name, bodies.start",
         )?;
         let rows = statement.query_map(
-            params![resolved.instance_id.as_str(), output.stage()],
+            params![resolved.instance_id.as_str(), output.stage().as_str()],
             stored_body_from_row,
         )?;
         let mut bodies = Vec::new();
@@ -227,7 +242,7 @@ impl Store {
             let body = row?;
             let text = self.read_blob_range(&body.text_blob, body.start, body.end)?;
             bodies.push(BodyView {
-                stage: body.stage,
+                stage: output.stage(),
                 module: body.module,
                 symbol: body.symbol,
                 text,
@@ -281,10 +296,10 @@ impl Store {
 
         match fs::rename(&temporary, &destination) {
             Ok(()) => {}
-            Err(error) if destination.is_file() => {
+            // Retain a completed blob if another process published the same content first.
+            Err(_source) if destination.is_file() => {
                 fs::remove_file(&temporary)
                     .map_err(|source| Error::filesystem("remove", &temporary, source))?;
-                let _ = error;
             }
             Err(error) => return Err(Error::filesystem("publish", &destination, error)),
         }
@@ -297,20 +312,18 @@ impl Store {
         self.blobs.join(prefix).join(digest)
     }
 
-    fn capture_summary(&self, capture_id: &str, reused: bool) -> Result<CaptureSummary> {
+    fn capture_summary(&self, capture_id: &CaptureId, reused: bool) -> Result<CaptureSummary> {
         self.connection
             .query_row(
                 "SELECT id, created_at_ms, rustc_release, llvm_version, target,
                         (SELECT COUNT(*) FROM instances WHERE capture_id = captures.id)
                  FROM captures WHERE id = ?1",
-                [capture_id],
+                [capture_id.as_str()],
                 |row| summary_from_row(row, reused),
             )
             .optional()?
             .ok_or_else(|| Error::UnknownCapture {
-                capture_id: capture_id
-                    .parse()
-                    .expect("stored capture IDs are validated on insert"),
+                capture_id: capture_id.clone(),
             })
     }
 
@@ -323,7 +336,7 @@ impl Store {
         let upper_bound = hexadecimal_prefix_upper_bound(prefix.as_str());
         let candidates = statement
             .query_map(params![prefix.as_str(), upper_bound], |row| {
-                row.get::<_, String>(0)
+                row.get::<_, CaptureId>(0)
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
@@ -331,14 +344,19 @@ impl Store {
             [] => Err(Error::UnknownCapture {
                 capture_id: prefix.clone(),
             }),
-            [capture_id] => Ok(capture_id
-                .parse()
-                .expect("stored capture IDs are validated on insert")),
-            _ => Err(ambiguous_identifier(
-                "capture",
-                prefix.as_str(),
-                &candidates,
-            )),
+            [capture_id] => Ok(capture_id.clone()),
+            _ => {
+                let capture_ids = candidates
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+
+                Err(ambiguous_identifier(
+                    "capture",
+                    prefix.as_str(),
+                    &capture_ids,
+                ))
+            }
         }
     }
 
@@ -351,7 +369,7 @@ impl Store {
         let upper_bound = hexadecimal_prefix_upper_bound(prefix.as_str());
         let candidates = statement
             .query_map(params![prefix.as_str(), upper_bound], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((row.get::<_, CaptureId>(0)?, row.get::<_, InstanceId>(1)?))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
@@ -360,17 +378,13 @@ impl Store {
                 instance_id: prefix.clone(),
             }),
             [(capture_id, instance_id)] => Ok(ResolvedInstance {
-                capture_id: capture_id
-                    .parse()
-                    .expect("stored capture IDs are validated on insert"),
-                instance_id: instance_id
-                    .parse()
-                    .expect("stored instance IDs are validated on insert"),
+                capture_id: capture_id.clone(),
+                instance_id: instance_id.clone(),
             }),
             _ => {
                 let instance_ids = candidates
                     .iter()
-                    .map(|(_, instance_id)| instance_id.clone())
+                    .map(|(_, instance_id)| instance_id.to_string())
                     .collect::<Vec<_>>();
 
                 Err(ambiguous_identifier(
@@ -399,9 +413,13 @@ impl Store {
     fn query_instances(
         &self,
         capture_id: &CaptureId,
-        predicate: &str,
+        match_kind: InstanceMatch,
         query: &str,
     ) -> Result<Vec<InstanceSummary>> {
+        let predicate = match match_kind {
+            InstanceMatch::Exact => "definition = ?2 OR display_name = ?2",
+            InstanceMatch::Substring => "instr(definition, ?2) > 0 OR instr(display_name, ?2) > 0",
+        };
         let sql = format!(
             "SELECT id, definition, display_name, has_body FROM instances
              WHERE capture_id = ?1 AND ({predicate}) ORDER BY display_name"
@@ -451,7 +469,7 @@ impl Store {
 fn hash_file(path: &Path) -> Result<blake3::Hash> {
     let mut file = File::open(path).map_err(|source| Error::filesystem("open", path, source))?;
     let mut hasher = blake3::Hasher::new();
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024];
 
     loop {
         let length = file
@@ -467,17 +485,20 @@ fn hash_file(path: &Path) -> Result<blake3::Hash> {
 }
 
 fn lock_file(path: &Path) -> Result<FileLock> {
-    let file = OpenOptions::new()
+    let file = open_lock_file(path)?;
+    FileExt::lock_exclusive(&file).map_err(|source| Error::filesystem("lock", path, source))?;
+
+    Ok(FileLock { _file: file })
+}
+
+fn open_lock_file(path: &Path) -> Result<File> {
+    OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
         .open(path)
-        .map_err(|source| Error::filesystem("open", path, source))?;
-    file.lock_exclusive()
-        .map_err(|source| Error::filesystem("lock", path, source))?;
-
-    Ok(FileLock { _file: file })
+        .map_err(|source| Error::filesystem("open", path, source))
 }
 
 fn ambiguous_identifier(kind: &'static str, prefix: &str, candidates: &[String]) -> Error {
@@ -533,7 +554,6 @@ struct IndexedBody {
 }
 
 struct StoredBody {
-    stage: String,
     module: String,
     symbol: String,
     text_blob: String,
@@ -546,13 +566,20 @@ struct ResolvedInstance {
     instance_id: InstanceId,
 }
 
-fn initialize_schema(connection: &Connection) -> Result<()> {
+#[derive(Clone, Copy)]
+enum InstanceMatch {
+    Exact,
+    Substring,
+}
+
+fn initialize_schema(connection: &mut Connection) -> Result<()> {
     let version =
         connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))?;
 
     match version {
         0 => create_schema(connection),
         1 => migrate_schema_v1(connection),
+        2 => migrate_schema_v2(connection),
         STORE_VERSION => Ok(()),
         actual => Err(Error::StoreVersion {
             expected: STORE_VERSION,
@@ -561,10 +588,10 @@ fn initialize_schema(connection: &Connection) -> Result<()> {
     }
 }
 
-fn create_schema(connection: &Connection) -> Result<()> {
-    connection.execute_batch(
-        "BEGIN;
-         CREATE TABLE captures(
+fn create_schema(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction()?;
+    transaction.execute_batch(
+        "CREATE TABLE captures(
              id TEXT PRIMARY KEY,
              created_at_ms INTEGER NOT NULL,
              request_key TEXT NOT NULL,
@@ -591,6 +618,7 @@ fn create_schema(connection: &Connection) -> Result<()> {
              has_body INTEGER NOT NULL
          );
          CREATE INDEX instances_definition ON instances(capture_id, definition);
+         CREATE INDEX instances_display_name ON instances(capture_id, display_name);
          CREATE TABLE bodies(
              id TEXT PRIMARY KEY,
              instance_id TEXT NOT NULL REFERENCES instances(id),
@@ -599,6 +627,7 @@ fn create_schema(connection: &Connection) -> Result<()> {
              start INTEGER NOT NULL,
              end INTEGER NOT NULL
          );
+         CREATE INDEX bodies_instance ON bodies(instance_id);
          CREATE TABLE sources(
              capture_id TEXT NOT NULL REFERENCES captures(id),
              path TEXT NOT NULL,
@@ -608,18 +637,18 @@ fn create_schema(connection: &Connection) -> Result<()> {
          CREATE TABLE capture_cache(
              request_key TEXT PRIMARY KEY,
              capture_id TEXT NOT NULL REFERENCES captures(id)
-         );
-         PRAGMA user_version = 2;
-         COMMIT;",
+         );",
     )?;
+    transaction.pragma_update(None, "user_version", STORE_VERSION)?;
+    transaction.commit()?;
 
     Ok(())
 }
 
-fn migrate_schema_v1(connection: &Connection) -> Result<()> {
-    let transaction = connection.unchecked_transaction()?;
-    let has_capture_cache = table_exists(&transaction, "capture_cache")?;
-    let has_analysis_cache = table_exists(&transaction, "analysis_cache")?;
+fn migrate_schema_v1(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction()?;
+    let has_capture_cache = schema_object_exists(&transaction, "table", "capture_cache")?;
+    let has_analysis_cache = schema_object_exists(&transaction, "table", "analysis_cache")?;
 
     if !has_capture_cache {
         if has_analysis_cache {
@@ -634,18 +663,35 @@ fn migrate_schema_v1(connection: &Connection) -> Result<()> {
         }
     }
 
+    transaction.execute_batch(
+        "CREATE INDEX IF NOT EXISTS instances_display_name
+         ON instances(capture_id, display_name);
+         CREATE INDEX IF NOT EXISTS bodies_instance ON bodies(instance_id);",
+    )?;
     transaction.pragma_update(None, "user_version", STORE_VERSION)?;
     transaction.commit()?;
 
     Ok(())
 }
 
-fn table_exists(connection: &Connection, table: &str) -> Result<bool> {
+fn migrate_schema_v2(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction()?;
+    transaction.execute_batch(
+        "CREATE INDEX instances_display_name ON instances(capture_id, display_name);
+         CREATE INDEX bodies_instance ON bodies(instance_id);",
+    )?;
+    transaction.pragma_update(None, "user_version", STORE_VERSION)?;
+    transaction.commit()?;
+
+    Ok(())
+}
+
+fn schema_object_exists(connection: &Connection, object_type: &str, name: &str) -> Result<bool> {
     let exists = connection.query_row(
         "SELECT EXISTS(
-             SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1
+             SELECT 1 FROM sqlite_schema WHERE type = ?1 AND name = ?2
          )",
-        [table],
+        [object_type, name],
         |row| row.get(0),
     )?;
 
@@ -661,6 +707,8 @@ fn insert_capture(
     target: &str,
     created_at_ms: u64,
 ) -> Result<()> {
+    let created_at_ms = sqlite_integer("capture creation time", created_at_ms)?;
+
     transaction.execute(
         "INSERT INTO captures(
              id, created_at_ms, request_key, request_json, rustc_release, rustc_commit,
@@ -668,7 +716,7 @@ fn insert_capture(
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'enriched')",
         params![
             capture_id.as_str(),
-            i64::try_from(created_at_ms).unwrap_or(i64::MAX),
+            created_at_ms,
             request_key,
             request_json,
             toolchain.release,
@@ -727,7 +775,7 @@ fn insert_instances(
 ) -> Result<()> {
     for item in mono_items {
         let instance_id = InstanceId::new();
-        let bodies = body_index.get(&item.name).map(Vec::as_slice).unwrap_or(&[]);
+        let bodies = body_index.get(&item.name).map_or(&[][..], Vec::as_slice);
         let definition = definition_name(&item.name);
         transaction.execute(
             "INSERT INTO instances(id, capture_id, definition, display_name, has_body)
@@ -742,6 +790,9 @@ fn insert_instances(
         )?;
 
         for body in bodies {
+            let start = sqlite_integer("LLVM body start offset", body.start)?;
+            let end = sqlite_integer("LLVM body end offset", body.end)?;
+
             transaction.execute(
                 "INSERT INTO bodies(id, instance_id, module_id, symbol, start, end)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -750,8 +801,8 @@ fn insert_instances(
                     instance_id.as_str(),
                     body.module_id,
                     body.symbol,
-                    i64::try_from(body.start).unwrap_or(i64::MAX),
-                    i64::try_from(body.end).unwrap_or(i64::MAX),
+                    start,
+                    end,
                 ],
             )?;
         }
@@ -807,30 +858,32 @@ fn generic_arguments_end(instance: &str, start: usize) -> Option<usize> {
 }
 
 fn summary_from_row(row: &rusqlite::Row<'_>, reused: bool) -> rusqlite::Result<CaptureSummary> {
-    let id: String = row.get(0)?;
-    let created_at_ms: i64 = row.get(1)?;
-    let instance_count: i64 = row.get(5)?;
-
     Ok(CaptureSummary {
-        id: id
-            .parse()
-            .expect("stored capture IDs are validated on insert"),
-        created_at_ms: u64::try_from(created_at_ms).unwrap_or_default(),
+        id: row.get(0)?,
+        created_at_ms: integer_from_row(row, 1)?,
         reused,
         rustc_release: row.get(2)?,
         llvm_version: row.get(3)?,
         target: row.get(4)?,
-        instance_count: usize::try_from(instance_count).unwrap_or(usize::MAX),
+        instance_count: integer_from_row(row, 5)?,
+    })
+}
+
+fn integer_from_row<T>(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<T>
+where
+    T: TryFrom<i64>,
+    T::Error: std::error::Error + Send + Sync + 'static,
+{
+    let value = row.get::<_, i64>(index)?;
+
+    T::try_from(value).map_err(|source| {
+        rusqlite::Error::FromSqlConversionFailure(index, Type::Integer, Box::new(source))
     })
 }
 
 fn instance_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstanceSummary> {
-    let id: String = row.get(0)?;
-
     Ok(InstanceSummary {
-        id: id
-            .parse()
-            .expect("stored instance IDs are validated on insert"),
+        id: row.get(0)?,
         definition: row.get(1)?,
         display_name: row.get(2)?,
         has_body: row.get(3)?,
@@ -839,23 +892,34 @@ fn instance_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstanceSummar
 
 fn stored_body_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredBody> {
     Ok(StoredBody {
-        stage: row.get(0)?,
-        module: row.get(1)?,
-        symbol: row.get(2)?,
-        text_blob: row.get(3)?,
-        start: row.get(4)?,
-        end: row.get(5)?,
+        module: row.get(0)?,
+        symbol: row.get(1)?,
+        text_blob: row.get(2)?,
+        start: row.get(3)?,
+        end: row.get(4)?,
     })
 }
 
 fn now_ms() -> Result<u64> {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|source| Error::InvalidRequest {
-            message: format!("system clock is before the Unix epoch, got {source}"),
-        })?;
+        .map_err(|source| Error::SystemClock { source })?;
 
-    Ok(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+    let milliseconds = duration.as_millis();
+
+    u64::try_from(milliseconds).map_err(|_| Error::IntegerOutOfRange {
+        name: "Unix time in milliseconds",
+        maximum: u64::MAX.into(),
+        actual: milliseconds,
+    })
+}
+
+fn sqlite_integer(name: &'static str, value: u64) -> Result<i64> {
+    i64::try_from(value).map_err(|_| Error::IntegerOutOfRange {
+        name,
+        maximum: i64::MAX as u128,
+        actual: value.into(),
+    })
 }
 
 fn create_private_directory(path: &Path) -> Result<()> {
@@ -877,7 +941,9 @@ fn create_private_directory(path: &Path) -> Result<()> {
 mod tests {
     use rusqlite::Connection;
 
-    use super::{STORE_VERSION, Store, definition_name, table_exists, unique_prefix_length};
+    use super::{
+        STORE_VERSION, Store, definition_name, schema_object_exists, unique_prefix_length,
+    };
     use crate::{CaptureId, Error, InstanceId};
 
     #[test]
@@ -927,7 +993,9 @@ mod tests {
         let connection = Connection::open(&catalog).expect("the test can open the catalog");
         connection
             .execute_batch(
-                "ALTER TABLE capture_cache RENAME TO analysis_cache;
+                "DROP INDEX instances_display_name;
+                 DROP INDEX bodies_instance;
+                 ALTER TABLE capture_cache RENAME TO analysis_cache;
                  PRAGMA user_version = 1;",
             )
             .expect("the test can create the version 1 layout");
@@ -946,11 +1014,50 @@ mod tests {
         assert_eq!(version, STORE_VERSION);
         assert_eq!(cached.id.as_str(), "cap_0123456789abcdef0123456789abcdef");
         assert!(
-            table_exists(&store.connection, "capture_cache")
+            schema_object_exists(&store.connection, "table", "capture_cache")
                 .expect("the test can inspect the migrated schema")
         );
         assert!(
-            !table_exists(&store.connection, "analysis_cache")
+            !schema_object_exists(&store.connection, "table", "analysis_cache")
+                .expect("the test can inspect the migrated schema")
+        );
+        assert!(
+            schema_object_exists(&store.connection, "index", "instances_display_name")
+                .expect("the test can inspect the migrated schema")
+        );
+        assert!(
+            schema_object_exists(&store.connection, "index", "bodies_instance")
+                .expect("the test can inspect the migrated schema")
+        );
+    }
+
+    #[test]
+    fn adds_query_indexes_to_schema_v2() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let store = Store::open(temporary.path()).expect("the test can create a current store");
+        store
+            .connection
+            .execute_batch(
+                "DROP INDEX instances_display_name;
+                 DROP INDEX bodies_instance;
+                 PRAGMA user_version = 2;",
+            )
+            .expect("the test can create the version 2 layout");
+        drop(store);
+
+        let store = Store::open(temporary.path()).expect("the store can migrate schema version 2");
+        let version = store
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+            .expect("the migrated schema has a version");
+
+        assert_eq!(version, STORE_VERSION);
+        assert!(
+            schema_object_exists(&store.connection, "index", "instances_display_name")
+                .expect("the test can inspect the migrated schema")
+        );
+        assert!(
+            schema_object_exists(&store.connection, "index", "bodies_instance")
                 .expect("the test can inspect the migrated schema")
         );
     }
@@ -997,5 +1104,23 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn returns_an_error_for_an_invalid_stored_identifier() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let store = Store::open(temporary.path()).expect("the test can open a store");
+        store
+            .connection
+            .execute(
+                "INSERT INTO captures(
+                     id, created_at_ms, request_key, request_json, rustc_release, rustc_commit,
+                     llvm_version, target, profile
+                 ) VALUES ('invalid', 0, 'request', '{}', '', '', '', '', '')",
+                [],
+            )
+            .expect("the test can insert an invalid stored identifier");
+
+        assert!(matches!(store.captures(), Err(Error::Database(_))));
     }
 }

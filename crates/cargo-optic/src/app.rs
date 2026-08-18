@@ -8,38 +8,70 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use cargo_ir::{BuildRequest, CaptureOutcome};
+use cargo_ir::BuildRequest;
+use serde::Serialize;
 
 use crate::source::{SourceBaseline, find_item};
-use crate::store::Store;
+use crate::store::{FileLock, Store, lock_workspace_exclusive, lock_workspace_shared};
 use crate::{
-    BuildSpec, CachePolicy, CaptureId, CaptureSummary, CompilerOutput, FindResult, InstanceId,
-    Result, ShowView,
+    BuildSpec, CachePolicy, CaptureId, CaptureSummary, CleanSummary, CompilerOutput, FindResult,
+    InstanceId, Result, ShowView,
 };
 
 /// Product workflows for one Cargo workspace and its `.optic` store.
 pub struct Application {
+    /// Prevents `clean` from removing the store while this application uses it.
+    _operation_lock: FileLock,
+
     workspace_root: PathBuf,
+
     target_directory: PathBuf,
+
     store: Store,
 }
 
 impl Application {
     /// Opens the project store for the Cargo workspace containing `directory`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if Cargo metadata, the workspace lock, or the evidence store is not
+    /// available.
     pub fn discover(directory: &Path, manifest_path: Option<&Path>) -> Result<Self> {
         let metadata = metadata(directory, manifest_path)?;
         let workspace_root = metadata.workspace_root.into_std_path_buf();
         let target_directory = metadata.target_directory.into_std_path_buf();
+        let operation_lock = lock_workspace_shared(&workspace_root)?;
         let store = Store::open(&workspace_root)?;
 
         Ok(Self {
+            _operation_lock: operation_lock,
             workspace_root,
             target_directory,
             store,
         })
     }
 
+    /// Removes the `.optic` cache for the Cargo workspace that contains `directory`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if Cargo metadata, the workspace lock, or the cache path is not available.
+    pub fn clean(directory: &Path, manifest_path: Option<&Path>) -> Result<CleanSummary> {
+        let metadata = metadata(directory, manifest_path)?;
+        let workspace_root = metadata.workspace_root.into_std_path_buf();
+        let path = workspace_root.join(".optic");
+        let _operation_lock = lock_workspace_exclusive(&workspace_root)?;
+        let removed = remove_cache(&path)?;
+
+        Ok(CleanSummary { path, removed })
+    }
+
     /// Captures or reuses enriched compiler evidence for one Cargo target.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if source capture, compiler execution, or evidence publication fails.
     pub fn capture(
         &mut self,
         spec: &BuildSpec,
@@ -54,12 +86,10 @@ impl Application {
 
         let result = self.capture_to_staging(spec, cache_policy, &toolchain, &capture_id, &staging);
         let cleanup = remove_staging(&staging);
+        let summary = result?;
+        cleanup?;
 
-        match (result, cleanup) {
-            (Ok(summary), Ok(())) => Ok(summary),
-            (Err(error), _) => Err(error),
-            (Ok(_), Err(error)) => Err(error),
-        }
+        Ok(summary)
     }
 
     fn capture_to_staging(
@@ -85,22 +115,12 @@ impl Application {
         }
 
         let request = self.build_request(spec, staging.join("compiler"));
-        let bundle = match cargo_ir::capture(&request)? {
-            CaptureOutcome::Captured(bundle) => bundle,
-            CaptureOutcome::Fresh { .. } => {
-                let retry = self.build_request(spec, staging.join("compiler-retry"));
-                let CaptureOutcome::Captured(bundle) = cargo_ir::capture(&retry)? else {
-                    return Err(cargo_ir::Error::MissingEvidence.into());
-                };
-
-                bundle
-            }
-        };
+        let bundle = cargo_ir::capture(&request)?;
 
         sources.validate()?;
 
         self.store.publish(
-            capture_id.clone(),
+            capture_id,
             &request_key,
             spec,
             &bundle,
@@ -110,11 +130,19 @@ impl Application {
     }
 
     /// Lists completed captures from newest to oldest.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the evidence catalog cannot be read.
     pub fn captures(&self) -> Result<Vec<CaptureSummary>> {
         self.store.captures()
     }
 
     /// Finds concrete instances in one completed capture.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the capture selector is not unique or the catalog cannot be read.
     pub fn find(&self, capture_id: &CaptureId, query: &str) -> Result<FindResult> {
         self.store.find(capture_id, query)
     }
@@ -128,6 +156,10 @@ impl Application {
     }
 
     /// Loads one compiler output and optional captured source for one instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the instance selector is not unique or its evidence cannot be read.
     pub fn show(
         &self,
         instance_id: &InstanceId,
@@ -173,20 +205,46 @@ fn metadata(directory: &Path, manifest_path: Option<&Path>) -> Result<cargo_meta
     Ok(command.exec()?)
 }
 
+fn remove_cache(path: &Path) -> Result<bool> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => return Err(crate::Error::filesystem("read metadata for", path, source)),
+    };
+    let result = if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    };
+    result.map_err(|source| crate::Error::filesystem("remove", path, source))?;
+
+    Ok(true)
+}
+
 fn request_key(
     spec: &BuildSpec,
     toolchain: &cargo_ir::Toolchain,
     target_directory: &Path,
     source_digest: blake3::Hash,
 ) -> Result<String> {
-    let value = serde_json::json!({
-        "spec": spec,
-        "rustc_commit": toolchain.commit_hash,
-        "target_directory": target_directory,
-        "inputs": source_digest.to_hex().as_str(),
-        "environment": compiler_environment(),
-    });
-    let encoded = serde_json::to_vec(&value)?;
+    #[derive(Serialize)]
+    struct CacheKey<'a> {
+        spec: &'a BuildSpec,
+        rustc_commit: &'a str,
+        target_directory: &'a Path,
+        inputs: &'a str,
+        environment: Vec<(String, String)>,
+    }
+
+    let inputs = source_digest.to_hex();
+    let key = CacheKey {
+        spec,
+        rustc_commit: &toolchain.commit_hash,
+        target_directory,
+        inputs: inputs.as_str(),
+        environment: compiler_environment(),
+    };
+    let encoded = serde_json::to_vec(&key)?;
 
     Ok(blake3::hash(&encoded).to_hex().to_string())
 }
@@ -236,4 +294,29 @@ fn remove_staging(path: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn cache_removal_does_not_follow_a_symbolic_link() {
+        use std::fs;
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let retained = temporary.path().join("retained");
+        let cache = temporary.path().join(".optic");
+        fs::create_dir(&retained).expect("the test can create the retained directory");
+        fs::write(retained.join("evidence"), b"retained")
+            .expect("the test can create retained evidence");
+        symlink(&retained, &cache).expect("the test can create the cache symbolic link");
+
+        assert!(super::remove_cache(&cache).expect("cache removal succeeds"));
+        assert!(!cache.exists());
+        assert_eq!(
+            fs::read(retained.join("evidence")).expect("the linked directory remains readable"),
+            b"retained"
+        );
+    }
 }

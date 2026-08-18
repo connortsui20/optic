@@ -18,14 +18,22 @@ use crate::{BuildSpec, Error, Result, SourceView};
 
 #[derive(Debug)]
 pub(crate) struct SourceBaseline {
+    /// Source snapshots that the store publishes with the capture.
     pub(crate) entries: Vec<SourceEntry>,
+
+    /// A digest of Cargo metadata before compilation.
     metadata_digest: blake3::Hash,
+
+    /// Files that must remain unchanged until compilation finishes.
     cache_inputs: Vec<CacheInput>,
 }
 
 #[derive(Debug)]
 pub(crate) struct SourceEntry {
+    /// The source path used by Cargo.
     pub(crate) path: PathBuf,
+
+    /// The immutable copy made before compilation.
     pub(crate) snapshot: PathBuf,
 }
 
@@ -37,7 +45,10 @@ struct CacheInput {
 
 #[derive(Debug)]
 pub(crate) struct StoredSource {
+    /// The source path used by the captured build.
     pub(crate) path: String,
+
+    /// The captured source bytes.
     pub(crate) bytes: Vec<u8>,
 }
 
@@ -159,7 +170,8 @@ impl SourceBaseline {
 
         for entry in &self.cache_inputs {
             let path = entry.path.to_string_lossy();
-            let path_length = u64::try_from(path.len()).unwrap_or(u64::MAX);
+            let path_length = u64::try_from(path.len())
+                .expect("usize path lengths fit in u64 on supported Rust targets");
             hasher.update(&path_length.to_le_bytes());
             hasher.update(path.as_bytes());
             hasher.update(entry.digest.as_bytes());
@@ -221,8 +233,12 @@ pub(crate) fn find_item(definition: &str, sources: &[StoredSource]) -> Option<So
     let mut candidates = Vec::new();
 
     for source in sources {
-        let text = std::str::from_utf8(&source.bytes).ok()?;
-        let file = syn::parse_file(text).ok()?;
+        let Ok(text) = std::str::from_utf8(&source.bytes) else {
+            continue;
+        };
+        let Ok(file) = syn::parse_file(text) else {
+            continue;
+        };
         let mut visitor = ItemVisitor {
             name,
             spans: Vec::new(),
@@ -232,7 +248,9 @@ pub(crate) fn find_item(definition: &str, sources: &[StoredSource]) -> Option<So
         for span in visitor.spans {
             let start = span.start().line;
             let end = span.end().line;
-            let item = lines(text, start, end)?;
+            let Some(item) = lines(text, start, end) else {
+                continue;
+            };
             let score = path_score(definition, &source.path);
             candidates.push((score, source.path.clone(), start, item));
         }
@@ -325,11 +343,18 @@ mod tests {
     use super::{StoredSource, find_item};
 
     #[test]
-    fn extracts_one_complete_function() {
-        let sources = vec![StoredSource {
-            path: "src/kernel.rs".to_owned(),
-            bytes: b"fn other() {}\n\npub fn kernel<T>(value: T) {\n    drop(value);\n}\n".to_vec(),
-        }];
+    fn extracts_a_complete_function_when_another_source_is_invalid() {
+        let sources = vec![
+            StoredSource {
+                path: "src/invalid.rs".to_owned(),
+                bytes: b"this is not Rust".to_vec(),
+            },
+            StoredSource {
+                path: "src/kernel.rs".to_owned(),
+                bytes: b"fn other() {}\n\npub fn kernel<T>(value: T) {\n    drop(value);\n}\n"
+                    .to_vec(),
+            },
+        ];
 
         let source = find_item("crate::kernel", &sources).expect("the fixture contains one kernel");
 

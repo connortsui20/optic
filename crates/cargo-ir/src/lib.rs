@@ -5,7 +5,7 @@
 //! It does not assign Optic capture IDs or persist evidence.
 
 mod capture;
-pub use capture::{BodyRange, CaptureOutcome, EvidenceBundle, ModuleEvidence, capture};
+pub use capture::{BodyRange, EvidenceBundle, LlvmStage, ModuleEvidence, capture};
 
 mod error;
 pub use error::{Error, Result};

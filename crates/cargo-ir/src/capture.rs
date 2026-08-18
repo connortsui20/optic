@@ -39,8 +39,8 @@ pub struct ModuleEvidence {
     /// The compiler-owned artifact file name.
     pub name: String,
 
-    /// The supported compiler stage.
-    pub stage: String,
+    /// The compiler stage that produced the module.
+    pub stage: LlvmStage,
 
     /// The saved LLVM bitcode path.
     pub bitcode_path: PathBuf,
@@ -50,6 +50,29 @@ pub struct ModuleEvidence {
 
     /// Indexed function definitions in the textual module.
     pub bodies: Vec<BodyRange>,
+}
+
+/// A supported stage of the LLVM compilation pipeline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum LlvmStage {
+    /// LLVM IR before the LLVM optimization pipeline.
+    #[serde(rename = "llvm-pre-optimization")]
+    PreOptimization,
+
+    /// LLVM IR after the LLVM optimization pipeline.
+    #[serde(rename = "llvm-optimized")]
+    Optimized,
+}
+
+impl LlvmStage {
+    /// Returns the stable catalog name for this stage.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PreOptimization => "llvm-pre-optimization",
+            Self::Optimized => "llvm-optimized",
+        }
+    }
 }
 
 /// All evidence produced by one compiler invocation.
@@ -65,21 +88,13 @@ pub struct EvidenceBundle {
     pub modules: Vec<ModuleEvidence>,
 }
 
-/// The result of asking Cargo for one analysis unit.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum CaptureOutcome {
-    /// Cargo reported the analysis unit as fresh and produced no new evidence.
-    Fresh {
-        /// The exact active compiler.
-        toolchain: Toolchain,
-    },
-
-    /// Cargo compiled the selected unit and produced evidence.
-    Captured(EvidenceBundle),
-}
-
 /// Runs one enriched analysis for the selected Cargo target.
-pub fn capture(request: &BuildRequest) -> Result<CaptureOutcome> {
+///
+/// # Errors
+///
+/// Returns an error if the toolchain is unsupported, the analysis directory is not empty, Cargo
+/// fails, or emitted LLVM evidence cannot be read.
+pub fn capture(request: &BuildRequest) -> Result<EvidenceBundle> {
     let toolchain = inspect_toolchain()?;
     prepare_analysis_directory(&request.analysis_directory)?;
 
@@ -100,34 +115,24 @@ pub fn capture(request: &BuildRequest) -> Result<CaptureOutcome> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    if selected_target_is_fresh(&output.stdout) {
-        return Ok(CaptureOutcome::Fresh { toolchain });
-    }
-
     let artifacts = supported_bitcode(&request.analysis_directory)?;
 
     if artifacts.is_empty() {
-        return Ok(CaptureOutcome::Fresh { toolchain });
+        return Err(Error::MissingEvidence);
     }
 
     let mono_output = format!("{stdout}\n{stderr}");
     let mono_items = mono::parse(&mono_output);
     let modules = artifacts
         .into_iter()
-        .map(|(bitcode_path, stage)| {
-            disassemble(&toolchain, bitcode_path, stage, &request.analysis_directory)
-        })
+        .map(|artifact| disassemble(&toolchain, artifact, &request.analysis_directory))
         .collect::<Result<Vec<_>>>()?;
 
-    if modules.is_empty() {
-        return Err(Error::MissingEvidence);
-    }
-
-    Ok(CaptureOutcome::Captured(EvidenceBundle {
+    Ok(EvidenceBundle {
         toolchain,
         mono_items,
         modules,
-    }))
+    })
 }
 
 fn cargo_command(request: &BuildRequest) -> Command {
@@ -207,17 +212,24 @@ fn prepare_analysis_directory(path: &Path) -> Result<()> {
         operation: "create",
         path: path.to_owned(),
         source,
-    })
-}
+    })?;
+    let mut entries = fs::read_dir(path).map_err(|source| Error::Filesystem {
+        operation: "read",
+        path: path.to_owned(),
+        source,
+    })?;
 
-fn selected_target_is_fresh(stdout: &[u8]) -> bool {
-    stdout
-        .split(|byte| *byte == b'\n')
-        .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
-        .filter(|message| message["reason"] == "compiler-artifact")
-        .filter_map(|message| message["fresh"].as_bool())
-        .next_back()
-        .unwrap_or(false)
+    match entries.next() {
+        None => Ok(()),
+        Some(Ok(_)) => Err(Error::AnalysisDirectoryNotEmpty {
+            path: path.to_owned(),
+        }),
+        Some(Err(source)) => Err(Error::Filesystem {
+            operation: "read",
+            path: path.to_owned(),
+            source,
+        }),
+    }
 }
 
 fn cargo_diagnostics(stdout: &[u8], stderr: &[u8]) -> String {
@@ -247,7 +259,12 @@ fn cargo_diagnostics(stdout: &[u8], stderr: &[u8]) -> String {
     diagnostics
 }
 
-fn supported_bitcode(directory: &Path) -> Result<Vec<(PathBuf, &'static str)>> {
+struct BitcodeArtifact {
+    path: PathBuf,
+    stage: LlvmStage,
+}
+
+fn supported_bitcode(directory: &Path) -> Result<Vec<BitcodeArtifact>> {
     let mut artifacts = Vec::new();
 
     for entry in WalkDir::new(directory).min_depth(1) {
@@ -263,32 +280,38 @@ fn supported_bitcode(directory: &Path) -> Result<Vec<(PathBuf, &'static str)>> {
 
         let name = entry.file_name().to_string_lossy();
         let stage = if name.ends_with(".no-opt.bc") {
-            Some("llvm-pre-optimization")
+            Some(LlvmStage::PreOptimization)
         } else if name.ends_with(".rcgu.bc") && !name.contains(".thin-lto-") {
-            Some("llvm-optimized")
+            Some(LlvmStage::Optimized)
         } else {
             None
         };
 
         if let Some(stage) = stage {
-            artifacts.push((entry.into_path(), stage));
+            artifacts.push(BitcodeArtifact {
+                path: entry.into_path(),
+                stage,
+            });
         }
     }
 
-    artifacts.sort_by(|left, right| left.0.cmp(&right.0));
+    artifacts.sort_by(|left, right| left.path.cmp(&right.path));
 
     Ok(artifacts)
 }
 
 fn disassemble(
     toolchain: &Toolchain,
-    bitcode_path: PathBuf,
-    stage: &'static str,
+    artifact: BitcodeArtifact,
     analysis_directory: &Path,
 ) -> Result<ModuleEvidence> {
+    let BitcodeArtifact {
+        path: bitcode_path,
+        stage,
+    } = artifact;
     let file_name = bitcode_path
         .file_name()
-        .map_or_else(|| "module.bc".into(), |name| name.to_owned());
+        .map_or_else(|| "module.bc".into(), std::borrow::ToOwned::to_owned);
     let mut text_name = file_name;
     text_name.push(".ll");
     let text_path = analysis_directory.join(text_name);
@@ -317,7 +340,7 @@ fn disassemble(
 
     Ok(ModuleEvidence {
         name,
-        stage: stage.to_owned(),
+        stage,
         bitcode_path,
         text_path,
         bodies,
@@ -326,7 +349,10 @@ fn disassemble(
 
 #[cfg(test)]
 mod tests {
-    use super::cargo_diagnostics;
+    use std::fs;
+
+    use super::{cargo_diagnostics, prepare_analysis_directory};
+    use crate::Error;
 
     #[test]
     fn renders_cargo_json_diagnostics_and_standard_error() {
@@ -338,5 +364,17 @@ mod tests {
             cargo_diagnostics(stdout, b"error: could not compile\n"),
             "error: bad input\nerror: could not compile\n"
         );
+    }
+
+    #[test]
+    fn rejects_a_nonempty_analysis_directory() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        fs::write(temporary.path().join("stale.bc"), b"stale")
+            .expect("the test can create stale evidence");
+
+        assert!(matches!(
+            prepare_analysis_directory(temporary.path()),
+            Err(Error::AnalysisDirectoryNotEmpty { path }) if path == temporary.path()
+        ));
     }
 }

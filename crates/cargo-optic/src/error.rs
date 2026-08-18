@@ -4,6 +4,7 @@
 
 use std::io;
 use std::path::PathBuf;
+use std::time::SystemTimeError;
 
 use crate::{CaptureId, InstanceId};
 
@@ -83,12 +84,20 @@ pub enum Error {
         path: PathBuf,
     },
 
+    /// The system clock is before the Unix epoch.
+    #[error("system clock must be after the Unix epoch, got {source}")]
+    SystemClock {
+        /// The invalid clock duration.
+        source: SystemTimeError,
+    },
+
     /// The project store has an unsupported format.
     #[error(
-        ".optic store format must be {expected}, got {actual}\nRemove .optic to recreate the store"
+        ".optic store format must be {expected}, got {actual}\n\
+         Run `cargo optic clean` to recreate the store"
     )]
     StoreVersion {
-        /// The only supported format.
+        /// The current store format.
         expected: u32,
 
         /// The format found on disk.
@@ -106,6 +115,19 @@ pub enum Error {
 
         /// The exclusive end offset.
         end: u64,
+    },
+
+    /// A numeric value does not fit in its stored representation.
+    #[error("{name} must be at most {maximum}, got {actual}")]
+    IntegerOutOfRange {
+        /// The value name.
+        name: &'static str,
+
+        /// The largest supported value.
+        maximum: u128,
+
+        /// The unsupported value.
+        actual: u128,
     },
 }
 

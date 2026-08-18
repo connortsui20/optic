@@ -1,11 +1,13 @@
 //! Opaque identifiers used by public Optic commands.
 //!
-//! IDs do not expose SQLite row identifiers or artifact paths. Their prefixes prevent callers from
-//! accidentally using a capture ID where an instance ID is required.
+//! IDs do not expose `SQLite` row identifiers or artifact paths. New IDs use random `UUIDv4`
+//! suffixes. The parser accepts a full suffix or a prefix, while the type prefix prevents callers
+//! from using a capture ID where an instance ID is required.
 
 use std::fmt;
 use std::str::FromStr;
 
+use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ValueRef};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
@@ -75,6 +77,15 @@ macro_rules! identifier {
                 let value = String::deserialize(deserializer)?;
 
                 value.parse().map_err(D::Error::custom)
+            }
+        }
+
+        impl FromSql for $name {
+            fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+                value
+                    .as_str()?
+                    .parse()
+                    .map_err(|source| FromSqlError::Other(Box::new(source)))
             }
         }
     };

@@ -38,8 +38,23 @@ impl Terminal {
         self.paint(AnsiColor::BrightBlack.on_default(), text)
     }
 
-    pub(crate) fn identifier(&self, text: &str) -> String {
-        self.paint(AnsiColor::BrightYellow.on_default(), text)
+    pub(crate) fn identifier(&self, text: &str, unique_prefix_length: usize) -> String {
+        if !self.color {
+            return text.to_owned();
+        }
+
+        let unique_prefix_length = unique_prefix_length.min(text.len());
+        let (unique_prefix, remainder) = text.split_at(unique_prefix_length);
+        let unique_prefix = self.paint(AnsiColor::BrightYellow.on_default().bold(), unique_prefix);
+
+        if remainder.is_empty() {
+            unique_prefix
+        } else {
+            format!(
+                "{unique_prefix}{}",
+                self.paint(AnsiColor::BrightBlack.on_default(), remainder)
+            )
+        }
     }
 
     pub(crate) fn function(&self, text: &str) -> String {
@@ -56,6 +71,27 @@ impl Terminal {
 
     pub(crate) fn command(&self, text: &str) -> String {
         self.paint(AnsiColor::BrightCyan.on_default(), text)
+    }
+
+    pub(crate) fn command_with_identifier(
+        &self,
+        before: &str,
+        identifier: &str,
+        unique_prefix_length: usize,
+        after: &str,
+    ) -> String {
+        let after = if after.is_empty() {
+            String::new()
+        } else {
+            self.command(after)
+        };
+
+        format!(
+            "{}{}{}",
+            self.command(before),
+            self.identifier(identifier, unique_prefix_length),
+            after,
+        )
     }
 
     pub(crate) fn code(&self, text: &str, syntax: CodeSyntax) -> String {
@@ -106,7 +142,7 @@ fn theme() -> &'static Theme {
 
 #[cfg(test)]
 mod tests {
-    use super::{CodeSyntax, SYNTAXES, find_syntax};
+    use super::{CodeSyntax, SYNTAXES, Terminal, find_syntax};
 
     #[test]
     fn includes_rust_and_llvm_syntaxes() {
@@ -114,5 +150,16 @@ mod tests {
 
         assert!(find_syntax(syntaxes, CodeSyntax::Rust).is_some());
         assert!(find_syntax(syntaxes, CodeSyntax::Llvm).is_some());
+    }
+
+    #[test]
+    fn highlights_only_the_unique_identifier_prefix() {
+        let terminal = Terminal::new(true);
+        let identifier = terminal.identifier("ins_853d3c84a9f7", 7);
+
+        assert_eq!(
+            identifier,
+            "\x1b[1m\x1b[93mins_853\x1b[0m\x1b[90md3c84a9f7\x1b[0m"
+        );
     }
 }
