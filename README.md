@@ -141,5 +141,27 @@ normal Cargo command compiles that target. Existing normal artifacts remain avai
 - Source lookup uses Rust syntax and a path score. It omits source when the best match is ambiguous.
 - The prototype is verified on Apple silicon macOS.
 
+### Instance-to-body identity
+
+Cargo Optic joins rustc mono items to definitions from demangled LLVM v0 symbols. These sources do
+not always use the same path for one Rust item. Rustc can use a public path such as
+`std::iter::Map` or `vortex_buffer::BufferMut`. The symbol uses the canonical definition path, such
+as `core::iter::adapters::map::Map` or `vortex_buffer::buffer_mut::BufferMut`.
+
+Inlining can also move the surviving body into a generic function. For example, a Vortex caller can
+survive as a specialized `Iterator::fold` body that contains Vortex types and closures. This body
+belongs to the selected Vortex code-generation unit even though its name starts in `core`.
+
+The current matcher removes selected-crate prefixes and numeric `.llvm.N` clone suffixes. It does
+not map public paths to canonical definition paths. A complete matcher must use structured item
+identity instead of unrestricted fuzzy text matching:
+
+- If rustc exposes a common identity, use it for both evidence sources.
+- Otherwise, parse both names and map known public paths to canonical definition paths.
+- Include the crate identity, code-generation unit, definition path, and generic arguments.
+- Keep all candidates until the complete identity selects one body.
+- Omit the body when more than one candidate remains.
+- Cover `std` and `core` paths, crate re-exports, nested generic types, and inlined iterator bodies.
+
 The unpublished `cargo-ir` crate owns the compiler and LLVM boundary. `cargo-optic` owns the
 persistent store and the user interface.
