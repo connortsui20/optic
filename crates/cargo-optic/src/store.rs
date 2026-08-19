@@ -753,7 +753,7 @@ fn insert_modules(
 
         for body in &module.bodies {
             body_index
-                .entry(body.demangled.clone())
+                .entry(mono_body_index_name(&module.name, &body.demangled))
                 .or_default()
                 .push(IndexedBody {
                     module_id: module_id.clone(),
@@ -767,6 +767,35 @@ fn insert_modules(
     Ok(body_index)
 }
 
+fn mono_body_index_name(module_name: &str, body_name: &str) -> String {
+    let body_name = mono_body_name(body_name);
+    let Some((crate_name, _)) = module_name.split_once('-') else {
+        return body_name.to_owned();
+    };
+
+    body_name.replace(&format!("{crate_name}::"), "")
+}
+
+fn mono_body_name(original: &str) -> &str {
+    if let Some(without_closing_parenthesis) = original.strip_suffix(')')
+        && let Some((name, suffix)) = without_closing_parenthesis.rsplit_once(" (.llvm.")
+        && !suffix.is_empty()
+        && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return name;
+    }
+
+    let Some((name, suffix)) = original.rsplit_once(".llvm.") else {
+        return original;
+    };
+
+    if !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+        name
+    } else {
+        original
+    }
+}
+
 fn insert_instances(
     transaction: &Transaction<'_>,
     capture_id: &CaptureId,
@@ -775,7 +804,7 @@ fn insert_instances(
 ) -> Result<()> {
     for item in mono_items {
         let instance_id = InstanceId::new();
-        let bodies = body_index.get(&item.name).map_or(&[][..], Vec::as_slice);
+        let bodies = bodies_for_item(item, body_index);
         let definition = definition_name(&item.name);
         transaction.execute(
             "INSERT INTO instances(id, capture_id, definition, display_name, has_body)
@@ -809,6 +838,35 @@ fn insert_instances(
     }
 
     Ok(())
+}
+
+fn bodies_for_item<'a>(
+    item: &cargo_ir::MonoItem,
+    body_index: &'a HashMap<String, Vec<IndexedBody>>,
+) -> &'a [IndexedBody] {
+    if let Some(bodies) = body_index.get(&item.name) {
+        return bodies;
+    }
+
+    let Some(qualified_name) = qualified_item_name(item) else {
+        return &[];
+    };
+
+    body_index.get(&qualified_name).map_or(&[], Vec::as_slice)
+}
+
+fn qualified_item_name(item: &cargo_ir::MonoItem) -> Option<String> {
+    let mut crate_names = item
+        .codegen_units
+        .iter()
+        .filter_map(|unit| unit.split_once('.').map(|(name, _)| name));
+    let crate_name = crate_names.next()?;
+
+    if crate_name.is_empty() || crate_names.any(|name| name != crate_name) {
+        return None;
+    }
+
+    Some(format!("{crate_name}::{}", item.name))
 }
 
 fn insert_sources(
@@ -939,10 +997,14 @@ fn create_private_directory(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use cargo_ir::MonoItem;
     use rusqlite::Connection;
 
     use super::{
-        STORE_VERSION, Store, definition_name, schema_object_exists, unique_prefix_length,
+        IndexedBody, STORE_VERSION, Store, bodies_for_item, definition_name, mono_body_index_name,
+        mono_body_name, schema_object_exists, unique_prefix_length,
     };
     use crate::{CaptureId, Error, InstanceId};
 
@@ -957,6 +1019,65 @@ mod tests {
             "crate::kernel::{closure#0}"
         );
         assert_eq!(definition_name("crate::plain"), "crate::plain");
+    }
+
+    #[test]
+    fn associates_a_crate_local_item_with_its_qualified_llvm_body() {
+        let item = MonoItem {
+            name: "for_each_set_index".to_owned(),
+            codegen_units: vec![
+                "mask_iteration.abc-cgu.00".to_owned(),
+                "mask_iteration.abc-cgu.08".to_owned(),
+            ],
+        };
+        let mut body_index = HashMap::new();
+        body_index.insert(
+            "mask_iteration::for_each_set_index".to_owned(),
+            vec![IndexedBody {
+                module_id: "module".to_owned(),
+                symbol: "symbol".to_owned(),
+                start: 0,
+                end: 1,
+            }],
+        );
+
+        let bodies = bodies_for_item(&item, &body_index);
+
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0].symbol, "symbol");
+    }
+
+    #[test]
+    fn removes_only_a_numeric_llvm_clone_suffix() {
+        assert_eq!(
+            mono_body_name("mask_iteration::make.llvm.7879930411852097767"),
+            "mask_iteration::make"
+        );
+        assert_eq!(
+            mono_body_name("mask_iteration::make (.llvm.7879930411852097767)"),
+            "mask_iteration::make"
+        );
+        assert_eq!(
+            mono_body_name("mask_iteration::make"),
+            "mask_iteration::make"
+        );
+        assert_eq!(
+            mono_body_name("mask_iteration::make.llvm.clone"),
+            "mask_iteration::make.llvm.clone"
+        );
+    }
+
+    #[test]
+    fn removes_the_selected_crate_prefix_from_nested_types() {
+        assert_eq!(
+            mono_body_index_name(
+                "vortex_array-hash.vortex_array-cgu.00.rcgu.bc",
+                "<std::iter::Map<vortex_array::arrays::BinaryView> as \
+                 std::iter::Iterator>::fold<vortex_array::arrays::BinaryView>",
+            ),
+            "<std::iter::Map<arrays::BinaryView> as \
+             std::iter::Iterator>::fold<arrays::BinaryView>"
+        );
     }
 
     #[test]
