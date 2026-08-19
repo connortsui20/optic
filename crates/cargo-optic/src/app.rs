@@ -4,7 +4,7 @@
 //! every completed query read-only and independent of shared client state.
 
 use std::env;
-use std::ffi::OsString;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -269,7 +269,7 @@ fn compiler_environment() -> Vec<(String, String)> {
     environment
 }
 
-fn compiler_environment_name(name: &OsString) -> bool {
+fn compiler_environment_name(name: &OsStr) -> bool {
     let name = name.to_string_lossy();
 
     matches!(

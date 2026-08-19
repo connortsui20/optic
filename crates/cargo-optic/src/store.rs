@@ -10,7 +10,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use cargo_ir::{EvidenceBundle, Toolchain};
+use cargo_ir::{EvidenceBundle, LlvmStage, Toolchain};
 use fs2::FileExt;
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -122,7 +122,7 @@ impl Store {
             let text_blob = self.publish_blob(&module.text_path)?;
             modules.push(PublishedModule {
                 name: module.name.clone(),
-                stage: module.stage.as_str().to_owned(),
+                stage: module.stage,
                 bitcode_blob,
                 text_blob,
                 bodies: module.bodies.clone(),
@@ -132,7 +132,10 @@ impl Store {
         let mut published_sources = Vec::with_capacity(sources.entries.len());
         for source in &sources.entries {
             let blob = self.publish_blob(&source.snapshot)?;
-            published_sources.push((source.path.to_string_lossy().into_owned(), blob));
+            published_sources.push(PublishedSource {
+                path: source.path.to_string_lossy().into_owned(),
+                blob,
+            });
         }
 
         let transaction = self.connection.transaction()?;
@@ -146,7 +149,7 @@ impl Store {
             created_at_ms,
         )?;
         let body_index = insert_modules(&transaction, capture_id, &modules)?;
-        insert_instances(&transaction, capture_id, &bundle.mono_items, &body_index)?;
+        insert_instances(&transaction, capture_id, &bundle.instances, &body_index)?;
         insert_sources(&transaction, capture_id, &published_sources)?;
         transaction.execute(
             "INSERT INTO capture_cache(request_key, capture_id) VALUES (?1, ?2)
@@ -540,10 +543,15 @@ fn common_prefix_length(left: &str, right: &str) -> usize {
 
 struct PublishedModule {
     name: String,
-    stage: String,
+    stage: LlvmStage,
     bitcode_blob: String,
     text_blob: String,
     bodies: Vec<cargo_ir::BodyRange>,
+}
+
+struct PublishedSource {
+    path: String,
+    blob: String,
 }
 
 struct IndexedBody {
@@ -758,7 +766,7 @@ fn insert_modules(
                 module_id,
                 capture_id.as_str(),
                 module.name,
-                module.stage,
+                module.stage.as_str(),
                 module.bitcode_blob,
                 module.text_blob,
             ],
@@ -783,12 +791,12 @@ fn insert_modules(
 fn insert_instances(
     transaction: &Transaction<'_>,
     capture_id: &CaptureId,
-    mono_items: &[cargo_ir::MonoItem],
+    instances: &[cargo_ir::CompilerInstance],
     body_index: &HashMap<String, Vec<IndexedBody>>,
 ) -> Result<()> {
-    for item in mono_items {
+    for instance in instances {
         let instance_id = InstanceId::new();
-        let bodies = bodies_for_item(item, body_index);
+        let bodies = bodies_for_instance(instance, body_index);
         transaction.execute(
             "INSERT INTO instances(
                  id, capture_id, definition, display_name, compiler_symbol, has_body
@@ -796,9 +804,9 @@ fn insert_instances(
             params![
                 instance_id.as_str(),
                 capture_id.as_str(),
-                item.definition,
-                item.display_name,
-                item.raw_symbol,
+                instance.definition,
+                instance.display_name,
+                instance.raw_symbol,
                 !bodies.is_empty(),
             ],
         )?;
@@ -825,22 +833,24 @@ fn insert_instances(
     Ok(())
 }
 
-fn bodies_for_item<'a>(
-    item: &cargo_ir::MonoItem,
+fn bodies_for_instance<'a>(
+    instance: &cargo_ir::CompilerInstance,
     body_index: &'a HashMap<String, Vec<IndexedBody>>,
 ) -> &'a [IndexedBody] {
-    body_index.get(&item.raw_symbol).map_or(&[], Vec::as_slice)
+    body_index
+        .get(&instance.raw_symbol)
+        .map_or(&[], Vec::as_slice)
 }
 
 fn insert_sources(
     transaction: &Transaction<'_>,
     capture_id: &CaptureId,
-    sources: &[(String, String)],
+    sources: &[PublishedSource],
 ) -> Result<()> {
-    for (path, blob) in sources {
+    for source in sources {
         transaction.execute(
             "INSERT INTO sources(capture_id, path, blob) VALUES (?1, ?2, ?3)",
-            params![capture_id.as_str(), path, blob],
+            params![capture_id.as_str(), source.path, source.blob],
         )?;
     }
 
@@ -931,18 +941,18 @@ fn create_private_directory(path: &Path) -> Result<()> {
 mod tests {
     use std::collections::HashMap;
 
-    use cargo_ir::MonoItem;
+    use cargo_ir::CompilerInstance;
     use rusqlite::Connection;
 
     use super::{
-        IndexedBody, STORE_VERSION, Store, bodies_for_item, schema_object_exists,
+        IndexedBody, STORE_VERSION, Store, bodies_for_instance, schema_object_exists,
         unique_prefix_length,
     };
     use crate::{CaptureId, Error, InstanceId};
 
     #[test]
-    fn associates_an_item_only_with_its_exact_compiler_symbol() {
-        let item = MonoItem {
+    fn associates_an_instance_only_with_its_exact_compiler_symbol() {
+        let instance = CompilerInstance {
             definition: "mask_iteration::for_each_set_index".to_owned(),
             display_name: "mask_iteration::for_each_set_index".to_owned(),
             raw_symbol: "_Rmask_iteration".to_owned(),
@@ -962,7 +972,7 @@ mod tests {
             }],
         );
 
-        let bodies = bodies_for_item(&item, &body_index);
+        let bodies = bodies_for_instance(&instance, &body_index);
 
         assert_eq!(bodies.len(), 1);
         assert_eq!(bodies[0].symbol, "symbol");
@@ -970,7 +980,7 @@ mod tests {
 
     #[test]
     fn does_not_associate_an_llvm_clone_by_its_display_name() {
-        let item = MonoItem {
+        let instance = CompilerInstance {
             definition: "mask_iteration::make".to_owned(),
             display_name: "mask_iteration::make".to_owned(),
             raw_symbol: "_Rmake".to_owned(),
@@ -986,13 +996,13 @@ mod tests {
             }],
         )]);
 
-        assert!(bodies_for_item(&item, &body_index).is_empty());
+        assert!(bodies_for_instance(&instance, &body_index).is_empty());
     }
 
     #[test]
     fn includes_one_character_after_the_longest_neighbor_match() {
         assert_eq!(
-            unique_prefix_length("ins_01234567", Some("ins_0122ffff"), Some("ins_01239abc"),),
+            unique_prefix_length("ins_01234567", Some("ins_0122ffff"), Some("ins_01239abc")),
             9
         );
         assert_eq!(unique_prefix_length("cap_abcdef", None, None), 5);
@@ -1193,6 +1203,7 @@ mod tests {
         assert!(matches!(store.captures(), Err(Error::Database(_))));
     }
 
+    #[track_caller]
     fn column_exists(connection: &Connection, table: &str, column: &str) -> bool {
         let mut statement = connection
             .prepare(&format!("PRAGMA table_info({table})"))

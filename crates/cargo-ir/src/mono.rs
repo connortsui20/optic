@@ -17,13 +17,13 @@ pub(crate) const MANIFEST_NAME: &str = "identity-v1.bin";
 const MANIFEST_MAGIC: &[u8; 16] = b"CARGO_OPTIC_ID\0\0";
 const PROTOCOL_VERSION: u32 = 1;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_ITEMS: usize = 1_000_000;
+const MAX_INSTANCES: usize = 1_000_000;
 const MAX_STRING_BYTES: usize = 1024 * 1024;
 const MAX_CODEGEN_UNITS: usize = 65_536;
 
 /// One concrete function selected for monomorphization.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct MonoItem {
+pub struct CompilerInstance {
     /// The source-level definition path selected by rustc.
     pub definition: String,
 
@@ -33,11 +33,11 @@ pub struct MonoItem {
     /// The exact symbol that rustc gives to LLVM.
     pub raw_symbol: String,
 
-    /// The codegen units in which rustc placed the item.
+    /// The codegen units in which rustc placed the instance.
     pub codegen_units: Vec<String>,
 }
 
-pub(crate) fn read(path: &Path, expected_rustc_commit: &str) -> Result<Vec<MonoItem>> {
+pub(crate) fn read(path: &Path, expected_rustc_commit: &str) -> Result<Vec<CompilerInstance>> {
     let metadata = fs::metadata(path).map_err(|source| Error::Filesystem {
         operation: "read metadata for",
         path: path.to_owned(),
@@ -83,10 +83,10 @@ pub(crate) fn read(path: &Path, expected_rustc_commit: &str) -> Result<Vec<MonoI
         ));
     }
 
-    let item_count = read_length_u64(&mut reader, path, "item count", MAX_ITEMS)?;
-    let mut items = Vec::with_capacity(item_count);
+    let instance_count = read_length_u64(&mut reader, path, "instance count", MAX_INSTANCES)?;
+    let mut instances = Vec::with_capacity(instance_count);
 
-    for _ in 0..item_count {
+    for _ in 0..instance_count {
         let definition = read_string(&mut reader, path, "definition")?;
         let display_name = read_string(&mut reader, path, "display name")?;
         let raw_symbol = read_string(&mut reader, path, "raw symbol")?;
@@ -98,7 +98,7 @@ pub(crate) fn read(path: &Path, expected_rustc_commit: &str) -> Result<Vec<MonoI
             codegen_units.push(read_string(&mut reader, path, "codegen unit")?);
         }
 
-        items.push(MonoItem {
+        instances.push(CompilerInstance {
             definition,
             display_name,
             raw_symbol,
@@ -110,7 +110,7 @@ pub(crate) fn read(path: &Path, expected_rustc_commit: &str) -> Result<Vec<MonoI
         return Err(invalid_manifest(path, "manifest contains trailing bytes"));
     }
 
-    Ok(items)
+    Ok(instances)
 }
 
 fn read_string(reader: &mut Cursor<&[u8]>, path: &Path, field: &'static str) -> Result<String> {
@@ -214,13 +214,13 @@ mod tests {
         push_string(&mut manifest, "example-cgu.0");
         fs::write(&path, manifest).expect("the test can write the manifest");
 
-        let items = read(&path, "commit").expect("the manifest is valid");
+        let instances = read(&path, "commit").expect("the manifest is valid");
 
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].definition, "example::kernel");
-        assert_eq!(items[0].display_name, "example::kernel::<u64>");
-        assert_eq!(items[0].raw_symbol, "_Rexample");
-        assert_eq!(items[0].codegen_units, ["example-cgu.0"]);
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].definition, "example::kernel");
+        assert_eq!(instances[0].display_name, "example::kernel::<u64>");
+        assert_eq!(instances[0].raw_symbol, "_Rexample");
+        assert_eq!(instances[0].codegen_units, ["example-cgu.0"]);
     }
 
     #[test]
@@ -270,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_too_many_items() {
+    fn rejects_too_many_instances() {
         let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
         let path = temporary.path().join("identity.bin");
         let mut manifest = Vec::new();
@@ -280,9 +280,9 @@ mod tests {
         manifest.extend_from_slice(&1_000_001_u64.to_le_bytes());
         fs::write(&path, manifest).expect("the test can write the manifest");
 
-        let error = read(&path, "commit").expect_err("the item count must be bounded");
+        let error = read(&path, "commit").expect_err("the instance count must be bounded");
 
-        assert!(error.to_string().contains("item count exceeds 1000000"));
+        assert!(error.to_string().contains("instance count exceeds 1000000"));
     }
 
     #[test]

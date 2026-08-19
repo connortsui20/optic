@@ -282,7 +282,9 @@ fn included_entry(entry: &DirEntry) -> bool {
 }
 
 fn function_name(definition: &str) -> Option<&str> {
-    let definition = definition.split("::<").next().unwrap_or(definition);
+    let definition = definition
+        .split_once("::<")
+        .map_or(definition, |(name, _)| name);
     definition
         .rsplit("::")
         .next()

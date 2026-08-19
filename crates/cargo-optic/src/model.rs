@@ -124,7 +124,7 @@ pub struct CaptureSummary {
     /// The selected compiler target or host.
     pub target: String,
 
-    /// The number of concrete mono items recorded by rustc.
+    /// The number of concrete compiler instances recorded by rustc.
     pub instance_count: usize,
 }
 

@@ -389,8 +389,8 @@ fn preserves_compiler_wrappers_and_reuses_dependency_artifacts() {
         .output()
         .expect("the Cargo Optic capture starts");
     assert_success(&capture);
-    let compiled_crates = fs::read_to_string(&log).expect("the compiler wrapper log is readable");
-    let compiler_invocations = compiled_crates
+    let wrapper_log = fs::read_to_string(&log).expect("the compiler wrapper log is readable");
+    let compiler_invocations = wrapper_log
         .lines()
         .filter(|invocation| !invocation.ends_with(":___"))
         .collect::<Vec<_>>();
@@ -456,6 +456,7 @@ impl Fixture {
     }
 }
 
+#[track_caller]
 fn copy_tree(source: &Path, destination: &Path) {
     for entry in WalkDir::new(source)
         .into_iter()

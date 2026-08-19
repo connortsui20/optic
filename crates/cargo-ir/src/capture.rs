@@ -16,7 +16,9 @@ use walkdir::WalkDir;
 use crate::driver::RustcDriver;
 use crate::llvm;
 use crate::mono;
-use crate::{BuildRequest, CargoTarget, Error, MonoItem, Result, Toolchain, inspect_toolchain};
+use crate::{
+    BuildRequest, CargoTarget, CompilerInstance, Error, Result, Toolchain, inspect_toolchain,
+};
 
 /// The byte range of one LLVM function definition.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -83,7 +85,7 @@ pub struct EvidenceBundle {
     pub toolchain: Toolchain,
 
     /// Concrete functions selected by rustc.
-    pub mono_items: Vec<MonoItem>,
+    pub instances: Vec<CompilerInstance>,
 
     /// Supported saved LLVM modules.
     pub modules: Vec<ModuleEvidence>,
@@ -126,7 +128,7 @@ pub fn capture(request: &BuildRequest) -> Result<EvidenceBundle> {
         return Err(Error::MissingEvidence);
     }
 
-    let mono_items = mono::read(&manifest_path, &toolchain.commit_hash)?;
+    let instances = mono::read(&manifest_path, &toolchain.commit_hash)?;
     let modules = artifacts
         .into_iter()
         .map(|artifact| disassemble(&toolchain, artifact, &request.analysis_directory))
@@ -134,7 +136,7 @@ pub fn capture(request: &BuildRequest) -> Result<EvidenceBundle> {
 
     Ok(EvidenceBundle {
         toolchain,
-        mono_items,
+        instances,
         modules,
     })
 }
@@ -314,8 +316,9 @@ fn disassemble(
     } = artifact;
     let file_name = bitcode_path
         .file_name()
-        .map_or_else(|| "module.bc".into(), std::borrow::ToOwned::to_owned);
-    let mut text_name = file_name;
+        .expect("bitcode artifacts come from file entries in the analysis directory");
+    let name = file_name.to_string_lossy().into_owned();
+    let mut text_name = file_name.to_owned();
     text_name.push(".ll");
     let text_path = analysis_directory.join(text_name);
     let output = Command::new(&toolchain.llvm_dis)
@@ -337,9 +340,6 @@ fn disassemble(
     }
 
     let bodies = llvm::scan(&text_path)?;
-    let name = bitcode_path
-        .file_name()
-        .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
 
     Ok(ModuleEvidence {
         name,

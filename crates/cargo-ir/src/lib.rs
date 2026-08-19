@@ -15,7 +15,7 @@ mod driver;
 mod llvm;
 
 mod mono;
-pub use mono::MonoItem;
+pub use mono::CompilerInstance;
 
 mod request;
 pub use request::{BuildRequest, CargoTarget};

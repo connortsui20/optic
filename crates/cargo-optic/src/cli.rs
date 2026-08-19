@@ -723,7 +723,7 @@ fn select_and_show(
     format: Format,
     terminal: &Terminal,
 ) -> Result<Execution, Failure> {
-    if result.instances.len() != 1 {
+    let [instance] = result.instances.as_slice() else {
         let failure = if result.instances.is_empty() {
             SelectionFailure::NotFound
         } else {
@@ -752,9 +752,8 @@ fn select_and_show(
         );
 
         return selection(format, result, failure, text);
-    }
+    };
 
-    let instance = &result.instances[0];
     let view = application
         .show(&instance.id, output, include_source)
         .map_err(|error| Failure {
@@ -836,10 +835,7 @@ fn success<T: Serialize>(format: Format, result: &T, text: String) -> Result<Exe
                 result,
             };
 
-            serde_json::to_string_pretty(&envelope).map_err(|error| Failure {
-                format,
-                message: format!("failed to encode JSON output: {error}"),
-            })? + "\n"
+            json_output(format, &envelope)?
         }
     };
 
@@ -865,14 +861,21 @@ fn selection<T: Serialize>(
                 },
             };
 
-            serde_json::to_string_pretty(&envelope).map_err(|error| Failure {
-                format,
-                message: format!("failed to encode JSON output: {error}"),
-            })? + "\n"
+            json_output(format, &envelope)?
         }
     };
 
     Ok(Execution { code: 2, output })
+}
+
+fn json_output<T: Serialize>(format: Format, value: &T) -> Result<String, Failure> {
+    let mut output = serde_json::to_string_pretty(value).map_err(|error| Failure {
+        format,
+        message: format!("failed to encode JSON output: {error}"),
+    })?;
+    output.push('\n');
+
+    Ok(output)
 }
 
 fn print_error(format: Format, message: &str) -> ExitCode {
@@ -888,7 +891,7 @@ fn print_error(format: Format, message: &str) -> ExitCode {
                 },
             };
             let output = serde_json::to_string_pretty(&envelope)
-                .expect("operation error envelopes contain only strings and integers");
+                .expect("operation error envelopes contain only strings and primitive values");
 
             write_stdout(&format!("{output}\n"))
         }

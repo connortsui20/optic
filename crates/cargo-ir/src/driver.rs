@@ -47,7 +47,7 @@ impl RustcDriver {
         Ok(Self {
             executable,
             original_global_wrapper: wrappers.global,
-            has_workspace_wrapper: wrappers.workspace,
+            has_workspace_wrapper: wrappers.has_workspace,
         })
     }
 
@@ -85,7 +85,7 @@ impl RustcDriver {
 
 struct EffectiveWrappers {
     global: Option<OsString>,
-    workspace: bool,
+    has_workspace: bool,
 }
 
 fn effective_wrappers(workspace_root: &Path) -> Result<EffectiveWrappers> {
@@ -98,14 +98,17 @@ fn effective_wrappers(workspace_root: &Path) -> Result<EffectiveWrappers> {
     };
 
     let global = effective_wrapper("RUSTC_WRAPPER", &config, "/build/rustc-wrapper");
-    let workspace = effective_wrapper(
+    let has_workspace = effective_wrapper(
         "RUSTC_WORKSPACE_WRAPPER",
         &config,
         "/build/rustc-workspace-wrapper",
     )
     .is_some();
 
-    Ok(EffectiveWrappers { global, workspace })
+    Ok(EffectiveWrappers {
+        global,
+        has_workspace,
+    })
 }
 
 fn effective_wrapper(name: &str, config: &Value, pointer: &str) -> Option<OsString> {
@@ -121,6 +124,8 @@ fn effective_wrapper(name: &str, config: &Value, pointer: &str) -> Option<OsStri
 
 fn cargo_config(workspace_root: &Path) -> Result<Value> {
     let program = "cargo".to_owned();
+    // `CARGO` can name the Cargo binary that built Optic instead of the Cargo binary selected by
+    // `RUSTUP_TOOLCHAIN`. The PATH proxy selects the matching nightly for this unstable command.
     let output = Command::new(&program)
         .current_dir(workspace_root)
         .args(["-Z", "unstable-options", "config", "get", "--format=json"])
@@ -149,12 +154,25 @@ fn require_rustc_dev(toolchain: &Toolchain) -> Result<()> {
             path: toolchain.rustc_private_lib.clone(),
             source,
         })?;
-    let has_rustc_middle = entries.filter_map(std::result::Result::ok).any(|entry| {
+    let mut has_rustc_middle = false;
+
+    for entry in entries {
+        let entry = entry.map_err(|source| Error::Filesystem {
+            operation: "read entry in",
+            path: toolchain.rustc_private_lib.clone(),
+            source,
+        })?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        name.starts_with("librustc_middle-")
+        if name.starts_with("librustc_middle-")
             && (name.ends_with(".rlib") || name.ends_with(".rmeta"))
-    });
+        {
+            has_rustc_middle = true;
+
+            break;
+        }
+    }
+
     if !has_rustc_middle {
         return Err(Error::MissingRustcDev {
             path: toolchain.rustc_private_lib.clone(),
@@ -213,6 +231,7 @@ fn build_driver(toolchain: &Toolchain, directory: &Path, executable: &Path) -> R
         path: source.clone(),
         source: source_error,
     })?;
+
     let mut temporary_name = executable_name().to_owned();
     temporary_name.push(".tmp");
     let temporary = directory.join(temporary_name);
