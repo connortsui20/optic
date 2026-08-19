@@ -1,15 +1,20 @@
 # Cargo Optic
 
-Cargo Optic shows the Rust source and LLVM output for concrete compiler instances. It records this
-evidence in the Cargo workspace, so later queries do not compile the same inputs again.
+Cargo Optic shows Rust source and LLVM output for concrete compiler instances. It stores immutable
+evidence in the Cargo workspace. Cargo decides when the selected target is fresh.
 
 This prototype supports these compiler outputs:
 
 - `llvm` is the saved LLVM IR after the optimization pipeline. This output is the default.
 - `llvm-pre-opt` is the LLVM IR before the LLVM optimization pipeline.
 
-The evidence is enriched output. Cargo Optic enables v0 symbol names and line-table debug
-information. Therefore, the output does not exactly match a normal Cargo build.
+The default `faithful` profile preserves the code-generation settings of the selected target. It
+adds only the arguments that save compiler evidence. The saved temporary files still change the
+Cargo fingerprint.
+
+Use `--evidence-profile enriched` to add v0 symbol names and line-table debug information. Use
+`--evidence-profile experiment` with repeated `--rustc-arg` options for a code-generation
+experiment.
 
 ## Install
 
@@ -76,6 +81,7 @@ cargo +nightly optic capture -p my-crate --lib --release --format json
 cargo +nightly optic find --capture CAPTURE_ID_PREFIX my_crate::kernel --format json
 cargo +nightly optic show --instance INSTANCE_ID_PREFIX --format json
 cargo +nightly optic captures --format json
+cargo +nightly optic inspect --capture CAPTURE_ID_PREFIX --format json
 ```
 
 Omit `--format json` for an interactive workflow. Plain `find` output prints a complete `show`
@@ -91,9 +97,44 @@ Each displayed ID is a valid prefix. Cargo Optic reports an error if a shorter p
 than one stored ID.
 
 Use `--fresh` with `capture` or a build-based `show` command to create new evidence. This option
-does not use a matching completed capture.
+uses a unique Cargo fingerprint and invokes rustc for the selected target.
 
-## Remove stored evidence
+The JSON transport version is 2. Instance results report definitions, declarations, and aliases
+for each LLVM stage. A result does not use one combined `has_body` value.
+
+## Inspect and compare evidence
+
+Use `inspect` to show the request, compiler commands, wrappers, environment, and artifact stages:
+
+```console
+cargo +nightly optic inspect --capture CAPTURE_ID_PREFIX
+```
+
+Use `compare` to compare compact LLVM structure for two exact instances:
+
+```console
+cargo +nightly optic compare \
+  --before OLD_INSTANCE_ID \
+  --after NEW_INSTANCE_ID
+```
+
+The comparison reports body bytes, instruction-like lines, vector lines, calls, and safety-check
+symbols. It also reports incompatible compiler or Cargo dimensions. These counts are structural
+LLVM summaries, not performance measurements.
+
+## Manage stored evidence
+
+Use these commands to inspect and manage the store:
+
+```console
+cargo +nightly optic status
+cargo +nightly optic verify
+cargo +nightly optic remove --capture CAPTURE_ID_PREFIX
+cargo +nightly optic gc
+```
+
+The `remove` command removes one catalog capture. Shared blobs remain until `gc` removes all
+unreferenced blobs. The `verify` command reads each referenced blob and checks its BLAKE3 digest.
 
 Run this command from the Cargo workspace that you want to clean:
 
@@ -112,18 +153,19 @@ serializes capture writers, but read-only queries can use completed captures in 
 There is no current capture and no session state. Each read-only command uses an explicit capture
 or instance ID. An instance ID identifies its capture. Content-addressed blobs hold the evidence.
 
-The cache key includes these inputs:
+The current store schema is version 5. Cargo Optic rejects older stores. Run `cargo optic clean`
+once to replace an older prototype store.
 
-- The Cargo target options.
-- The rustc commit.
-- The Cargo metadata.
-- Cargo manifests, the lock file, and Cargo configuration files.
-- The contents of local Rust source files.
-- Compiler and Cargo environment variables.
-- The Cargo Optic evidence version.
+Cargo Optic asks Cargo to evaluate the selected target before it reuses a capture. This design
+includes Cargo-tracked build-script inputs, `include_bytes!` files, and compiler environment
+inputs. Optic does not use a source-file digest as a substitute for Cargo freshness.
 
-If a build script reads an undeclared input, use `--fresh`. The first MVP does not find all
-external build-script inputs.
+Optic uses a stable analysis fingerprint for one compiler, target, profile, feature set, and
+compiler environment. If Cargo reports the target as fresh, Optic reuses the matching verified
+capture. If no matching capture exists, Optic asks you to repeat the command with `--fresh`.
+
+Cargo cannot track a build-script input that the script does not declare. If a script has an
+undeclared input, use `--fresh` after that input changes.
 
 ## Cargo artifact reuse
 
@@ -133,30 +175,38 @@ Cargo can reuse dependency artifacts from normal commands.
 Cargo Optic installs an outer global compiler wrapper. This wrapper preserves existing global and
 workspace wrappers. It passes dependency compilations and compiler probes through without changes.
 
-The analysis flags and the compiler identity driver apply only to the selected target. Cargo Optic
-compiles this target once. It collects identity data before code generation and then continues the
-same compilation.
+The evidence arguments and the compiler identity driver apply only to the selected target. Cargo
+Optic records identities before code generation and continues the same compilation.
 
 The driver is a small internal program. Cargo Optic builds it once for each rustc commit and source
 revision. It stores the driver below `$CARGO_HOME/optic/drivers`.
 
-If no normal linked artifact exists, the next normal Cargo command compiles the selected target.
-Existing normal artifacts remain available.
+The faithful profile permits the normal link step. Existing normal artifacts remain available.
 
 ## MVP limits
 
 - Cargo Optic requires nightly rustc and the matching `llvm-tools` and `rustc-dev` components.
 - The prototype records source from workspace packages and local path dependencies.
 - The prototype records one selected library, binary, benchmark, or example target.
-- The prototype does not record MIR, assembly, object files, or LTO transition stages.
-- Source lookup uses Rust syntax and a path score. It omits source when the best match is ambiguous.
+- The prototype does not record MIR, assembly, object files, or compiler optimization remarks.
+- The store retains exact compiler stage names. The user interface shows only supported LLVM
+  stages.
+- If ThinLTO artifacts exist, optimized output uses `thin-lto-after-pm` instead of the earlier
+  `rcgu` artifact.
+- Source lookup uses exact rustc spans when they match captured local source. Syntax scoring is a
+  fallback for identities that do not have a span.
+- The prototype does not navigate inline occurrences to their enclosing optimized bodies.
 - The prototype is verified on Apple silicon macOS.
 
 ### Instance-to-body identity
 
-Cargo Optic uses a small rustc driver to collect each concrete function and its raw LLVM symbol.
-It joins compiler instances to LLVM bodies only when the raw symbols are equal. Display paths do
-not control this relationship.
+Cargo Optic uses a small rustc driver to collect each concrete function and raw LLVM symbol. Each
+instance retains its source definition and codegen-unit placements. Duplicate symbols remain
+separate instance records.
+
+The store keeps instances, definitions, bodies, declarations, and aliases as separate records. An
+exact raw-symbol relationship connects an instance to zero or more bodies. Display paths do not
+control this relationship.
 
 LLVM can remove, clone, or rename a body during optimization. Cargo Optic does not infer a
 relationship from similar text. If the exact symbol is absent, the selected output has no

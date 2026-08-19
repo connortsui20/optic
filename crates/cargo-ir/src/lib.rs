@@ -5,7 +5,11 @@
 //! It does not assign Optic capture IDs or persist evidence.
 
 mod capture;
-pub use capture::{BodyRange, EvidenceBundle, LlvmStage, ModuleEvidence, capture};
+pub use capture::{
+    AliasTarget, ArtifactProvenance, BodyRange, CaptureInvocation, CaptureMethod, CaptureOutcome,
+    CargoArtifact, CommandInvocation, EnvironmentVariable, EvidenceBundle, LlvmAlias,
+    LlvmDeclaration, LlvmStage, LtoScope, ModuleEvidence, capture,
+};
 
 mod error;
 pub use error::{Error, Result};
@@ -15,10 +19,10 @@ mod driver;
 mod llvm;
 
 mod mono;
-pub use mono::CompilerInstance;
+pub use mono::{CodegenUnitPlacement, CompilerInstance, DefinitionOrigin, SourceSpan};
 
 mod request;
-pub use request::{BuildRequest, CargoTarget};
+pub use request::{BuildRequest, CaptureProfile, CargoTarget};
 
 mod toolchain;
 pub use toolchain::{Toolchain, inspect_toolchain};

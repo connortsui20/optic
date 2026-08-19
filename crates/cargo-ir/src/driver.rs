@@ -16,7 +16,7 @@ use serde_json::Value;
 use crate::{Error, Result, Toolchain};
 
 const DRIVER_SOURCE: &str = include_str!("../driver/main.rs");
-const PROTOCOL_VERSION: &str = "1";
+const PROTOCOL_VERSION: &str = "2";
 
 const DRIVER_INNER_ENV: &str = "OPTIC_RUSTC_DRIVER_INNER";
 const MANIFEST_PATH_ENV: &str = "OPTIC_IDENTITY_MANIFEST";
@@ -29,7 +29,7 @@ const WRAPPER_ACTIVE_ENV: &str = "OPTIC_RUSTC_WRAPPER_ACTIVE";
 pub(crate) struct RustcDriver {
     executable: PathBuf,
     original_global_wrapper: Option<OsString>,
-    has_workspace_wrapper: bool,
+    workspace_wrapper: Option<OsString>,
 }
 
 impl RustcDriver {
@@ -47,7 +47,7 @@ impl RustcDriver {
         Ok(Self {
             executable,
             original_global_wrapper: wrappers.global,
-            has_workspace_wrapper: wrappers.has_workspace,
+            workspace_wrapper: wrappers.workspace,
         })
     }
 
@@ -75,17 +75,30 @@ impl RustcDriver {
             }
         }
 
-        if self.has_workspace_wrapper {
+        if self.workspace_wrapper.is_some() {
             command.env(WORKSPACE_WRAPPER_ENV, "1");
         } else {
             command.env_remove(WORKSPACE_WRAPPER_ENV);
         }
     }
+
+    pub(crate) fn wrapper_chain(&self) -> Vec<String> {
+        let mut wrappers = vec![self.executable.to_string_lossy().into_owned()];
+
+        if let Some(wrapper) = &self.original_global_wrapper {
+            wrappers.push(wrapper.to_string_lossy().into_owned());
+        }
+        if let Some(wrapper) = &self.workspace_wrapper {
+            wrappers.push(wrapper.to_string_lossy().into_owned());
+        }
+
+        wrappers
+    }
 }
 
 struct EffectiveWrappers {
     global: Option<OsString>,
-    has_workspace: bool,
+    workspace: Option<OsString>,
 }
 
 fn effective_wrappers(workspace_root: &Path) -> Result<EffectiveWrappers> {
@@ -98,17 +111,13 @@ fn effective_wrappers(workspace_root: &Path) -> Result<EffectiveWrappers> {
     };
 
     let global = effective_wrapper("RUSTC_WRAPPER", &config, "/build/rustc-wrapper");
-    let has_workspace = effective_wrapper(
+    let workspace = effective_wrapper(
         "RUSTC_WORKSPACE_WRAPPER",
         &config,
         "/build/rustc-workspace-wrapper",
-    )
-    .is_some();
+    );
 
-    Ok(EffectiveWrappers {
-        global,
-        has_workspace,
-    })
+    Ok(EffectiveWrappers { global, workspace })
 }
 
 fn effective_wrapper(name: &str, config: &Value, pointer: &str) -> Option<OsString> {

@@ -39,7 +39,8 @@ The command builds the application and finds two instances:
 Cargo Optic prints a complete `show` command for each instance. Copy one of these commands to show
 the Rust source and optimized LLVM IR. You do not have to edit or combine IDs.
 
-Run the first command again to reuse the completed capture. Add `--fresh` to force a new capture.
+Run the first command again. Cargo checks the target and Optic reuses the completed capture. Add
+`--fresh` to invoke rustc and create a new capture.
 
 ## Compare a source change
 
@@ -54,17 +55,35 @@ values.into_iter().fold(T::default(), |sum, value| {
 })
 ```
 
-Run the main `show` command again. Cargo Optic detects the source change and creates a new capture.
+Run the main `show` command again. Cargo detects the source change. Optic creates a new capture.
 Copy one of the new instance commands to inspect the new LLVM IR.
 
-Run the saved old instance command to compare the old evidence. Cargo Optic reads this evidence
-from `.optic` and does not rebuild it.
+Run the saved old instance command to read the old evidence. Cargo Optic reads `.optic` and does
+not rebuild the instance.
+
+Use the two instance IDs in this command:
+
+```console
+cargo +nightly optic compare \
+  --before OLD_INSTANCE_ID \
+  --after NEW_INSTANCE_ID
+```
+
+The command reports structural LLVM changes and incompatible capture dimensions.
 
 Use this command to list all completed captures:
 
 ```console
 cargo +nightly optic captures
 ```
+
+Use this command to inspect one capture:
+
+```console
+cargo +nightly optic inspect --capture CAPTURE_ID
+```
+
+The result includes the request, compiler commands, wrappers, environment, and artifact stages.
 
 ## Select a different compiler output
 
@@ -88,6 +107,22 @@ Run this command to restore the original vectorized example:
 
 ```console
 git restore kernel/src/lib.rs
+```
+
+## Manage the Optic store
+
+Use these commands to inspect the store and verify its blobs:
+
+```console
+cargo +nightly optic status
+cargo +nightly optic verify
+```
+
+Use these commands to remove one capture and its unreferenced blobs:
+
+```console
+cargo +nightly optic remove --capture CAPTURE_ID
+cargo +nightly optic gc
 ```
 
 ## Remove the Optic cache

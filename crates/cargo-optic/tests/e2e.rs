@@ -130,11 +130,7 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         .as_array()
         .expect("find returns an instance array");
     assert_eq!(instances.len(), 2);
-    assert!(
-        instances
-            .iter()
-            .all(|instance| instance["has_body"] == true)
-    );
+    assert!(instances.iter().all(has_optimized_definition));
     let reexported = fixture.run([
         "find",
         "--capture",
@@ -149,11 +145,49 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         .as_array()
         .expect("find returns the re-exported instance");
     assert_eq!(reexported_instances.len(), 1);
-    assert_eq!(reexported_instances[0]["has_body"], true);
+    assert!(has_optimized_definition(&reexported_instances[0]));
     assert_eq!(
         reexported_instances[0]["definition"],
         "optic_mvp_kernel::ReexportedKernel::identity"
     );
+
+    let nested = fixture.run([
+        "find",
+        "--capture",
+        capture_prefix,
+        "inline_add_one::chunk",
+        "--format",
+        "json",
+    ]);
+    assert_success(&nested);
+    let nested = json(&nested);
+    let nested_instances = nested["result"]["instances"]
+        .as_array()
+        .expect("find returns nested helper instances");
+    assert_eq!(nested_instances.len(), 1);
+    let nested_id = nested_instances[0]["id"]
+        .as_str()
+        .expect("the nested helper has an instance ID");
+    let optimized = nested_instances[0]["availability"]
+        .as_array()
+        .expect("the nested helper has stage-specific availability")
+        .iter()
+        .find(|availability| availability["output"] == "llvm")
+        .expect("optimized LLVM availability is present");
+    assert_eq!(optimized["definitions"], 0);
+    let nested_source = fixture.run([
+        "show",
+        "--instance",
+        nested_id,
+        "--source",
+        "--format",
+        "json",
+    ]);
+    assert_success(&nested_source);
+    let nested_source = json(&nested_source);
+    let nested_source = string(&nested_source, "/result/source/text");
+    assert!(nested_source.contains("fn chunk"));
+    assert!(nested_source.contains("value + T::from(1)"));
 
     let instance_ids = [first_capture, changed_capture, capture]
         .into_iter()
@@ -271,15 +305,8 @@ fn captures_finds_and_shows_concrete_generic_instances() {
     assert_success(&with_source);
     let with_source = json(&with_source);
     let source = string(&with_source, "/result/source/text");
-    let expected_source = concat!(
-        "/// Sums an array through a standalone compiler instance.\n",
-        "///\n",
-        "/// The acceptance test uses `#[inline(never)]` so each instance keeps a standalone ",
-        "LLVM body.\n",
-        "#[inline(never)]\n",
-        "pub fn outlined_sum",
-    );
-    assert!(source.starts_with(expected_source));
+    assert!(source.contains("pub fn outlined_sum"));
+    assert!(source.contains(".fold(T::default()"));
 
     let redundant_capture = fixture.run([
         "show",
@@ -309,6 +336,53 @@ fn captures_finds_and_shows_concrete_generic_instances() {
             .len(),
         3
     );
+
+    let details = fixture.run(["inspect", "--capture", capture, "--format", "json"]);
+    assert_success(&details);
+    let details = json(&details);
+    assert_eq!(details["result"]["summary"]["capture_profile"], "faithful");
+    assert_eq!(details["result"]["request"]["package"], "optic-mvp-app");
+    assert!(
+        !details["result"]["artifacts"]
+            .as_array()
+            .expect("capture details include artifacts")
+            .is_empty()
+    );
+    let encoded_details = serde_json::to_vec(&details).expect("capture details re-encode as JSON");
+    assert!(!String::from_utf8_lossy(&encoded_details).contains("/.optic/"));
+
+    let comparison = fixture.run([
+        "compare", "--before", instance, "--after", instance, "--format", "json",
+    ]);
+    assert_success(&comparison);
+    let comparison = json(&comparison);
+    assert_eq!(comparison["result"]["delta"]["bytes"], 0);
+    assert!(
+        comparison["result"]["compatibility_differences"]
+            .as_array()
+            .expect("comparison includes compatibility dimensions")
+            .is_empty()
+    );
+
+    let status = fixture.run(["status", "--format", "json"]);
+    assert_success(&status);
+    assert_eq!(json(&status)["result"]["captures"], 3);
+    let verify = fixture.run(["verify", "--format", "json"]);
+    assert_success(&verify);
+    assert!(
+        json(&verify)["result"]["verified_blobs"]
+            .as_u64()
+            .is_some_and(|count| count > 0)
+    );
+
+    let removed = fixture.run(["remove", "--capture", first_capture, "--format", "json"]);
+    assert_success(&removed);
+    assert_eq!(json(&removed)["result"]["capture_id"], first_capture);
+    let gc = fixture.run(["gc", "--format", "json"]);
+    assert_success(&gc);
+    let status = fixture.run(["status", "--format", "json"]);
+    assert_success(&status);
+    assert_eq!(json(&status)["result"]["captures"], 2);
     assert!(fixture.staging_is_empty());
 
     let catalog = fixture.root.join(".optic/catalog.sqlite");
@@ -327,6 +401,93 @@ fn captures_finds_and_shows_concrete_generic_instances() {
     let clean_again = fixture.run(["clean", "--format", "json"]);
     assert_success(&clean_again);
     assert_eq!(json(&clean_again)["result"]["removed"], false);
+}
+
+#[test]
+fn cargo_observed_reuse_tracks_non_rust_and_environment_inputs() {
+    let fixture = Fixture::new();
+    let arguments = [
+        "capture",
+        "-p",
+        "optic-mvp-app",
+        "--bin",
+        "optic-mvp-app",
+        "--release",
+        "--format",
+        "json",
+    ];
+    let first = fixture.run(arguments);
+    assert_success(&first);
+    let first = json(&first);
+    let first_id = string(&first, "/result/id");
+
+    let reused = fixture.run(arguments);
+    assert_success(&reused);
+    let reused = json(&reused);
+    assert_eq!(string(&reused, "/result/id"), first_id);
+    assert_eq!(reused["result"]["reused"], true);
+
+    fs::write(fixture.root.join("kernel/src/build-data.txt"), "second\n")
+        .expect("the test can change the included compiler input");
+    let included = fixture.run(arguments);
+    assert_success(&included);
+    let included = json(&included);
+    let included_id = string(&included, "/result/id");
+    assert_ne!(included_id, first_id);
+    assert_eq!(included["result"]["reused"], false);
+
+    let environment = fixture
+        .command(arguments)
+        .env("OPTIC_TEST_VALUE", "second")
+        .output()
+        .expect("the Cargo Optic binary starts");
+    assert_success(&environment);
+    let environment = json(&environment);
+    assert_ne!(string(&environment, "/result/id"), included_id);
+    assert_eq!(environment["result"]["reused"], false);
+}
+
+#[test]
+fn malformed_arguments_use_the_json_error_contract() {
+    for format in [
+        ["--format", "json"].as_slice(),
+        ["--format=json"].as_slice(),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_cargo-optic"))
+            .arg("optic")
+            .arg("unknown-command")
+            .args(format)
+            .output()
+            .expect("the Cargo Optic binary starts");
+
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stderr.is_empty());
+        let output = json(&output);
+        assert_eq!(output["version"], 2);
+        assert_eq!(output["ok"], false);
+        assert_eq!(output["error"]["code"], "invalid_arguments");
+    }
+}
+
+#[test]
+fn rustc_arguments_require_the_experiment_profile() {
+    let fixture = Fixture::new();
+    let output = fixture.run([
+        "capture",
+        "-p",
+        "optic-mvp-app",
+        "--bin",
+        "optic-mvp-app",
+        "--rustc-arg=-Ctarget-cpu=native",
+        "--format",
+        "json",
+    ]);
+
+    assert!(!output.status.success());
+    assert!(
+        string(&json(&output), "/error/message")
+            .contains("--rustc-arg requires --evidence-profile experiment")
+    );
 }
 
 #[cfg(unix)]
@@ -366,6 +527,7 @@ fn preserves_compiler_wrappers_and_reuses_dependency_artifacts() {
         .env("RUSTC_WRAPPER", &global_wrapper)
         .env("RUSTC_WORKSPACE_WRAPPER", &workspace_wrapper)
         .env("OPTIC_TEST_WRAPPER_LOG", &log)
+        .env("OPTIC_TEST_VALUE", "first")
         .output()
         .expect("the warm Cargo build starts");
     assert_success(&warm);
@@ -435,6 +597,7 @@ impl Fixture {
             .args(arguments)
             .current_dir(&self.root)
             .env("RUSTUP_TOOLCHAIN", "nightly")
+            .env("OPTIC_TEST_VALUE", "first")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -506,6 +669,19 @@ fn string<'a>(value: &'a Value, pointer: &str) -> &'a str {
         .pointer(pointer)
         .and_then(Value::as_str)
         .expect("the JSON pointer selects a string")
+}
+
+fn has_optimized_definition(instance: &Value) -> bool {
+    instance["availability"]
+        .as_array()
+        .expect("instances include stage-specific availability")
+        .iter()
+        .any(|availability| {
+            availability["output"] == "llvm"
+                && availability["definitions"]
+                    .as_u64()
+                    .is_some_and(|count| count > 0)
+        })
 }
 
 #[track_caller]

@@ -11,14 +11,15 @@ use std::path::{Path, PathBuf};
 use cargo_ir::BuildRequest;
 use serde::Serialize;
 
-use crate::source::{SourceBaseline, find_item};
+use crate::source::{SourceBaseline, find_item, find_item_at};
 use crate::store::{FileLock, Store, lock_workspace_exclusive, lock_workspace_shared};
 use crate::{
-    BuildSpec, CachePolicy, CaptureId, CaptureSummary, CleanSummary, CompilerOutput, FindResult,
-    InstanceId, Result, ShowView,
+    BodySetDelta, BodySetSummary, BuildSpec, CachePolicy, CaptureDetails, CaptureId,
+    CaptureSummary, CleanSummary, CompareView, CompilerOutput, FindResult, GcSummary, InstanceId,
+    RemoveSummary, Result, ShowView, StoreStatus, VerifySummary,
 };
 
-const EVIDENCE_VERSION: u32 = 2;
+const EVIDENCE_VERSION: u32 = 3;
 
 /// Product workflows for one Cargo workspace and its `.optic` store.
 pub struct Application {
@@ -79,6 +80,14 @@ impl Application {
         spec: &BuildSpec,
         cache_policy: CachePolicy,
     ) -> Result<CaptureSummary> {
+        if spec.capture_profile != crate::CaptureProfile::Experiment
+            && !spec.rustc_arguments.is_empty()
+        {
+            return Err(crate::Error::InvalidRequest {
+                message: "--rustc-arg requires --evidence-profile experiment".to_owned(),
+            });
+        }
+
         let _writer = self.store.lock_writer()?;
         let toolchain = cargo_ir::inspect_toolchain()?;
         let capture_id = CaptureId::new();
@@ -88,10 +97,10 @@ impl Application {
 
         let result = self.capture_to_staging(spec, cache_policy, &toolchain, &capture_id, &staging);
         let cleanup = remove_staging(&staging);
-        let summary = result?;
-        cleanup?;
-
-        Ok(summary)
+        match (result, cleanup) {
+            (Ok(summary), Ok(())) => Ok(summary),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
     }
 
     fn capture_to_staging(
@@ -102,33 +111,42 @@ impl Application {
         capture_id: &CaptureId,
         staging: &Path,
     ) -> Result<CaptureSummary> {
+        let request_key = request_key(spec, toolchain, &self.target_directory)?;
+        let analysis_directory = match cache_policy {
+            CachePolicy::Reuse => self.store.analysis_directory(&request_key),
+            CachePolicy::Refresh => staging.join("compiler"),
+        };
+        prepare_analysis_directory(&analysis_directory)?;
         let sources = SourceBaseline::capture(&self.workspace_root, spec, staging)?;
-        let request_key = request_key(
-            spec,
-            toolchain,
-            &self.target_directory,
-            sources.cache_digest(),
-        )?;
-
-        if cache_policy == CachePolicy::Reuse
-            && let Some(summary) = self.store.cached_capture(&request_key)?
-        {
-            return Ok(summary);
+        let request = self.build_request(spec, analysis_directory.clone());
+        let outcome = cargo_ir::capture(&request);
+        let result = match outcome {
+            Ok(cargo_ir::CaptureOutcome::Captured { bundle }) => {
+                sources.validate()?;
+                self.store.publish(
+                    capture_id,
+                    &request_key,
+                    spec,
+                    &bundle,
+                    &sources,
+                    selected_target(spec, &bundle.toolchain.host),
+                )
+            }
+            Ok(cargo_ir::CaptureOutcome::Fresh { .. }) => {
+                sources.validate()?;
+                self.store.cached_capture(&request_key)?.ok_or_else(|| {
+                    crate::Error::EvidenceUnavailable {
+                        message: "Cargo reused the selected target, but Optic has no verified capture for this build. Run the same command with --fresh".to_owned(),
+                    }
+                })
+            }
+            Err(error) => Err(error.into()),
+        };
+        let cleanup = remove_analysis_directory(&analysis_directory);
+        match (result, cleanup) {
+            (Ok(summary), Ok(())) => Ok(summary),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
         }
-
-        let request = self.build_request(spec, staging.join("compiler"));
-        let bundle = cargo_ir::capture(&request)?;
-
-        sources.validate()?;
-
-        self.store.publish(
-            capture_id,
-            &request_key,
-            spec,
-            &bundle,
-            &sources,
-            selected_target(spec, &bundle.toolchain.host),
-        )
     }
 
     /// Lists completed captures from newest to oldest.
@@ -138,6 +156,59 @@ impl Application {
     /// Returns an error if the evidence catalog cannot be read.
     pub fn captures(&self) -> Result<Vec<CaptureSummary>> {
         self.store.captures()
+    }
+
+    /// Returns the size and object counts for this workspace's evidence store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the catalog or blob directory cannot be read.
+    pub fn status(&self) -> Result<StoreStatus> {
+        let _reader = self.store.lock_evidence_reader()?;
+
+        self.store.status()
+    }
+
+    /// Removes one completed capture but leaves shared blobs for explicit garbage collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the capture selector is not unique or the catalog cannot be updated.
+    pub fn remove(&mut self, capture_id: &CaptureId) -> Result<RemoveSummary> {
+        let _writer = self.store.lock_writer()?;
+
+        self.store.remove_capture(capture_id)
+    }
+
+    /// Removes content-addressed blobs that no completed capture references.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the catalog or blob directory cannot be updated.
+    pub fn gc(&mut self) -> Result<GcSummary> {
+        let _writer = self.store.lock_writer()?;
+
+        self.store.gc()
+    }
+
+    /// Verifies the digest of every blob referenced by completed captures.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if referenced evidence is missing or corrupt.
+    pub fn verify(&self) -> Result<VerifySummary> {
+        let _reader = self.store.lock_evidence_reader()?;
+
+        self.store.verify()
+    }
+
+    /// Returns reproducibility and artifact provenance for one completed capture.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the capture selector is not unique or its metadata is invalid.
+    pub fn inspect(&self, capture_id: &CaptureId) -> Result<CaptureDetails> {
+        self.store.capture_details(capture_id)
     }
 
     /// Finds concrete instances in one completed capture.
@@ -168,14 +239,69 @@ impl Application {
         output: CompilerOutput,
         include_source: bool,
     ) -> Result<ShowView> {
+        let _reader = self.store.lock_evidence_reader()?;
         let mut view = self.store.show(instance_id, output)?;
 
         if include_source {
-            let sources = self.store.sources(&view.capture_id)?;
-            view.source = find_item(&view.instance.definition, &sources);
+            view.source = if let Some(location) = &view.instance.source {
+                self.store
+                    .source_file(&view.capture_id, location)?
+                    .and_then(|source| find_item_at(&view.instance.definition, location, &source))
+            } else {
+                let sources = self.store.sources(&view.capture_id)?;
+                find_item(&view.instance.definition, &sources)
+            };
         }
 
         Ok(view)
+    }
+
+    /// Compares compact LLVM structure for two exact instances.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if either instance or its capture evidence cannot be read.
+    pub fn compare(
+        &self,
+        before: &InstanceId,
+        after: &InstanceId,
+        output: CompilerOutput,
+    ) -> Result<CompareView> {
+        let before_view = self.show(before, output, false)?;
+        let after_view = self.show(after, output, false)?;
+        let before_capture = self.store.capture_details(&before_view.capture_id)?;
+        let after_capture = self.store.capture_details(&after_view.capture_id)?;
+        let mut compatibility_differences = Vec::new();
+
+        if before_capture.summary.rustc_release != after_capture.summary.rustc_release {
+            compatibility_differences.push("rustc release".to_owned());
+        }
+        if before_capture.summary.llvm_version != after_capture.summary.llvm_version {
+            compatibility_differences.push("LLVM version".to_owned());
+        }
+        if before_capture.summary.target != after_capture.summary.target {
+            compatibility_differences.push("compiler target".to_owned());
+        }
+        if before_capture.summary.capture_profile != after_capture.summary.capture_profile {
+            compatibility_differences.push("evidence profile".to_owned());
+        }
+        if before_capture.request != after_capture.request {
+            compatibility_differences.push("Cargo build request".to_owned());
+        }
+
+        let before_summary = BodySetSummary::from_bodies(&before_view.bodies);
+        let after_summary = BodySetSummary::from_bodies(&after_view.bodies);
+        let delta = BodySetDelta::between(&before_summary, &after_summary);
+
+        Ok(CompareView {
+            output,
+            before_instance: before_view.instance,
+            after_instance: after_view.instance,
+            compatibility_differences,
+            before: before_summary,
+            after: after_summary,
+            delta,
+        })
     }
 
     fn build_request(&self, spec: &BuildSpec, analysis_directory: PathBuf) -> BuildRequest {
@@ -183,7 +309,14 @@ impl Application {
             workspace_root: self.workspace_root.clone(),
             manifest_path: spec.manifest_path.clone(),
             package: spec.package.clone(),
-            target: spec.target.clone(),
+            target: spec.target.as_ref().map(|target| match target {
+                crate::BuildTarget::Library => cargo_ir::CargoTarget::Library,
+                crate::BuildTarget::Binary(name) => cargo_ir::CargoTarget::Binary(name.clone()),
+                crate::BuildTarget::Benchmark(name) => {
+                    cargo_ir::CargoTarget::Benchmark(name.clone())
+                }
+                crate::BuildTarget::Example(name) => cargo_ir::CargoTarget::Example(name.clone()),
+            }),
             profile: spec.profile.clone(),
             features: spec.features.clone(),
             all_features: spec.all_features,
@@ -192,6 +325,13 @@ impl Application {
             locked: spec.locked,
             offline: spec.offline,
             frozen: spec.frozen,
+            capture_profile: match spec.capture_profile {
+                crate::CaptureProfile::Faithful => cargo_ir::CaptureProfile::Faithful,
+                crate::CaptureProfile::Enriched => cargo_ir::CaptureProfile::Enriched,
+                crate::CaptureProfile::Experiment => cargo_ir::CaptureProfile::Experiment {
+                    rustc_arguments: spec.rustc_arguments.clone(),
+                },
+            },
             analysis_directory,
         }
     }
@@ -227,7 +367,6 @@ fn request_key(
     spec: &BuildSpec,
     toolchain: &cargo_ir::Toolchain,
     target_directory: &Path,
-    source_digest: blake3::Hash,
 ) -> Result<String> {
     #[derive(Serialize)]
     struct CacheKey<'a> {
@@ -235,22 +374,36 @@ fn request_key(
         spec: &'a BuildSpec,
         rustc_commit: &'a str,
         target_directory: &'a Path,
-        inputs: &'a str,
         environment: Vec<(String, String)>,
     }
 
-    let inputs = source_digest.to_hex();
     let key = CacheKey {
         evidence_version: EVIDENCE_VERSION,
         spec,
         rustc_commit: &toolchain.commit_hash,
         target_directory,
-        inputs: inputs.as_str(),
         environment: compiler_environment(),
     };
     let encoded = serde_json::to_vec(&key)?;
 
     Ok(blake3::hash(&encoded).to_hex().to_string())
+}
+
+fn prepare_analysis_directory(path: &Path) -> Result<()> {
+    if path.exists() {
+        fs::remove_dir_all(path)
+            .map_err(|source| crate::Error::filesystem("remove", path, source))?;
+    }
+    fs::create_dir_all(path).map_err(|source| crate::Error::filesystem("create", path, source))
+}
+
+fn remove_analysis_directory(path: &Path) -> Result<()> {
+    if path.exists() {
+        fs::remove_dir_all(path)
+            .map_err(|source| crate::Error::filesystem("remove", path, source))?;
+    }
+
+    Ok(())
 }
 
 fn compiler_environment() -> Vec<(String, String)> {

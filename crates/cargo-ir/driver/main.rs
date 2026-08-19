@@ -8,8 +8,9 @@
 extern crate rustc_driver;
 extern crate rustc_interface;
 extern crate rustc_middle;
+extern crate rustc_span;
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
@@ -24,7 +25,7 @@ use rustc_middle::ty::TyCtxt;
 use rustc_middle::ty::print::with_no_trimmed_paths;
 
 const MANIFEST_MAGIC: &[u8; 16] = b"CARGO_OPTIC_ID\0\0";
-const PROTOCOL_VERSION: u32 = 1;
+const PROTOCOL_VERSION: u32 = 2;
 const MANIFEST_PATH_ENV: &str = "OPTIC_IDENTITY_MANIFEST";
 const ORIGINAL_WRAPPER_ENV: &str = "OPTIC_ORIGINAL_RUSTC_WRAPPER";
 const RUSTC_COMMIT_ENV: &str = "OPTIC_RUSTC_COMMIT";
@@ -35,43 +36,114 @@ const DRIVER_INNER_ENV: &str = "OPTIC_RUSTC_DRIVER_INNER";
 
 #[derive(Default)]
 struct IdentityCallbacks {
-    identities: BTreeMap<String, CompilerIdentity>,
+    identities: Vec<CompilerIdentity>,
 }
 
 struct CompilerIdentity {
-    definition: String,
+    definition_crate: String,
+    definition_path: String,
+    source: Option<SourceSpan>,
     display_name: String,
     raw_symbol: String,
-    codegen_units: Vec<String>,
+    placements: Vec<CodegenUnitPlacement>,
+}
+
+struct CodegenUnitPlacement {
+    codegen_unit: String,
+    linkage: String,
+    visibility: String,
+    local_copy: bool,
+    size_estimate: usize,
+}
+
+struct SourceSpan {
+    file_name: String,
+    byte_start: u64,
+    byte_end: u64,
+    line_start: usize,
+    column_start: usize,
+    line_end: usize,
+    column_end: usize,
 }
 
 impl Callbacks for IdentityCallbacks {
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
         let partitions = tcx.collect_and_partition_mono_items(());
+        let mut identities = HashMap::new();
 
         for codegen_unit in partitions.codegen_units {
-            for (mono_item, _) in codegen_unit.items_in_deterministic_order(tcx) {
+            for (mono_item, data) in codegen_unit.items_in_deterministic_order(tcx) {
                 let MonoItem::Fn(instance) = mono_item else {
                     continue;
                 };
-                let raw_symbol = tcx.symbol_name(instance).name.to_owned();
-                let identity = self
-                    .identities
-                    .entry(raw_symbol.clone())
-                    .or_insert_with(|| CompilerIdentity {
-                        definition: tcx.def_path_str(instance.def_id()),
+                let identity = identities.entry(instance).or_insert_with(|| {
+                    let def_id = instance.def_id();
+
+                    CompilerIdentity {
+                        definition_crate: tcx.crate_name(def_id.krate).to_string(),
+                        definition_path: tcx.def_path_str(def_id),
+                        source: source_span(tcx, tcx.def_span(def_id)),
                         display_name: with_no_trimmed_paths!(
-                            tcx.def_path_str_with_args(instance.def_id(), instance.args)
+                            tcx.def_path_str_with_args(def_id, instance.args)
                         ),
-                        raw_symbol,
-                        codegen_units: Vec::new(),
-                    });
-                identity.codegen_units.push(codegen_unit.name().to_string());
+                        raw_symbol: tcx.symbol_name(instance).name.to_owned(),
+                        placements: Vec::new(),
+                    }
+                });
+                identity.placements.push(CodegenUnitPlacement {
+                    codegen_unit: codegen_unit.name().to_string(),
+                    linkage: format!("{:?}", data.linkage),
+                    visibility: format!("{:?}", data.visibility),
+                    local_copy: data.inlined,
+                    size_estimate: data.size_estimate,
+                });
             }
         }
 
+        self.identities = identities.into_values().collect();
+        self.identities.sort_by(|left, right| {
+            left.definition_path
+                .cmp(&right.definition_path)
+                .then_with(|| left.display_name.cmp(&right.display_name))
+                .then_with(|| left.raw_symbol.cmp(&right.raw_symbol))
+                .then_with(|| {
+                    left.placements
+                        .iter()
+                        .map(|placement| &placement.codegen_unit)
+                        .cmp(
+                            right
+                                .placements
+                                .iter()
+                                .map(|placement| &placement.codegen_unit),
+                        )
+                })
+        });
+
         Compilation::Continue
     }
+}
+
+fn source_span(tcx: TyCtxt<'_>, span: rustc_span::Span) -> Option<SourceSpan> {
+    if span.is_dummy() {
+        return None;
+    }
+
+    let source_map = tcx.sess.source_map();
+    let start = source_map.lookup_char_pos(span.lo());
+    let end = source_map.lookup_char_pos(span.hi());
+    if start.file.start_pos != end.file.start_pos {
+        return None;
+    }
+
+    Some(SourceSpan {
+        file_name: start.file.name.prefer_local_unconditionally().to_string(),
+        byte_start: u64::from(span.lo().0 - start.file.start_pos.0),
+        byte_end: u64::from(span.hi().0 - start.file.start_pos.0),
+        line_start: start.line,
+        column_start: start.col.0,
+        line_end: end.line,
+        column_end: end.col.0,
+    })
 }
 
 fn main() -> ExitCode {
@@ -124,7 +196,12 @@ fn run_driver() -> ExitCode {
         }
     };
 
-    match write_manifest(&manifest_path, &rustc_commit, callbacks.identities.values()) {
+    match write_manifest(
+        &manifest_path,
+        &rustc_commit,
+        &arguments,
+        callbacks.identities.iter(),
+    ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("failed to write {}: {error}", manifest_path.display());
@@ -221,6 +298,7 @@ fn execute(mut command: Command) -> ExitCode {
 fn write_manifest<'a>(
     path: &Path,
     rustc_commit: &str,
+    rustc_arguments: &[String],
     identities: impl ExactSizeIterator<Item = &'a CompilerIdentity>,
 ) -> io::Result<()> {
     let temporary_path = path.with_extension("tmp");
@@ -228,16 +306,28 @@ fn write_manifest<'a>(
     file.write_all(MANIFEST_MAGIC)?;
     file.write_all(&PROTOCOL_VERSION.to_le_bytes())?;
     write_string(&mut file, rustc_commit)?;
+    write_u32(&mut file, rustc_arguments.len())?;
+
+    for argument in rustc_arguments {
+        write_string(&mut file, argument)?;
+    }
+
     write_u64(&mut file, identities.len())?;
 
     for identity in identities {
-        write_string(&mut file, &identity.definition)?;
+        write_string(&mut file, &identity.definition_crate)?;
+        write_string(&mut file, &identity.definition_path)?;
+        write_optional_source_span(&mut file, identity.source.as_ref())?;
         write_string(&mut file, &identity.display_name)?;
         write_string(&mut file, &identity.raw_symbol)?;
-        write_u32(&mut file, identity.codegen_units.len())?;
+        write_u32(&mut file, identity.placements.len())?;
 
-        for codegen_unit in &identity.codegen_units {
-            write_string(&mut file, codegen_unit)?;
+        for placement in &identity.placements {
+            write_string(&mut file, &placement.codegen_unit)?;
+            write_string(&mut file, &placement.linkage)?;
+            write_string(&mut file, &placement.visibility)?;
+            write_u32(&mut file, usize::from(placement.local_copy))?;
+            write_u64(&mut file, placement.size_estimate)?;
         }
     }
 
@@ -245,6 +335,21 @@ fn write_manifest<'a>(
     // Windows requires the file handle to close before an atomic rename.
     drop(file);
     fs::rename(temporary_path, path)
+}
+
+fn write_optional_source_span(file: &mut File, source: Option<&SourceSpan>) -> io::Result<()> {
+    let Some(source) = source else {
+        return write_u32(file, 0);
+    };
+
+    write_u32(file, 1)?;
+    write_string(file, &source.file_name)?;
+    file.write_all(&source.byte_start.to_le_bytes())?;
+    file.write_all(&source.byte_end.to_le_bytes())?;
+    write_u64(file, source.line_start)?;
+    write_u64(file, source.column_start)?;
+    write_u64(file, source.line_end)?;
+    write_u64(file, source.column_end)
 }
 
 fn write_string(file: &mut File, value: &str) -> io::Result<()> {

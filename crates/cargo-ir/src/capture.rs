@@ -1,8 +1,8 @@
-//! Runs one enriched Cargo analysis and collects supported LLVM modules.
+//! Runs one Cargo analysis and collects supported LLVM modules.
 //!
 //! [`capture`] uses `cargo rustc` so normal and analysis builds share dependency artifacts. The
-//! selected target has a separate Cargo identity because its extra compiler arguments are part of
-//! Cargo's fingerprint.
+//! selected target has a separate Cargo identity because saving compiler temporaries is part of
+//! Cargo's fingerprint. A faithful capture otherwise preserves the selected codegen settings.
 
 use std::env;
 use std::ffi::OsString;
@@ -17,7 +17,8 @@ use crate::driver::RustcDriver;
 use crate::llvm;
 use crate::mono;
 use crate::{
-    BuildRequest, CargoTarget, CompilerInstance, Error, Result, Toolchain, inspect_toolchain,
+    BuildRequest, CaptureProfile, CargoTarget, CompilerInstance, Error, Result, Toolchain,
+    inspect_toolchain,
 };
 
 /// The byte range of one LLVM function definition.
@@ -36,14 +37,104 @@ pub struct BodyRange {
     pub end: u64,
 }
 
+/// The byte range of one LLVM function declaration.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LlvmDeclaration {
+    /// The raw LLVM symbol without its leading `@`.
+    pub raw_symbol: String,
+
+    /// The best available demangled display name.
+    pub demangled: String,
+
+    /// The inclusive byte offset at which the declaration starts.
+    pub start: u64,
+
+    /// The exclusive byte offset at which the declaration ends.
+    pub end: u64,
+}
+
+/// The exact relationship represented by an LLVM alias.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "kind")]
+pub enum AliasTarget {
+    /// The alias directly names one target symbol.
+    Symbol {
+        /// The target's raw LLVM symbol without its leading `@`.
+        raw_symbol: String,
+    },
+
+    /// The aliasee is a constant expression or cannot be represented as one symbol.
+    Expression,
+}
+
+/// The byte range and direct relationship of one LLVM alias.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LlvmAlias {
+    /// The raw LLVM symbol without its leading `@`.
+    pub raw_symbol: String,
+
+    /// The best available demangled display name.
+    pub demangled: String,
+
+    /// The exact direct target, or an explicit expression marker.
+    pub target: AliasTarget,
+
+    /// The inclusive byte offset at which the alias starts.
+    pub start: u64,
+
+    /// The exclusive byte offset at which the alias ends.
+    pub end: u64,
+}
+
+/// How cargo-ir obtained an artifact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptureMethod {
+    /// rustc wrote the artifact because cargo-ir enabled saved temporaries.
+    SavedTemporary,
+}
+
+/// The link-time optimization scope implied by an artifact stage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LtoScope {
+    /// The artifact is outside an LTO pipeline.
+    None,
+
+    /// The artifact belongs to ThinLTO.
+    Thin,
+
+    /// The filename does not establish an LTO scope.
+    Unknown,
+}
+
+/// Exact compiler provenance for one LLVM artifact.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactProvenance {
+    /// The normalized stage, when cargo-ir understands the compiler stage.
+    pub stage: Option<LlvmStage>,
+
+    /// The exact saved-temporary stage suffix emitted by rustc.
+    pub compiler_stage: String,
+
+    /// The codegen unit inferred from the compiler-owned filename, when present.
+    pub codegen_unit: Option<String>,
+
+    /// The LTO scope implied by the exact compiler stage.
+    pub lto: LtoScope,
+
+    /// The mechanism that produced the artifact.
+    pub capture_method: CaptureMethod,
+}
+
 /// One disassembled LLVM module and its body index.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ModuleEvidence {
     /// The compiler-owned artifact file name.
     pub name: String,
 
-    /// The compiler stage that produced the module.
-    pub stage: LlvmStage,
+    /// The compiler stage and collection method for this artifact.
+    pub provenance: ArtifactProvenance,
 
     /// The saved LLVM bitcode path.
     pub bitcode_path: PathBuf,
@@ -53,6 +144,12 @@ pub struct ModuleEvidence {
 
     /// Indexed function definitions in the textual module.
     pub bodies: Vec<BodyRange>,
+
+    /// Indexed function declarations in the textual module.
+    pub declarations: Vec<LlvmDeclaration>,
+
+    /// Indexed aliases and their exact direct relationships.
+    pub aliases: Vec<LlvmAlias>,
 }
 
 /// A supported stage of the LLVM compilation pipeline.
@@ -78,9 +175,90 @@ impl LlvmStage {
     }
 }
 
+/// One subprocess command involved in a capture.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CommandInvocation {
+    /// The executable passed to the operating system.
+    pub program: String,
+
+    /// The exact Unicode arguments supplied to the executable.
+    pub arguments: Vec<String>,
+}
+
+/// One non-secret compiler environment variable that can affect code generation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct EnvironmentVariable {
+    /// The variable name.
+    pub name: String,
+
+    /// The variable value.
+    pub value: String,
+}
+
+/// The request and effective process metadata for one Cargo analysis.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CaptureInvocation {
+    /// The normalized request accepted by cargo-ir.
+    pub request: BuildRequest,
+
+    /// The exact Cargo command constructed by cargo-ir.
+    pub cargo: CommandInvocation,
+
+    /// The selected rustc command, when Cargo invoked rustc.
+    pub rustc: Option<CommandInvocation>,
+
+    /// The effective outer-to-inner wrapper chain known to cargo-ir.
+    pub wrapper_chain: Vec<String>,
+
+    /// Codegen-related environment variables inherited by Cargo.
+    pub environment: Vec<EnvironmentVariable>,
+
+    /// Compiler arguments injected to collect evidence or implement the capture profile.
+    pub injected_rustc_arguments: Vec<String>,
+}
+
+/// One compiler-artifact event emitted by Cargo.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CargoArtifact {
+    /// Cargo's opaque package identifier.
+    pub package_id: String,
+
+    /// The target name reported by Cargo.
+    pub target_name: String,
+
+    /// The target kinds reported by Cargo.
+    pub target_kinds: Vec<String>,
+
+    /// Whether Cargo reported this artifact as fresh.
+    pub fresh: bool,
+}
+
+/// The result of asking Cargo for evidence.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "kind")]
+pub enum CaptureOutcome {
+    /// Cargo invoked rustc and cargo-ir collected new evidence.
+    Captured {
+        /// The collected compiler evidence.
+        bundle: Box<EvidenceBundle>,
+    },
+
+    /// Cargo completed without invoking the selected rustc driver and reported fresh artifacts.
+    Fresh {
+        /// Request and Cargo invocation metadata. `rustc` is absent.
+        invocation: Box<CaptureInvocation>,
+
+        /// The fresh compiler-artifact events reported by Cargo.
+        artifacts: Vec<CargoArtifact>,
+    },
+}
+
 /// All evidence produced by one compiler invocation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct EvidenceBundle {
+    /// The request and effective compiler invocation.
+    pub invocation: CaptureInvocation,
+
     /// The exact analyzed compiler.
     pub toolchain: Toolchain,
 
@@ -91,13 +269,13 @@ pub struct EvidenceBundle {
     pub modules: Vec<ModuleEvidence>,
 }
 
-/// Runs one enriched analysis for the selected Cargo target.
+/// Runs one analysis for the selected Cargo target.
 ///
 /// # Errors
 ///
 /// Returns an error if the toolchain is unsupported, the analysis directory is not empty, Cargo
 /// fails, or emitted LLVM evidence cannot be read.
-pub fn capture(request: &BuildRequest) -> Result<EvidenceBundle> {
+pub fn capture(request: &BuildRequest) -> Result<CaptureOutcome> {
     let toolchain = inspect_toolchain()?;
     prepare_analysis_directory(&request.analysis_directory)?;
     let driver = RustcDriver::prepare(&toolchain, &request.workspace_root)?;
@@ -110,6 +288,14 @@ pub fn capture(request: &BuildRequest) -> Result<EvidenceBundle> {
         &manifest_path,
         &toolchain.commit_hash,
     );
+    let mut invocation = CaptureInvocation {
+        request: request.clone(),
+        cargo: command_invocation(&command),
+        rustc: None,
+        wrapper_chain: driver.wrapper_chain(),
+        environment: compiler_environment(),
+        injected_rustc_arguments: injected_rustc_arguments(request),
+    };
     let output = command.output().map_err(|source| Error::StartProcess {
         program: "cargo rustc".to_owned(),
         source,
@@ -122,22 +308,38 @@ pub fn capture(request: &BuildRequest) -> Result<EvidenceBundle> {
         });
     }
 
+    let cargo_artifacts = cargo_artifacts(&output.stdout);
+    if !manifest_path.is_file() {
+        if !cargo_artifacts.is_empty() && cargo_artifacts.iter().all(|artifact| artifact.fresh) {
+            return Ok(CaptureOutcome::Fresh {
+                invocation: Box::new(invocation),
+                artifacts: cargo_artifacts,
+            });
+        }
+
+        return Err(Error::MissingEvidence);
+    }
+
     let artifacts = supported_bitcode(&request.analysis_directory)?;
 
     if artifacts.is_empty() {
         return Err(Error::MissingEvidence);
     }
 
-    let instances = mono::read(&manifest_path, &toolchain.commit_hash)?;
+    let compiler_manifest = mono::read(&manifest_path, &toolchain.commit_hash)?;
+    invocation.rustc = Some(compiler_invocation(&compiler_manifest.rustc_arguments)?);
     let modules = artifacts
         .into_iter()
         .map(|artifact| disassemble(&toolchain, artifact, &request.analysis_directory))
         .collect::<Result<Vec<_>>>()?;
 
-    Ok(EvidenceBundle {
-        toolchain,
-        instances,
-        modules,
+    Ok(CaptureOutcome::Captured {
+        bundle: Box::new(EvidenceBundle {
+            invocation,
+            toolchain,
+            instances: compiler_manifest.instances,
+            modules,
+        }),
     })
 }
 
@@ -196,20 +398,119 @@ fn cargo_command(request: &BuildRequest) -> Command {
     }
 
     command.arg("--");
-    command.args(["-Z", "no-link", "-C", "save-temps"]);
-    command
-        .arg("-Z")
-        .arg(temps_argument(&request.analysis_directory));
-    command.args(["-C", "symbol-mangling-version=v0"]);
-    command.args(["-C", "debuginfo=line-tables-only"]);
+    command.args(injected_rustc_arguments(request));
 
     command
+}
+
+fn injected_rustc_arguments(request: &BuildRequest) -> Vec<String> {
+    let mut arguments = vec![
+        "-C".to_owned(),
+        "save-temps".to_owned(),
+        "-Z".to_owned(),
+        temps_argument(&request.analysis_directory)
+            .to_string_lossy()
+            .into_owned(),
+    ];
+
+    match &request.capture_profile {
+        CaptureProfile::Faithful => {}
+        CaptureProfile::Enriched => {
+            arguments.extend([
+                "-C".to_owned(),
+                "symbol-mangling-version=v0".to_owned(),
+                "-C".to_owned(),
+                "debuginfo=line-tables-only".to_owned(),
+            ]);
+        }
+        CaptureProfile::Experiment { rustc_arguments } => {
+            arguments.extend(rustc_arguments.iter().cloned());
+        }
+    }
+
+    arguments
 }
 
 fn temps_argument(path: &Path) -> OsString {
     let mut argument = OsString::from("temps-dir=");
     argument.push(path);
     argument
+}
+
+fn command_invocation(command: &Command) -> CommandInvocation {
+    CommandInvocation {
+        program: command.get_program().to_string_lossy().into_owned(),
+        arguments: command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect(),
+    }
+}
+
+fn compiler_invocation(arguments: &[String]) -> Result<CommandInvocation> {
+    let Some((program, arguments)) = arguments.split_first() else {
+        return Err(Error::InvalidIdentityManifest {
+            path: PathBuf::from(mono::MANIFEST_NAME),
+            message: "rustc invocation does not contain a compiler path".to_owned(),
+        });
+    };
+
+    Ok(CommandInvocation {
+        program: program.clone(),
+        arguments: arguments.to_vec(),
+    })
+}
+
+fn compiler_environment() -> Vec<EnvironmentVariable> {
+    let mut variables = env::vars()
+        .filter(|(name, _)| is_compiler_environment(name))
+        .map(|(name, value)| EnvironmentVariable { name, value })
+        .collect::<Vec<_>>();
+    variables.sort_by(|left, right| left.name.cmp(&right.name));
+
+    variables
+}
+
+fn is_compiler_environment(name: &str) -> bool {
+    matches!(
+        name,
+        "CARGO_BUILD_RUSTC"
+            | "CARGO_BUILD_RUSTC_WRAPPER"
+            | "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"
+            | "CARGO_ENCODED_RUSTFLAGS"
+            | "CARGO_TARGET_DIR"
+            | "RUSTC"
+            | "RUSTC_BOOTSTRAP"
+            | "RUSTC_WRAPPER"
+            | "RUSTC_WORKSPACE_WRAPPER"
+            | "RUSTFLAGS"
+    ) || name.starts_with("CARGO_PROFILE_")
+        || name.starts_with("CARGO_TARGET_")
+}
+
+fn cargo_artifacts(stdout: &[u8]) -> Vec<CargoArtifact> {
+    stdout
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
+        .filter(|message| message["reason"] == "compiler-artifact")
+        .filter_map(|message| {
+            let package_id = message["package_id"].as_str()?.to_owned();
+            let target_name = message["target"]["name"].as_str()?.to_owned();
+            let target_kinds = message["target"]["kind"]
+                .as_array()?
+                .iter()
+                .map(|kind| kind.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()?;
+            let fresh = message["fresh"].as_bool()?;
+
+            Some(CargoArtifact {
+                package_id,
+                target_name,
+                target_kinds,
+                fresh,
+            })
+        })
+        .collect()
 }
 
 fn prepare_analysis_directory(path: &Path) -> Result<()> {
@@ -266,7 +567,7 @@ fn cargo_diagnostics(stdout: &[u8], stderr: &[u8]) -> String {
 
 struct BitcodeArtifact {
     path: PathBuf,
-    stage: LlvmStage,
+    provenance: ArtifactProvenance,
 }
 
 fn supported_bitcode(directory: &Path) -> Result<Vec<BitcodeArtifact>> {
@@ -283,19 +584,11 @@ fn supported_bitcode(directory: &Path) -> Result<Vec<BitcodeArtifact>> {
             continue;
         }
 
-        let name = entry.file_name().to_string_lossy();
-        let stage = if name.ends_with(".no-opt.bc") {
-            Some(LlvmStage::PreOptimization)
-        } else if name.ends_with(".rcgu.bc") && !name.contains(".thin-lto-") {
-            Some(LlvmStage::Optimized)
-        } else {
-            None
-        };
-
-        if let Some(stage) = stage {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.ends_with(".bc") {
             artifacts.push(BitcodeArtifact {
                 path: entry.into_path(),
-                stage,
+                provenance: artifact_provenance(&name),
             });
         }
     }
@@ -305,6 +598,67 @@ fn supported_bitcode(directory: &Path) -> Result<Vec<BitcodeArtifact>> {
     Ok(artifacts)
 }
 
+fn artifact_provenance(name: &str) -> ArtifactProvenance {
+    let (compiler_stage, stage, lto) = if name.ends_with(".no-opt.bc") {
+        (
+            "no-opt".to_owned(),
+            Some(LlvmStage::PreOptimization),
+            LtoScope::None,
+        )
+    } else if name.ends_with(".thin-lto-input.bc") {
+        ("thin-lto-input".to_owned(), None, LtoScope::Thin)
+    } else if name.ends_with(".thin-lto-after-import.bc") {
+        ("thin-lto-after-import".to_owned(), None, LtoScope::Thin)
+    } else if name.ends_with(".thin-lto-after-internalize.bc") {
+        (
+            "thin-lto-after-internalize".to_owned(),
+            None,
+            LtoScope::Thin,
+        )
+    } else if name.ends_with(".thin-lto-after-pm.bc") {
+        (
+            "thin-lto-after-pm".to_owned(),
+            Some(LlvmStage::Optimized),
+            LtoScope::Thin,
+        )
+    } else if name.contains(".thin-lto-") {
+        (unknown_compiler_stage(name), None, LtoScope::Thin)
+    } else if name.ends_with(".rcgu.bc") {
+        (
+            "rcgu".to_owned(),
+            Some(LlvmStage::Optimized),
+            LtoScope::None,
+        )
+    } else {
+        (unknown_compiler_stage(name), None, LtoScope::Unknown)
+    };
+    let codegen_unit = codegen_unit(name, &compiler_stage);
+
+    ArtifactProvenance {
+        stage,
+        compiler_stage,
+        codegen_unit,
+        lto,
+        capture_method: CaptureMethod::SavedTemporary,
+    }
+}
+
+fn unknown_compiler_stage(name: &str) -> String {
+    let stem = name.strip_suffix(".bc").unwrap_or(name);
+
+    stem.rsplit_once(".rcgu.")
+        .map_or(stem, |(_, compiler_stage)| compiler_stage)
+        .to_owned()
+}
+
+fn codegen_unit(name: &str, compiler_stage: &str) -> Option<String> {
+    let suffix = format!(".{compiler_stage}.bc");
+    let prefix = name.strip_suffix(&suffix)?;
+    let codegen_unit = prefix.strip_suffix(".rcgu").unwrap_or(prefix);
+
+    Some(codegen_unit.to_owned())
+}
+
 fn disassemble(
     toolchain: &Toolchain,
     artifact: BitcodeArtifact,
@@ -312,7 +666,7 @@ fn disassemble(
 ) -> Result<ModuleEvidence> {
     let BitcodeArtifact {
         path: bitcode_path,
-        stage,
+        provenance,
     } = artifact;
     let file_name = bitcode_path
         .file_name()
@@ -339,23 +693,29 @@ fn disassemble(
         });
     }
 
-    let bodies = llvm::scan(&text_path)?;
+    let index = llvm::scan(&text_path)?;
 
     Ok(ModuleEvidence {
         name,
-        stage,
+        provenance,
         bitcode_path,
         text_path,
-        bodies,
+        bodies: index.bodies,
+        declarations: index.declarations,
+        aliases: index.aliases,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::PathBuf;
 
-    use super::{cargo_diagnostics, prepare_analysis_directory};
-    use crate::Error;
+    use super::{
+        artifact_provenance, cargo_artifacts, cargo_diagnostics, injected_rustc_arguments,
+        prepare_analysis_directory,
+    };
+    use crate::{BuildRequest, CaptureProfile, Error, LlvmStage, LtoScope};
 
     #[test]
     fn renders_cargo_json_diagnostics_and_standard_error() {
@@ -379,5 +739,101 @@ mod tests {
             prepare_analysis_directory(temporary.path()),
             Err(Error::AnalysisDirectoryNotEmpty { path }) if path == temporary.path()
         ));
+    }
+
+    #[test]
+    fn faithful_capture_changes_only_evidence_emission() {
+        let arguments = injected_rustc_arguments(&request(CaptureProfile::Faithful));
+
+        assert!(
+            arguments
+                .windows(2)
+                .any(|pair| pair == ["-C", "save-temps"])
+        );
+        assert!(!arguments.iter().any(|argument| argument == "no-link"));
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument.starts_with("symbol-mangling-version="))
+        );
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument.starts_with("debuginfo="))
+        );
+    }
+
+    #[test]
+    fn enriched_and_experiment_profiles_record_their_arguments() {
+        let enriched = injected_rustc_arguments(&request(CaptureProfile::Enriched));
+        let experiment = injected_rustc_arguments(&request(CaptureProfile::Experiment {
+            rustc_arguments: vec!["-C".to_owned(), "target-cpu=native".to_owned()],
+        }));
+
+        assert!(
+            enriched
+                .iter()
+                .any(|argument| argument == "symbol-mangling-version=v0")
+        );
+        assert!(
+            enriched
+                .iter()
+                .any(|argument| argument == "debuginfo=line-tables-only")
+        );
+        assert!(
+            experiment
+                .windows(2)
+                .any(|pair| pair == ["-C", "target-cpu=native"])
+        );
+    }
+
+    #[test]
+    fn preserves_exact_thin_lto_stage_provenance() {
+        let provenance = artifact_provenance("example.cgu.0.rcgu.thin-lto-after-import.bc");
+
+        assert_eq!(provenance.compiler_stage, "thin-lto-after-import");
+        assert_eq!(provenance.stage, None);
+        assert_eq!(provenance.lto, LtoScope::Thin);
+
+        let rename = artifact_provenance("example.cgu.0.rcgu.thin-lto-after-rename.bc");
+        assert_eq!(rename.compiler_stage, "thin-lto-after-rename");
+        assert_eq!(rename.stage, None);
+        assert_eq!(rename.lto, LtoScope::Thin);
+        assert_eq!(provenance.codegen_unit.as_deref(), Some("example.cgu.0"));
+
+        let optimized = artifact_provenance("example.cgu.0.rcgu.bc");
+        assert_eq!(optimized.stage, Some(LlvmStage::Optimized));
+    }
+
+    #[test]
+    fn reads_freshness_from_cargo_artifacts() {
+        let stdout = br#"{"reason":"compiler-artifact","package_id":"path+file:///tmp/example#0.1.0","target":{"kind":["lib"],"name":"example"},"fresh":true}
+{"reason":"build-finished","success":true}
+"#;
+
+        let artifacts = cargo_artifacts(stdout);
+
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].target_name, "example");
+        assert!(artifacts[0].fresh);
+    }
+
+    fn request(capture_profile: CaptureProfile) -> BuildRequest {
+        BuildRequest {
+            workspace_root: PathBuf::from("/workspace"),
+            manifest_path: None,
+            package: Some("example".to_owned()),
+            target: None,
+            profile: Some("release".to_owned()),
+            features: Vec::new(),
+            all_features: false,
+            no_default_features: false,
+            target_triple: None,
+            locked: false,
+            offline: false,
+            frozen: false,
+            capture_profile,
+            analysis_directory: PathBuf::from("/analysis"),
+        }
     }
 }

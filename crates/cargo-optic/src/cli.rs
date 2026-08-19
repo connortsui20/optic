@@ -12,25 +12,31 @@ use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use cargo_ir::CargoTarget;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use crate::terminal::{CodeSyntax, Terminal};
 use crate::{
-    Application, BuildSpec, CachePolicy, CaptureId, CaptureSummary, CleanSummary, CompilerOutput,
-    FindResult, InstanceId, InstanceSummary, ShowView,
+    Application, BuildSpec, BuildTarget, CachePolicy, CaptureDetails, CaptureId, CaptureProfile,
+    CaptureSummary, CleanSummary, CompareView, CompilerOutput, FindResult, InstanceId,
+    InstanceSummary, ShowView,
 };
 
 const MINIMUM_DISPLAY_ID_HEX_DIGITS: usize = 12;
+const TRANSPORT_VERSION: u8 = 2;
 
 /// Runs the Cargo Optic CLI and returns its process exit code.
 #[must_use]
 pub fn run_cli() -> ExitCode {
     let arguments = normalized_arguments();
+    let requested_format = Format::from_arguments(&arguments);
     let mut cli = match Cli::try_parse_from(arguments) {
         Ok(cli) => cli,
         Err(error) => {
+            if error.use_stderr() && requested_format == Format::Json {
+                return print_json_error("invalid_arguments", &error.to_string());
+            }
+
             let code = if error.use_stderr() { 2 } else { 0 };
             let _ = error.print();
 
@@ -125,6 +131,68 @@ enum Command {
         format: Format,
     },
 
+    /// Shows the exact request, invocation, and artifacts for one capture.
+    Inspect {
+        /// Selects a capture by its full ID or a unique prefix.
+        #[arg(long)]
+        capture: CaptureId,
+
+        /// Selects plain text or versioned JSON output.
+        #[arg(long, value_enum, default_value_t)]
+        format: Format,
+    },
+
+    /// Shows the size and object counts of the evidence store.
+    Status {
+        /// Selects plain text or versioned JSON output.
+        #[arg(long, value_enum, default_value_t)]
+        format: Format,
+    },
+
+    /// Removes one capture and retains shared blobs until garbage collection.
+    Remove {
+        /// Selects a capture by its full ID or a unique prefix.
+        #[arg(long)]
+        capture: CaptureId,
+
+        /// Selects plain text or versioned JSON output.
+        #[arg(long, value_enum, default_value_t)]
+        format: Format,
+    },
+
+    /// Removes blobs that no completed capture references.
+    Gc {
+        /// Selects plain text or versioned JSON output.
+        #[arg(long, value_enum, default_value_t)]
+        format: Format,
+    },
+
+    /// Verifies every blob referenced by completed captures.
+    Verify {
+        /// Selects plain text or versioned JSON output.
+        #[arg(long, value_enum, default_value_t)]
+        format: Format,
+    },
+
+    /// Compares compact LLVM structure for two exact instances.
+    Compare {
+        /// Selects the first instance by full ID or unique prefix.
+        #[arg(long)]
+        before: InstanceId,
+
+        /// Selects the second instance by full ID or unique prefix.
+        #[arg(long)]
+        after: InstanceId,
+
+        /// Selects one compiler output.
+        #[arg(long, value_enum, default_value_t)]
+        output: CompilerOutput,
+
+        /// Selects plain text or versioned JSON output.
+        #[arg(long, value_enum, default_value_t)]
+        format: Format,
+    },
+
     /// Removes all stored Optic evidence for this workspace.
     #[command(after_long_help = concat!(
         "Example:\n  cargo optic clean\n\n",
@@ -203,6 +271,12 @@ impl Command {
         match self {
             Self::Capture { format, .. }
             | Self::Captures { format }
+            | Self::Inspect { format, .. }
+            | Self::Status { format }
+            | Self::Remove { format, .. }
+            | Self::Gc { format }
+            | Self::Verify { format }
+            | Self::Compare { format, .. }
             | Self::Clean { format }
             | Self::Find { format, .. }
             | Self::Show { format, .. } => *format,
@@ -274,6 +348,14 @@ struct BuildOptions {
     /// Enables Cargo locked and offline behavior.
     #[arg(long)]
     frozen: bool,
+
+    /// Controls whether Optic preserves or enriches compiler settings.
+    #[arg(long, value_enum, default_value_t)]
+    evidence_profile: CaptureProfile,
+
+    /// Passes one compiler argument to an experiment capture.
+    #[arg(long = "rustc-arg")]
+    rustc_arguments: Vec<String>,
 }
 
 impl BuildOptions {
@@ -287,15 +369,15 @@ impl BuildOptions {
 
     fn to_spec(&self, manifest_path: Option<PathBuf>) -> BuildSpec {
         let target = if self.lib {
-            Some(CargoTarget::Library)
+            Some(BuildTarget::Library)
         } else if let Some(name) = &self.bin {
-            Some(CargoTarget::Binary(name.clone()))
+            Some(BuildTarget::Binary(name.clone()))
         } else if let Some(name) = &self.bench {
-            Some(CargoTarget::Benchmark(name.clone()))
+            Some(BuildTarget::Benchmark(name.clone()))
         } else {
             self.example
                 .as_ref()
-                .map(|name| CargoTarget::Example(name.clone()))
+                .map(|name| BuildTarget::Example(name.clone()))
         };
         let profile = if self.release {
             Some("release".to_owned())
@@ -315,10 +397,12 @@ impl BuildOptions {
             locked: self.locked,
             offline: self.offline,
             frozen: self.frozen,
+            capture_profile: self.evidence_profile,
+            rustc_arguments: self.rustc_arguments.clone(),
         }
     }
 
-    const fn has_build_selection(&self) -> bool {
+    fn has_build_selection(&self) -> bool {
         self.package.is_some()
             || self.fresh
             || self.lib
@@ -334,6 +418,8 @@ impl BuildOptions {
             || self.locked
             || self.offline
             || self.frozen
+            || self.evidence_profile != CaptureProfile::Faithful
+            || !self.rustc_arguments.is_empty()
     }
 }
 
@@ -342,6 +428,25 @@ enum Format {
     #[default]
     Text,
     Json,
+}
+
+impl Format {
+    fn from_arguments(arguments: &[OsString]) -> Self {
+        let requests_json = arguments.windows(2).any(|arguments| {
+            arguments[0] == "--format" && arguments[1].as_encoded_bytes() == b"json"
+        }) || arguments.iter().any(|argument| {
+            argument
+                .as_encoded_bytes()
+                .strip_prefix(b"--format=")
+                .is_some_and(|value| value == b"json")
+        });
+
+        if requests_json {
+            Self::Json
+        } else {
+            Self::Text
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -544,6 +649,96 @@ fn execute(application: &mut Application, cli: Cli) -> Result<Execution, Failure
                 &captures,
                 captures_text(&captures, &display_ids, &terminal),
             )
+        }
+        Command::Inspect { capture, format } => {
+            let terminal = Terminal::new(color.enabled(format));
+            let details = application.inspect(&capture).map_err(|error| Failure {
+                format,
+                message: error.to_string(),
+            })?;
+            let display_id =
+                display_capture_id(application, &details.summary.id, format).map_err(|error| {
+                    Failure {
+                        format,
+                        message: error.to_string(),
+                    }
+                })?;
+
+            success(
+                format,
+                &details,
+                capture_details_text(&details, &display_id, &terminal),
+            )
+        }
+        Command::Status { format } => {
+            let status = application.status().map_err(|error| Failure {
+                format,
+                message: error.to_string(),
+            })?;
+            success(
+                format,
+                &status,
+                format!(
+                    "{} captures, {} blobs, {} bytes\n",
+                    status.captures, status.blobs, status.blob_bytes
+                ),
+            )
+        }
+        Command::Remove { capture, format } => {
+            let summary = application.remove(&capture).map_err(|error| Failure {
+                format,
+                message: error.to_string(),
+            })?;
+            success(
+                format,
+                &summary,
+                format!(
+                    "Removed capture {}. Run `cargo optic gc` to reclaim blobs.\n",
+                    summary.capture_id
+                ),
+            )
+        }
+        Command::Gc { format } => {
+            let summary = application.gc().map_err(|error| Failure {
+                format,
+                message: error.to_string(),
+            })?;
+            success(
+                format,
+                &summary,
+                format!(
+                    "Removed {} unreferenced blobs ({} bytes).\n",
+                    summary.removed_blobs, summary.removed_bytes
+                ),
+            )
+        }
+        Command::Verify { format } => {
+            let summary = application.verify().map_err(|error| Failure {
+                format,
+                message: error.to_string(),
+            })?;
+            success(
+                format,
+                &summary,
+                format!(
+                    "Verified {} blobs ({} bytes).\n",
+                    summary.verified_blobs, summary.verified_bytes
+                ),
+            )
+        }
+        Command::Compare {
+            before,
+            after,
+            output,
+            format,
+        } => {
+            let comparison = application
+                .compare(&before, &after, output)
+                .map_err(|error| Failure {
+                    format,
+                    message: error.to_string(),
+                })?;
+            success(format, &comparison, compare_text(&comparison))
         }
         Command::Clean { .. } => {
             unreachable!("clean executes before the application opens its store")
@@ -830,7 +1025,7 @@ fn success<T: Serialize>(format: Format, result: &T, text: String) -> Result<Exe
         Format::Text => text,
         Format::Json => {
             let envelope = SuccessEnvelope {
-                version: 1,
+                version: TRANSPORT_VERSION,
                 ok: true,
                 result,
             };
@@ -852,7 +1047,7 @@ fn selection<T: Serialize>(
         Format::Text => text,
         Format::Json => {
             let envelope = SelectionEnvelope {
-                version: 1,
+                version: TRANSPORT_VERSION,
                 ok: false,
                 error: SelectionEnvelopeError {
                     code: failure.code(),
@@ -883,7 +1078,7 @@ fn print_error(format: Format, message: &str) -> ExitCode {
         Format::Text => write_stderr(&format!("error: {message}\n")),
         Format::Json => {
             let envelope = OperationErrorEnvelope {
-                version: 1,
+                version: TRANSPORT_VERSION,
                 ok: false,
                 error: OperationError {
                     code: "operation_failed",
@@ -898,6 +1093,19 @@ fn print_error(format: Format, message: &str) -> ExitCode {
     };
 
     ExitCode::FAILURE
+}
+
+fn print_json_error(code: &'static str, message: &str) -> ExitCode {
+    let envelope = OperationErrorEnvelope {
+        version: TRANSPORT_VERSION,
+        ok: false,
+        error: OperationError { code, message },
+    };
+    let output = serde_json::to_string_pretty(&envelope)
+        .expect("operation error envelopes contain only strings and primitive values");
+    let _ = write_stdout(&format!("{output}\n"));
+
+    ExitCode::from(2)
 }
 
 fn write_progress(message: &str) {
@@ -981,16 +1189,99 @@ fn captures_text(
     for (capture, display_id) in captures.iter().zip(display_ids) {
         writeln!(
             output,
-            "{}  {}  {}  {} instances",
+            "{}  {}  {}  {:?}  {} instances, {} artifacts",
             terminal.identifier(&display_id.text, display_id.unique_prefix_length),
             capture.rustc_release,
             capture.target,
+            capture.capture_profile,
             capture.instance_count,
+            capture.module_count,
         )
         .expect("writing capture text to a String cannot fail");
     }
 
     output
+}
+
+fn capture_details_text(
+    details: &CaptureDetails,
+    display_id: &DisplayIdentifier,
+    terminal: &Terminal,
+) -> String {
+    let mut output = format!(
+        "{}\n  Capture  {}\n  Profile  {:?}\n  Target   {}\n  Cargo    {} {}\n",
+        terminal.heading("Capture details"),
+        terminal.identifier(&display_id.text, display_id.unique_prefix_length),
+        details.summary.capture_profile,
+        details.summary.target,
+        details.cargo.program,
+        details.cargo.arguments.join(" "),
+    );
+    if let Some(rustc) = &details.rustc {
+        writeln!(
+            output,
+            "  rustc    {} {}",
+            rustc.program,
+            rustc.arguments.join(" ")
+        )
+        .expect("writing capture details to a String cannot fail");
+    }
+    writeln!(
+        output,
+        "  Artifacts  {} ({} instances)",
+        details.artifacts.len(),
+        details.summary.instance_count
+    )
+    .expect("writing capture details to a String cannot fail");
+    for artifact in &details.artifacts {
+        writeln!(
+            output,
+            "    {}  {}  {} definitions, {} declarations, {} aliases",
+            artifact.name,
+            artifact.compiler_stage,
+            artifact.definitions,
+            artifact.declarations,
+            artifact.aliases,
+        )
+        .expect("writing capture details to a String cannot fail");
+    }
+
+    output
+}
+
+fn compare_text(comparison: &CompareView) -> String {
+    let compatibility = if comparison.compatibility_differences.is_empty() {
+        "compatible capture dimensions".to_owned()
+    } else {
+        format!(
+            "different capture dimensions: {}",
+            comparison.compatibility_differences.join(", ")
+        )
+    };
+
+    format!(
+        "Comparison ({}, {})\n  Bodies        {} -> {} ({:+})\n  Bytes         {} -> {} ({:+})\n  Instructions  {} -> {} ({:+})\n  Vector lines  {} -> {} ({:+})\n  Calls         {} -> {} ({:+})\n  Safety checks {} -> {} ({:+})\n",
+        comparison.output,
+        compatibility,
+        comparison.before.bodies,
+        comparison.after.bodies,
+        comparison.delta.bodies,
+        comparison.before.bytes,
+        comparison.after.bytes,
+        comparison.delta.bytes,
+        comparison.before.instructions,
+        comparison.after.instructions,
+        comparison.delta.instructions,
+        comparison.before.vector_lines,
+        comparison.after.vector_lines,
+        comparison.delta.vector_lines,
+        comparison.before.calls,
+        comparison.after.calls,
+        comparison.delta.calls,
+        comparison.before.safety_checks,
+        comparison.after.safety_checks,
+        comparison.delta.safety_checks,
+    )
 }
 
 fn find_text(
@@ -1030,8 +1321,20 @@ fn instance_text(
     display_id: &DisplayIdentifier,
     terminal: &Terminal,
 ) -> String {
-    let state = if instance.has_body {
-        terminal.positive("body")
+    let optimized = instance
+        .availability
+        .iter()
+        .find(|availability| availability.output == CompilerOutput::Llvm)
+        .is_some_and(crate::OutputAvailability::has_definition);
+    let pre_optimization = instance
+        .availability
+        .iter()
+        .find(|availability| availability.output == CompilerOutput::LlvmPreOpt)
+        .is_some_and(crate::OutputAvailability::has_definition);
+    let state = if optimized {
+        terminal.positive("llvm body")
+    } else if pre_optimization {
+        terminal.warning("pre-opt body only")
     } else {
         terminal.warning("no body")
     };

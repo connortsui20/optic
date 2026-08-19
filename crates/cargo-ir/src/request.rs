@@ -1,7 +1,8 @@
 //! Describes one Cargo analysis request.
 //!
-//! [`BuildRequest`] contains only the target selection that `cargo rustc` understands. The caller
-//! owns persistence and supplies an empty analysis directory for rustc temporaries.
+//! [`BuildRequest`] contains the target selection and evidence policy that `cargo rustc`
+//! understands. The caller owns persistence and supplies an empty analysis directory for rustc
+//! temporaries.
 
 use std::path::PathBuf;
 
@@ -24,7 +25,28 @@ pub enum CargoTarget {
     Example(String),
 }
 
-/// A normalized request for one enriched Cargo analysis.
+/// The compiler changes that an evidence capture may make.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "kind")]
+pub enum CaptureProfile {
+    /// Preserve the selected target's code generation settings.
+    ///
+    /// Optic still saves compiler temporaries so it can collect evidence. It does not change
+    /// linking, symbol mangling, debug information, LTO, codegen units, or the panic strategy.
+    #[default]
+    Faithful,
+
+    /// Add source-oriented names and line tables to the captured evidence.
+    Enriched,
+
+    /// Apply explicit compiler arguments supplied by the caller.
+    Experiment {
+        /// Additional arguments passed to rustc after Optic's evidence arguments.
+        rustc_arguments: Vec<String>,
+    },
+}
+
+/// A normalized request for one Cargo analysis.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BuildRequest {
     /// The Cargo workspace in which the command runs.
@@ -62,6 +84,9 @@ pub struct BuildRequest {
 
     /// Whether Cargo must use both locked and offline behavior.
     pub frozen: bool,
+
+    /// The permitted compiler changes for this capture.
+    pub capture_profile: CaptureProfile,
 
     /// The directory in which rustc writes mutable analysis artifacts.
     ///

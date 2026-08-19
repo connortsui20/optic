@@ -32,7 +32,7 @@ Read [README.md](README.md) before you change the product behavior. Use the
 - An instance ID identifies its capture, so `show --instance` does not need a capture ID.
 - New IDs contain random UUIDv4 suffixes.
 - Text output shows at least 12 hexadecimal characters and highlights the shortest unique prefix.
-- The schema version is 4. The store migrates schema versions 1, 2, and 3.
+- The schema version is 5. Older stores require `cargo optic clean`.
 
 Capture writers use a file lock. Read commands can use completed captures in parallel. An operation
 lock prevents `clean` from removing a store that another process uses.
@@ -42,18 +42,18 @@ lock prevents `clean` from removing a store that another process uses.
 `cargo-ir` uses `cargo rustc` with the normal target directory and dependency graph. Normal Cargo
 commands can reuse dependency artifacts from an Optic build.
 
-The selected target uses analysis flags and `-Z no-link`. It has a separate Cargo fingerprint. A
-normal Cargo command can compile or link that target after an Optic capture.
+The selected target uses saved-temporary arguments and has a separate Cargo fingerprint. Cargo
+checks this fingerprint before Optic reuses evidence.
 
-The evidence does not exactly match a normal build. Optic enables saved temporary files, v0 symbol
-names, and line-table debug information. An exact-version rustc driver records compiler identities.
-The driver runs only for the selected target.
+The faithful profile preserves target code-generation settings. The enriched profile adds v0
+symbols and line tables. The experiment profile adds explicit user arguments. An exact-version
+rustc driver records compiler identities for the selected target.
 
 ## Code map
 
 - `crates/cargo-optic/src/app.rs` coordinates capture, cache reuse, lookup, and source display.
 - `crates/cargo-optic/src/cli.rs` owns command validation and text or JSON output.
-- `crates/cargo-optic/src/store.rs` owns SQLite, IDs, locks, migrations, and blobs.
+- `crates/cargo-optic/src/store.rs` owns SQLite, IDs, locks, lifecycle operations, and blobs.
 - `crates/cargo-optic/src/source.rs` snapshots build inputs and finds source items.
 - `crates/cargo-ir/src/capture.rs` runs Cargo and collects LLVM evidence.
 - `crates/cargo-ir/src/llvm.rs` indexes LLVM function bodies by byte range.
@@ -85,7 +85,8 @@ The end-to-end test requires nightly rustc and its matching `llvm-tools` and `ru
 ## Known limits
 
 - The prototype supports optimized and pre-optimization LLVM IR only.
-- It does not support MIR, assembly, object files, LTO stages, or a TUI.
-- Source lookup uses syntax and path scoring. It omits an ambiguous source result.
-- The cache cannot find every external input that a build script reads.
+- It does not support MIR, assembly, object files, compiler remarks, or a TUI.
+- Source lookup uses exact rustc spans and a syntax fallback.
+- Cargo cannot find undeclared build-script inputs.
+- Inline occurrences do not link to enclosing optimized bodies.
 - The current acceptance test covers Apple silicon macOS.

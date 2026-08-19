@@ -4,7 +4,7 @@
 //! extraction parses only source blobs, never the current worktree.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,15 +14,12 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use walkdir::{DirEntry, WalkDir};
 
-use crate::{BuildSpec, Error, Result, SourceView};
+use crate::{BuildSpec, Error, Result, SourceLocation, SourceView};
 
 #[derive(Debug)]
 pub(crate) struct SourceBaseline {
     /// Source snapshots that the store publishes with the capture.
     pub(crate) entries: Vec<SourceEntry>,
-
-    /// A digest of Cargo metadata before compilation.
-    metadata_digest: blake3::Hash,
 
     /// Files that must remain unchanged until compilation finishes.
     cache_inputs: Vec<CacheInput>,
@@ -65,16 +62,11 @@ impl SourceBaseline {
         }
         command.other_options(metadata_options(spec));
         let metadata = command.exec()?;
-        let metadata_digest = blake3::hash(&serde_json::to_vec(&metadata)?);
         let source_directory = staging_directory.join("sources");
         fs::create_dir_all(&source_directory)
             .map_err(|source| Error::filesystem("create", &source_directory, source))?;
 
-        let local_packages = metadata
-            .packages
-            .iter()
-            .filter(|package| package.source.is_none())
-            .collect::<Vec<_>>();
+        let local_packages = selected_local_packages(&metadata, spec);
         let mut paths = BTreeSet::new();
         let mut cache_paths = BTreeSet::new();
 
@@ -144,7 +136,6 @@ impl SourceBaseline {
 
         Ok(Self {
             entries,
-            metadata_digest,
             cache_inputs,
         })
     }
@@ -163,22 +154,57 @@ impl SourceBaseline {
 
         Ok(())
     }
+}
 
-    pub(crate) fn cache_digest(&self) -> blake3::Hash {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(self.metadata_digest.as_bytes());
+fn selected_local_packages<'a>(
+    metadata: &'a cargo_metadata::Metadata,
+    spec: &BuildSpec,
+) -> Vec<&'a cargo_metadata::Package> {
+    let selected = spec
+        .package
+        .as_deref()
+        .and_then(|name| {
+            metadata
+                .packages
+                .iter()
+                .find(|package| package.name == name)
+        })
+        .or_else(|| metadata.root_package());
+    let Some(selected) = selected else {
+        return metadata
+            .packages
+            .iter()
+            .filter(|package| package.source.is_none())
+            .collect();
+    };
+    let Some(resolve) = &metadata.resolve else {
+        return vec![selected];
+    };
 
-        for entry in &self.cache_inputs {
-            let path = entry.path.to_string_lossy();
-            let path_length = u64::try_from(path.len())
-                .expect("usize path lengths fit in u64 on supported Rust targets");
-            hasher.update(&path_length.to_le_bytes());
-            hasher.update(path.as_bytes());
-            hasher.update(entry.digest.as_bytes());
+    let nodes = resolve
+        .nodes
+        .iter()
+        .map(|node| (&node.id, node))
+        .collect::<HashMap<_, _>>();
+    let mut reachable = HashSet::new();
+    let mut pending = VecDeque::from([selected.id.clone()]);
+
+    while let Some(package_id) = pending.pop_front() {
+        if !reachable.insert(package_id.clone()) {
+            continue;
         }
+        let Some(node) = nodes.get(&package_id) else {
+            continue;
+        };
 
-        hasher.finalize()
+        pending.extend(node.dependencies.iter().cloned());
     }
+
+    metadata
+        .packages
+        .iter()
+        .filter(|package| package.source.is_none() && reachable.contains(&package.id))
+        .collect()
 }
 
 fn metadata_options(spec: &BuildSpec) -> Vec<String> {
@@ -270,6 +296,36 @@ pub(crate) fn find_item(definition: &str, sources: &[StoredSource]) -> Option<So
     })
 }
 
+pub(crate) fn find_item_at(
+    definition: &str,
+    location: &SourceLocation,
+    source: &StoredSource,
+) -> Option<SourceView> {
+    let name = function_name(definition)?;
+    let text = std::str::from_utf8(&source.bytes).ok()?;
+    let file = syn::parse_file(text).ok()?;
+    let mut visitor = ItemVisitor {
+        name,
+        spans: Vec::new(),
+    };
+    visitor.visit_file(&file);
+    let span = visitor
+        .spans
+        .into_iter()
+        .filter(|span| {
+            span.start().line <= location.line_start && span.end().line >= location.line_end
+        })
+        .min_by_key(|span| span.end().line.saturating_sub(span.start().line))?;
+    let start_line = span.start().line;
+    let text = lines(text, start_line, span.end().line)?;
+
+    Some(SourceView {
+        path: source.path.clone(),
+        start_line,
+        text,
+    })
+}
+
 fn included_entry(entry: &DirEntry) -> bool {
     if entry.depth() == 0 {
         return true;
@@ -342,7 +398,8 @@ impl<'ast> Visit<'ast> for ItemVisitor<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{StoredSource, find_item};
+    use super::{StoredSource, find_item, find_item_at};
+    use crate::SourceLocation;
 
     #[test]
     fn extracts_a_complete_function_when_another_source_is_invalid() {
@@ -365,6 +422,42 @@ mod tests {
         assert_eq!(
             source.text,
             "pub fn kernel<T>(value: T) {\n    drop(value);\n}\n"
+        );
+    }
+
+    #[test]
+    fn expands_an_exact_nested_span_to_the_complete_function() {
+        let source = StoredSource {
+            path: "src/kernel.rs".to_owned(),
+            bytes: concat!(
+                "fn outer() {\n",
+                "    #[inline(always)]\n",
+                "    fn chunk(value: u64) -> u64 {\n",
+                "        value + 1\n",
+                "    }\n",
+                "    chunk(1);\n",
+                "}\n",
+            )
+            .as_bytes()
+            .to_vec(),
+        };
+        let location = SourceLocation {
+            path: "src/kernel.rs".to_owned(),
+            byte_start: 39,
+            byte_end: 71,
+            line_start: 3,
+            column_start: 4,
+            line_end: 3,
+            column_end: 36,
+        };
+
+        let item = find_item_at("crate::outer::chunk", &location, &source)
+            .expect("the exact span selects the nested function");
+
+        assert_eq!(item.start_line, 2);
+        assert_eq!(
+            item.text,
+            "    #[inline(always)]\n    fn chunk(value: u64) -> u64 {\n        value + 1\n    }\n"
         );
     }
 }

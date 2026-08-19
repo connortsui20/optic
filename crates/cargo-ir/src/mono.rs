@@ -12,20 +12,78 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result};
 
-pub(crate) const MANIFEST_NAME: &str = "identity-v1.bin";
+pub(crate) const MANIFEST_NAME: &str = "identity-v2.bin";
 
 const MANIFEST_MAGIC: &[u8; 16] = b"CARGO_OPTIC_ID\0\0";
-const PROTOCOL_VERSION: u32 = 1;
+const PROTOCOL_VERSION: u32 = 2;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_INSTANCES: usize = 1_000_000;
 const MAX_STRING_BYTES: usize = 1024 * 1024;
 const MAX_CODEGEN_UNITS: usize = 65_536;
+const MAX_ARGUMENTS: usize = 65_536;
+
+/// The source definition from which rustc instantiated a function.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DefinitionOrigin {
+    /// The compiler crate that owns the definition.
+    pub crate_name: String,
+
+    /// The canonical rustc definition path without concrete generic arguments.
+    pub definition_path: String,
+
+    /// The exact source range reported by rustc, when the definition has source text.
+    pub source: Option<SourceSpan>,
+}
+
+/// A half-open source byte range and its human-readable positions.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SourceSpan {
+    /// The compiler source filename after rustc path remapping.
+    pub file_name: String,
+
+    /// The inclusive byte offset in the source file.
+    pub byte_start: u64,
+
+    /// The exclusive byte offset in the source file.
+    pub byte_end: u64,
+
+    /// The one-based starting line.
+    pub line_start: usize,
+
+    /// The zero-based starting character column.
+    pub column_start: usize,
+
+    /// The one-based ending line.
+    pub line_end: usize,
+
+    /// The zero-based ending character column.
+    pub column_end: usize,
+}
+
+/// One placement of an instance in a rustc codegen unit.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CodegenUnitPlacement {
+    /// The exact codegen-unit name reported by rustc.
+    pub codegen_unit: String,
+
+    /// The exact rustc linkage variant for this placement.
+    pub linkage: String,
+
+    /// The exact rustc visibility variant for this placement.
+    pub visibility: String,
+
+    /// Whether rustc placed a local copy rather than a globally shared instance.
+    pub local_copy: bool,
+
+    /// rustc's estimated size for this instance before code generation.
+    pub size_estimate: usize,
+}
 
 /// One concrete function selected for monomorphization.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CompilerInstance {
-    /// The source-level definition path selected by rustc.
-    pub definition: String,
+    /// The definition that rustc instantiated.
+    pub origin: DefinitionOrigin,
 
     /// The concrete Rust display name, including generic arguments.
     pub display_name: String,
@@ -33,11 +91,17 @@ pub struct CompilerInstance {
     /// The exact symbol that rustc gives to LLVM.
     pub raw_symbol: String,
 
-    /// The codegen units in which rustc placed the instance.
-    pub codegen_units: Vec<String>,
+    /// The codegen units in which rustc placed this exact instance.
+    pub placements: Vec<CodegenUnitPlacement>,
 }
 
-pub(crate) fn read(path: &Path, expected_rustc_commit: &str) -> Result<Vec<CompilerInstance>> {
+#[derive(Debug)]
+pub(crate) struct CompilerManifest {
+    pub(crate) rustc_arguments: Vec<String>,
+    pub(crate) instances: Vec<CompilerInstance>,
+}
+
+pub(crate) fn read(path: &Path, expected_rustc_commit: &str) -> Result<CompilerManifest> {
     let metadata = fs::metadata(path).map_err(|source| Error::Filesystem {
         operation: "read metadata for",
         path: path.to_owned(),
@@ -83,26 +147,45 @@ pub(crate) fn read(path: &Path, expected_rustc_commit: &str) -> Result<Vec<Compi
         ));
     }
 
+    let argument_count = read_length_u32(&mut reader, path, "argument count", MAX_ARGUMENTS)?;
+    let mut rustc_arguments = Vec::with_capacity(argument_count);
+
+    for _ in 0..argument_count {
+        rustc_arguments.push(read_string(&mut reader, path, "rustc argument")?);
+    }
+
     let instance_count = read_length_u64(&mut reader, path, "instance count", MAX_INSTANCES)?;
     let mut instances = Vec::with_capacity(instance_count);
 
     for _ in 0..instance_count {
-        let definition = read_string(&mut reader, path, "definition")?;
+        let crate_name = read_string(&mut reader, path, "definition crate")?;
+        let definition_path = read_string(&mut reader, path, "definition path")?;
+        let source = read_optional_source_span(&mut reader, path)?;
         let display_name = read_string(&mut reader, path, "display name")?;
         let raw_symbol = read_string(&mut reader, path, "raw symbol")?;
         let codegen_unit_count =
             read_length_u32(&mut reader, path, "codegen unit count", MAX_CODEGEN_UNITS)?;
-        let mut codegen_units = Vec::with_capacity(codegen_unit_count);
+        let mut placements = Vec::with_capacity(codegen_unit_count);
 
         for _ in 0..codegen_unit_count {
-            codegen_units.push(read_string(&mut reader, path, "codegen unit")?);
+            placements.push(CodegenUnitPlacement {
+                codegen_unit: read_string(&mut reader, path, "codegen unit")?,
+                linkage: read_string(&mut reader, path, "codegen unit linkage")?,
+                visibility: read_string(&mut reader, path, "codegen unit visibility")?,
+                local_copy: read_bool_u32(&mut reader, path, "codegen unit local copy")?,
+                size_estimate: read_usize_u64(&mut reader, path, "codegen unit size estimate")?,
+            });
         }
 
         instances.push(CompilerInstance {
-            definition,
+            origin: DefinitionOrigin {
+                crate_name,
+                definition_path,
+                source,
+            },
             display_name,
             raw_symbol,
-            codegen_units,
+            placements,
         });
     }
 
@@ -110,7 +193,54 @@ pub(crate) fn read(path: &Path, expected_rustc_commit: &str) -> Result<Vec<Compi
         return Err(invalid_manifest(path, "manifest contains trailing bytes"));
     }
 
-    Ok(instances)
+    Ok(CompilerManifest {
+        rustc_arguments,
+        instances,
+    })
+}
+
+fn read_bool_u32(reader: &mut Cursor<&[u8]>, path: &Path, field: &'static str) -> Result<bool> {
+    match read_u32(reader, path, field)? {
+        0 => Ok(false),
+        1 => Ok(true),
+        value => Err(invalid_manifest(
+            path,
+            format!("{field} must be 0 or 1, got {value}"),
+        )),
+    }
+}
+
+fn read_optional_source_span(
+    reader: &mut Cursor<&[u8]>,
+    path: &Path,
+) -> Result<Option<SourceSpan>> {
+    let present = read_u32(reader, path, "source span presence")?;
+    if present == 0 {
+        return Ok(None);
+    }
+    if present != 1 {
+        return Err(invalid_manifest(
+            path,
+            format!("source span presence must be 0 or 1, got {present}"),
+        ));
+    }
+
+    Ok(Some(SourceSpan {
+        file_name: read_string(reader, path, "source filename")?,
+        byte_start: read_u64(reader, path, "source byte start")?,
+        byte_end: read_u64(reader, path, "source byte end")?,
+        line_start: read_usize_u64(reader, path, "source line start")?,
+        column_start: read_usize_u64(reader, path, "source column start")?,
+        line_end: read_usize_u64(reader, path, "source line end")?,
+        column_end: read_usize_u64(reader, path, "source column end")?,
+    }))
+}
+
+fn read_usize_u64(reader: &mut Cursor<&[u8]>, path: &Path, field: &'static str) -> Result<usize> {
+    let value = read_u64(reader, path, field)?;
+
+    usize::try_from(value)
+        .map_err(|_| invalid_manifest(path, format!("{field} exceeds usize, got {value}")))
 }
 
 fn read_string(reader: &mut Cursor<&[u8]>, path: &Path, field: &'static str) -> Result<String> {
@@ -206,21 +336,51 @@ mod tests {
         manifest.extend_from_slice(MANIFEST_MAGIC);
         manifest.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
         push_string(&mut manifest, "commit");
+        manifest.extend_from_slice(&1_u32.to_le_bytes());
+        push_string(&mut manifest, "rustc");
         manifest.extend_from_slice(&1_u64.to_le_bytes());
+        push_string(&mut manifest, "example");
         push_string(&mut manifest, "example::kernel");
+        manifest.extend_from_slice(&1_u32.to_le_bytes());
+        push_string(&mut manifest, "src/lib.rs");
+        manifest.extend_from_slice(&12_u64.to_le_bytes());
+        manifest.extend_from_slice(&24_u64.to_le_bytes());
+        manifest.extend_from_slice(&2_u64.to_le_bytes());
+        manifest.extend_from_slice(&4_u64.to_le_bytes());
+        manifest.extend_from_slice(&2_u64.to_le_bytes());
+        manifest.extend_from_slice(&16_u64.to_le_bytes());
         push_string(&mut manifest, "example::kernel::<u64>");
         push_string(&mut manifest, "_Rexample");
         manifest.extend_from_slice(&1_u32.to_le_bytes());
         push_string(&mut manifest, "example-cgu.0");
+        push_string(&mut manifest, "External");
+        push_string(&mut manifest, "Default");
+        manifest.extend_from_slice(&0_u32.to_le_bytes());
+        manifest.extend_from_slice(&32_u64.to_le_bytes());
         fs::write(&path, manifest).expect("the test can write the manifest");
 
-        let instances = read(&path, "commit").expect("the manifest is valid");
+        let manifest = read(&path, "commit").expect("the manifest is valid");
+        let instances = manifest.instances;
 
+        assert_eq!(manifest.rustc_arguments, ["rustc"]);
         assert_eq!(instances.len(), 1);
-        assert_eq!(instances[0].definition, "example::kernel");
+        assert_eq!(instances[0].origin.crate_name, "example");
+        assert_eq!(instances[0].origin.definition_path, "example::kernel");
+        assert_eq!(
+            instances[0]
+                .origin
+                .source
+                .as_ref()
+                .expect("the instance has source")
+                .byte_start,
+            12
+        );
         assert_eq!(instances[0].display_name, "example::kernel::<u64>");
         assert_eq!(instances[0].raw_symbol, "_Rexample");
-        assert_eq!(instances[0].codegen_units, ["example-cgu.0"]);
+        assert_eq!(instances[0].placements[0].codegen_unit, "example-cgu.0");
+        assert_eq!(instances[0].placements[0].linkage, "External");
+        assert!(!instances[0].placements[0].local_copy);
+        assert_eq!(instances[0].placements[0].size_estimate, 32);
     }
 
     #[test]
@@ -231,6 +391,7 @@ mod tests {
         manifest.extend_from_slice(MANIFEST_MAGIC);
         manifest.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
         push_string(&mut manifest, "other");
+        manifest.extend_from_slice(&0_u32.to_le_bytes());
         manifest.extend_from_slice(&0_u64.to_le_bytes());
         fs::write(&path, manifest).expect("the test can write the manifest");
 
@@ -277,6 +438,7 @@ mod tests {
         manifest.extend_from_slice(MANIFEST_MAGIC);
         manifest.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
         push_string(&mut manifest, "commit");
+        manifest.extend_from_slice(&0_u32.to_le_bytes());
         manifest.extend_from_slice(&1_000_001_u64.to_le_bytes());
         fs::write(&path, manifest).expect("the test can write the manifest");
 
@@ -293,6 +455,7 @@ mod tests {
         manifest.extend_from_slice(MANIFEST_MAGIC);
         manifest.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
         push_string(&mut manifest, "commit");
+        manifest.extend_from_slice(&0_u32.to_le_bytes());
         manifest.extend_from_slice(&0_u64.to_le_bytes());
         manifest.push(0);
         fs::write(&path, manifest).expect("the test can write the manifest");

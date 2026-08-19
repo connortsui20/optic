@@ -29,3 +29,26 @@ mod implementation {
 }
 
 pub use implementation::ReexportedKernel;
+
+/// Adds one through a nested helper that the optimizer can fully inline.
+#[inline(always)]
+pub fn inline_add_one<T>(value: T) -> T
+where
+    T: From<u8> + std::ops::Add<Output = T>,
+{
+    #[inline(always)]
+    fn chunk<T>(value: T) -> T
+    where
+        T: From<u8> + std::ops::Add<Output = T>,
+    {
+        value + T::from(1)
+    }
+
+    chunk(value)
+}
+
+/// A non-Rust compiler input used to verify Cargo-observed freshness.
+pub const BUILD_DATA: &[u8] = include_bytes!("build-data.txt");
+
+/// A compiler environment input used to verify Cargo-observed freshness.
+pub const BUILD_ENV: Option<&str> = option_env!("OPTIC_TEST_VALUE");

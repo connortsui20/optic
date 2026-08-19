@@ -47,6 +47,13 @@ pub enum Error {
         message: String,
     },
 
+    /// Cargo did not invoke rustc and no matching verified evidence exists.
+    #[error("compiler evidence is unavailable: {message}")]
+    EvidenceUnavailable {
+        /// The action that restores evidence.
+        message: String,
+    },
+
     /// No stored capture matches the requested full ID or prefix.
     #[error("capture ID must match one stored capture, got {capture_id}")]
     UnknownCapture {
