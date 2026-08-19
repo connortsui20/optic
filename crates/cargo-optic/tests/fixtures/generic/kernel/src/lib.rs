@@ -30,6 +30,17 @@ mod implementation {
 
 pub use implementation::ReexportedKernel;
 
+/// A generic type whose method path contains a generic parent segment.
+pub struct GenericKernel<T>(T);
+
+impl<T> GenericKernel<T> {
+    /// Wraps one value through a standalone compiler instance.
+    #[inline(never)]
+    pub fn new(value: T) -> Self {
+        Self(std::hint::black_box(value))
+    }
+}
+
 /// Adds one through a nested helper that the optimizer can fully inline.
 #[inline(always)]
 pub fn inline_add_one<T>(value: T) -> T

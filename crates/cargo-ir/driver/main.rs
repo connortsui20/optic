@@ -134,9 +134,11 @@ fn source_span(tcx: TyCtxt<'_>, span: rustc_span::Span) -> Option<SourceSpan> {
     if start.file.start_pos != end.file.start_pos {
         return None;
     }
+    let local_name = start.file.name.prefer_local_unconditionally().to_string();
+    let file_name = std::fs::canonicalize(local_name).ok()?;
 
     Some(SourceSpan {
-        file_name: start.file.name.prefer_local_unconditionally().to_string(),
+        file_name: file_name.to_str()?.to_owned(),
         byte_start: u64::from(span.lo().0 - start.file.start_pos.0),
         byte_end: u64::from(span.hi().0 - start.file.start_pos.0),
         line_start: start.line,

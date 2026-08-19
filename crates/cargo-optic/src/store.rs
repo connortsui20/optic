@@ -23,7 +23,56 @@ use crate::{
     SourceLocation, StoreStatus, VerifySummary,
 };
 
-const STORE_VERSION: u32 = 5;
+const STORE_VERSION: u32 = 6;
+
+#[derive(Clone, Debug)]
+pub(crate) struct AnalysisKey(String);
+
+impl AnalysisKey {
+    pub(crate) fn new() -> Self {
+        Self(uuid::Uuid::new_v4().simple().to_string())
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl rusqlite::types::FromSql for AnalysisKey {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        let value = value.as_str()?;
+        let valid = value.len() == 32
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        if !valid {
+            return Err(rusqlite::types::FromSqlError::Other(Box::new(
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("stored analysis key is invalid, got {value}"),
+                ),
+            )));
+        }
+
+        Ok(Self(value.to_owned()))
+    }
+}
+
+pub(crate) struct CachedCapture {
+    pub(crate) analysis_key: AnalysisKey,
+    pub(crate) summary: CaptureSummary,
+}
+
+pub(crate) struct CaptureCacheKey<'a> {
+    request: &'a str,
+    analysis: &'a AnalysisKey,
+}
+
+impl<'a> CaptureCacheKey<'a> {
+    pub(crate) fn new(request: &'a str, analysis: &'a AnalysisKey) -> Self {
+        Self { request, analysis }
+    }
+}
 
 pub(crate) struct Store {
     root: PathBuf,
@@ -88,13 +137,8 @@ impl Store {
         self.staging.join(capture_id.as_str())
     }
 
-    pub(crate) fn analysis_directory(&self, request_key: &str) -> PathBuf {
-        debug_assert!(
-            request_key.bytes().all(|byte| byte.is_ascii_hexdigit()),
-            "request keys are hexadecimal digests"
-        );
-
-        self.work.join(request_key)
+    pub(crate) fn analysis_directory(&self, analysis_key: &AnalysisKey) -> PathBuf {
+        self.work.join(analysis_key.as_str())
     }
 
     pub(crate) fn lock_writer(&self) -> Result<FileLock> {
@@ -117,20 +161,23 @@ impl Store {
         lock_file(&path)
     }
 
-    pub(crate) fn cached_capture(&self, request_key: &str) -> Result<Option<CaptureSummary>> {
-        let capture_id = self
+    pub(crate) fn cached_capture(&self, request_key: &str) -> Result<Option<CachedCapture>> {
+        let cached = self
             .connection
             .query_row(
-                "SELECT capture_id FROM capture_cache WHERE request_key = ?1",
+                "SELECT capture_id, analysis_key FROM capture_cache WHERE request_key = ?1",
                 [request_key],
-                |row| row.get::<_, CaptureId>(0),
+                |row| Ok((row.get::<_, CaptureId>(0)?, row.get::<_, AnalysisKey>(1)?)),
             )
             .optional()?;
 
-        capture_id
-            .map(|capture_id| {
+        cached
+            .map(|(capture_id, analysis_key)| {
                 self.verify_capture_blobs(&capture_id)?;
-                self.capture_summary(&capture_id, true)
+                Ok(CachedCapture {
+                    analysis_key,
+                    summary: self.capture_summary(&capture_id, true)?,
+                })
             })
             .transpose()
     }
@@ -138,7 +185,7 @@ impl Store {
     pub(crate) fn publish(
         &mut self,
         capture_id: &CaptureId,
-        request_key: &str,
+        cache_key: CaptureCacheKey<'_>,
         spec: &BuildSpec,
         bundle: &EvidenceBundle,
         sources: &SourceBaseline,
@@ -177,7 +224,7 @@ impl Store {
             &transaction,
             PublishedCapture {
                 capture_id,
-                request_key,
+                request_key: cache_key.request,
                 request_json: &request_json,
                 invocation_json: &invocation_json,
                 spec,
@@ -190,9 +237,15 @@ impl Store {
         insert_instances(&transaction, capture_id, &bundle.instances, &body_index)?;
         insert_sources(&transaction, capture_id, &published_sources)?;
         transaction.execute(
-            "INSERT INTO capture_cache(request_key, capture_id) VALUES (?1, ?2)
-             ON CONFLICT(request_key) DO UPDATE SET capture_id = excluded.capture_id",
-            params![request_key, capture_id.as_str()],
+            "INSERT INTO capture_cache(request_key, capture_id, analysis_key) VALUES (?1, ?2, ?3)
+             ON CONFLICT(request_key) DO UPDATE SET
+                 capture_id = excluded.capture_id,
+                 analysis_key = excluded.analysis_key",
+            params![
+                cache_key.request,
+                capture_id.as_str(),
+                cache_key.analysis.as_str()
+            ],
         )?;
         transaction.commit()?;
 
@@ -425,53 +478,27 @@ impl Store {
         })
     }
 
-    pub(crate) fn sources(&self, capture_id: &CaptureId) -> Result<Vec<StoredSource>> {
-        let mut statement = self
-            .connection
-            .prepare("SELECT path, blob FROM sources WHERE capture_id = ?1 ORDER BY path")?;
-        let rows = statement.query_map([capture_id.as_str()], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        let mut sources = Vec::new();
-
-        for row in rows {
-            let (path, blob) = row?;
-            let bytes = self.read_blob(&blob)?;
-            sources.push(StoredSource { path, bytes });
-        }
-
-        Ok(sources)
-    }
-
     pub(crate) fn source_file(
         &self,
         capture_id: &CaptureId,
         location: &SourceLocation,
     ) -> Result<Option<StoredSource>> {
-        let mut statement = self
+        let source = self
             .connection
-            .prepare("SELECT path, blob FROM sources WHERE capture_id = ?1 ORDER BY path")?;
-        let candidates = statement
-            .query_map([capture_id.as_str()], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .filter_map(|row| match row {
-                Ok((path, blob)) if source_path_matches(&path, &location.path) => {
-                    Some(Ok((path, blob)))
-                }
-                Ok(_) => None,
-                Err(error) => Some(Err(error)),
+            .query_row(
+                "SELECT path, blob FROM sources WHERE capture_id = ?1 AND path = ?2",
+                params![capture_id.as_str(), location.path],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        source
+            .map(|(path, blob)| {
+                Ok(StoredSource {
+                    path,
+                    bytes: self.read_blob(&blob)?,
+                })
             })
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let [(path, blob)] = candidates.as_slice() else {
-            return Ok(None);
-        };
-        let bytes = self.read_blob(blob)?;
-
-        Ok(Some(StoredSource {
-            path: path.clone(),
-            bytes,
-        }))
+            .transpose()
     }
 
     fn publish_blob(&self, source: &Path) -> Result<String> {
@@ -915,15 +942,6 @@ fn ambiguous_identifier(kind: &'static str, prefix: &str, candidates: &[String])
     }
 }
 
-fn source_path_matches(stored: &str, compiler: &str) -> bool {
-    if stored == compiler {
-        return true;
-    }
-
-    let compiler = Path::new(compiler);
-    compiler.is_relative() && Path::new(stored).ends_with(compiler)
-}
-
 /// Returns the exclusive upper bound for IDs that start with a hexadecimal prefix.
 ///
 /// `g` is the first ASCII character after the largest valid lowercase hexadecimal character.
@@ -1131,7 +1149,8 @@ fn create_schema(connection: &mut Connection) -> Result<()> {
          );
          CREATE TABLE capture_cache(
              request_key TEXT PRIMARY KEY,
-             capture_id TEXT NOT NULL REFERENCES captures(id) ON DELETE CASCADE
+             capture_id TEXT NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+             analysis_key TEXT NOT NULL
          );",
     )?;
     transaction.pragma_update(None, "user_version", STORE_VERSION)?;
@@ -1697,22 +1716,6 @@ mod tests {
     }
 
     #[test]
-    fn matches_only_exact_or_relative_captured_source_paths() {
-        assert!(super::source_path_matches(
-            "/workspace/kernel/src/lib.rs",
-            "/workspace/kernel/src/lib.rs"
-        ));
-        assert!(super::source_path_matches(
-            "/workspace/kernel/src/lib.rs",
-            "kernel/src/lib.rs"
-        ));
-        assert!(!super::source_path_matches(
-            "/workspace/kernel/src/lib.rs",
-            "/other/kernel/src/lib.rs"
-        ));
-    }
-
-    #[test]
     fn selects_the_final_thin_lto_artifact_as_optimized_output() {
         let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
         let store = Store::open(temporary.path()).expect("the test can open a store");
@@ -1821,13 +1824,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_schema_four_store() {
+    fn rejects_a_schema_five_store() {
         let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
         let catalog = temporary.path().join("catalog.sqlite");
         let connection = Connection::open(&catalog).expect("the test can open the catalog");
         connection
-            .pragma_update(None, "user_version", 4)
-            .expect("the test can create a schema-four catalog");
+            .pragma_update(None, "user_version", 5)
+            .expect("the test can create a schema-five catalog");
         drop(connection);
 
         let optic = temporary.path().join(".optic");
@@ -1839,7 +1842,7 @@ mod tests {
             Store::open(temporary.path()),
             Err(Error::StoreVersion {
                 expected: STORE_VERSION,
-                actual: 4,
+                actual: 5,
             })
         ));
     }
@@ -1913,6 +1916,32 @@ mod tests {
             .expect("the test can insert an invalid stored identifier");
 
         assert!(matches!(store.captures(), Err(Error::Database(_))));
+    }
+
+    #[test]
+    fn rejects_an_invalid_stored_analysis_key() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let store = Store::open(temporary.path()).expect("the test can open a store");
+        store
+            .connection
+            .execute_batch(
+                "INSERT INTO captures(
+                     id, created_at_ms, request_key, request_json, rustc_release, rustc_commit,
+                     llvm_version, target, profile, invocation_json
+                 ) VALUES (
+                     'cap_00000000000000000000000000000000', 0, 'request', '{}', '', '', '', '',
+                     'faithful', '{}'
+                 );
+                 INSERT INTO capture_cache(request_key, capture_id, analysis_key) VALUES (
+                     'request', 'cap_00000000000000000000000000000000', '../outside'
+                 );",
+            )
+            .expect("the test can insert an invalid analysis key");
+
+        assert!(matches!(
+            store.cached_capture("request"),
+            Err(Error::Database(_))
+        ));
     }
 
     #[track_caller]

@@ -3,10 +3,10 @@
 //! Source bytes are copied before Cargo starts and validated after compilation. Query-time item
 //! extraction parses only source blobs, never the current worktree.
 
-use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use proc_macro2::Span;
@@ -88,7 +88,9 @@ impl SourceBaseline {
                         .extension()
                         .is_some_and(|extension| extension == "rs")
                 {
-                    let path = entry.into_path();
+                    let path = fs::canonicalize(entry.path()).map_err(|source| {
+                        Error::filesystem("canonicalize", entry.path(), source)
+                    })?;
                     paths.insert(path.clone());
                     cache_paths.insert(path);
                 }
@@ -254,68 +256,18 @@ fn cargo_configuration_paths(workspace_root: &Path) -> Vec<PathBuf> {
     paths
 }
 
-pub(crate) fn find_item(definition: &str, sources: &[StoredSource]) -> Option<SourceView> {
-    let name = function_name(definition)?;
-    let mut candidates = Vec::new();
-
-    for source in sources {
-        let Ok(text) = std::str::from_utf8(&source.bytes) else {
-            continue;
-        };
-        let Ok(file) = syn::parse_file(text) else {
-            continue;
-        };
-        let mut visitor = ItemVisitor {
-            name,
-            spans: Vec::new(),
-        };
-        visitor.visit_file(&file);
-
-        for span in visitor.spans {
-            let start = span.start().line;
-            let end = span.end().line;
-            let Some(item) = lines(text, start, end) else {
-                continue;
-            };
-            let score = path_score(definition, &source.path);
-            candidates.push((score, source.path.clone(), start, item));
-        }
-    }
-
-    candidates.sort_by_key(|candidate| Reverse(candidate.0));
-    let best = candidates.first()?;
-
-    if candidates.get(1).is_some_and(|next| next.0 == best.0) {
-        return None;
-    }
-
-    Some(SourceView {
-        path: best.1.clone(),
-        start_line: best.2,
-        text: best.3.clone(),
-    })
-}
-
-pub(crate) fn find_item_at(
-    definition: &str,
-    location: &SourceLocation,
-    source: &StoredSource,
-) -> Option<SourceView> {
-    let name = function_name(definition)?;
+pub(crate) fn find_item_at(location: &SourceLocation, source: &StoredSource) -> Option<SourceView> {
     let text = std::str::from_utf8(&source.bytes).ok()?;
     let file = syn::parse_file(text).ok()?;
-    let mut visitor = ItemVisitor {
-        name,
-        spans: Vec::new(),
-    };
+    let byte_start = usize::try_from(location.byte_start).ok()?;
+    let byte_end = usize::try_from(location.byte_end).ok()?;
+    let mut visitor = ItemVisitor::default();
     visitor.visit_file(&file);
     let span = visitor
         .spans
         .into_iter()
-        .filter(|span| {
-            span.start().line <= location.line_start && span.end().line >= location.line_end
-        })
-        .min_by_key(|span| span.end().line.saturating_sub(span.start().line))?;
+        .find(|span| span.definition == (byte_start..byte_end))?
+        .item;
     let start_line = span.start().line;
     let text = lines(text, start_line, span.end().line)?;
 
@@ -337,24 +289,6 @@ fn included_entry(entry: &DirEntry) -> bool {
     )
 }
 
-fn function_name(definition: &str) -> Option<&str> {
-    let definition = definition
-        .split_once("::<")
-        .map_or(definition, |(name, _)| name);
-    definition
-        .rsplit("::")
-        .next()
-        .filter(|name| !name.is_empty())
-}
-
-fn path_score(definition: &str, path: &str) -> usize {
-    definition
-        .split("::")
-        .filter(|segment| !segment.is_empty())
-        .filter(|segment| path.contains(segment))
-        .count()
-}
-
 fn lines(text: &str, start: usize, end: usize) -> Option<String> {
     if start == 0 || end < start {
         return None;
@@ -368,62 +302,60 @@ fn lines(text: &str, start: usize, end: usize) -> Option<String> {
     Some(result)
 }
 
-struct ItemVisitor<'a> {
-    name: &'a str,
-    spans: Vec<Span>,
+#[derive(Default)]
+struct ItemVisitor {
+    spans: Vec<FunctionSpan>,
 }
 
-impl<'ast> Visit<'ast> for ItemVisitor<'_> {
+struct FunctionSpan {
+    definition: Range<usize>,
+    item: Span,
+}
+
+impl<'ast> Visit<'ast> for ItemVisitor {
     fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
-        if function.sig.ident == self.name {
-            self.spans.push(function.span());
-        }
+        self.spans
+            .push(function_span(&function.vis, &function.sig, function.span()));
         visit::visit_item_fn(self, function);
     }
 
     fn visit_impl_item_fn(&mut self, function: &'ast syn::ImplItemFn) {
-        if function.sig.ident == self.name {
-            self.spans.push(function.span());
-        }
+        self.spans
+            .push(function_span(&function.vis, &function.sig, function.span()));
         visit::visit_impl_item_fn(self, function);
     }
 
     fn visit_trait_item_fn(&mut self, function: &'ast syn::TraitItemFn) {
-        if function.sig.ident == self.name {
-            self.spans.push(function.span());
-        }
+        let definition = function.sig.span().byte_range();
+        self.spans.push(FunctionSpan {
+            definition,
+            item: function.span(),
+        });
         visit::visit_trait_item_fn(self, function);
+    }
+}
+
+fn function_span(
+    visibility: &syn::Visibility,
+    signature: &syn::Signature,
+    item: Span,
+) -> FunctionSpan {
+    let signature = signature.span().byte_range();
+    let start = match visibility {
+        syn::Visibility::Inherited => signature.start,
+        visibility => visibility.span().byte_range().start,
+    };
+
+    FunctionSpan {
+        definition: start..signature.end,
+        item,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{StoredSource, find_item, find_item_at};
+    use super::{StoredSource, find_item_at};
     use crate::SourceLocation;
-
-    #[test]
-    fn extracts_a_complete_function_when_another_source_is_invalid() {
-        let sources = vec![
-            StoredSource {
-                path: "src/invalid.rs".to_owned(),
-                bytes: b"this is not Rust".to_vec(),
-            },
-            StoredSource {
-                path: "src/kernel.rs".to_owned(),
-                bytes: b"fn other() {}\n\npub fn kernel<T>(value: T) {\n    drop(value);\n}\n"
-                    .to_vec(),
-            },
-        ];
-
-        let source = find_item("crate::kernel", &sources).expect("the fixture contains one kernel");
-
-        assert_eq!(source.path, "src/kernel.rs");
-        assert_eq!(source.start_line, 3);
-        assert_eq!(
-            source.text,
-            "pub fn kernel<T>(value: T) {\n    drop(value);\n}\n"
-        );
-    }
 
     #[test]
     fn expands_an_exact_nested_span_to_the_complete_function() {
@@ -444,20 +376,75 @@ mod tests {
         let location = SourceLocation {
             path: "src/kernel.rs".to_owned(),
             byte_start: 39,
-            byte_end: 71,
+            byte_end: 66,
             line_start: 3,
             column_start: 4,
             line_end: 3,
             column_end: 36,
         };
 
-        let item = find_item_at("crate::outer::chunk", &location, &source)
-            .expect("the exact span selects the nested function");
+        let item =
+            find_item_at(&location, &source).expect("the exact span selects the nested function");
 
         assert_eq!(item.start_line, 2);
         assert_eq!(
             item.text,
             "    #[inline(always)]\n    fn chunk(value: u64) -> u64 {\n        value + 1\n    }\n"
         );
+    }
+
+    #[test]
+    fn exact_span_does_not_depend_on_parsing_the_definition_path() {
+        let source = StoredSource {
+            path: "src/kernel.rs".to_owned(),
+            bytes: concat!(
+                "struct Kernel<T>(T);\n",
+                "\n",
+                "impl<T> Kernel<T> {\n",
+                "    fn new(value: T) -> Self {\n",
+                "        Self(value)\n",
+                "    }\n",
+                "}\n",
+            )
+            .as_bytes()
+            .to_vec(),
+        };
+        let location = SourceLocation {
+            path: "src/kernel.rs".to_owned(),
+            byte_start: 46,
+            byte_end: 70,
+            line_start: 4,
+            column_start: 4,
+            line_end: 4,
+            column_end: 34,
+        };
+
+        let item = find_item_at(&location, &source)
+            .expect("the compiler span selects the method without parsing its path");
+
+        assert_eq!(item.start_line, 4);
+        assert_eq!(
+            item.text,
+            "    fn new(value: T) -> Self {\n        Self(value)\n    }\n"
+        );
+    }
+
+    #[test]
+    fn does_not_return_an_enclosing_function_for_a_closure_span() {
+        let source = StoredSource {
+            path: "src/kernel.rs".to_owned(),
+            bytes: b"fn kernel() {\n    let add = |left, right| left + right;\n}\n".to_vec(),
+        };
+        let location = SourceLocation {
+            path: "src/kernel.rs".to_owned(),
+            byte_start: 28,
+            byte_end: 41,
+            line_start: 2,
+            column_start: 14,
+            line_end: 2,
+            column_end: 27,
+        };
+
+        assert!(find_item_at(&location, &source).is_none());
     }
 }

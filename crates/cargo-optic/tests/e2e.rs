@@ -79,6 +79,13 @@ fn captures_finds_and_shows_concrete_generic_instances() {
     let capture = string(&refreshed, "/result/id");
     assert_ne!(capture, changed_capture);
     assert_eq!(refreshed["result"]["reused"], false);
+
+    let reused_after_refresh = fixture.run(capture_arguments);
+    assert_success(&reused_after_refresh);
+    let reused_after_refresh = json(&reused_after_refresh);
+    assert_eq!(string(&reused_after_refresh, "/result/id"), capture);
+    assert_eq!(reused_after_refresh["result"]["reused"], true);
+
     let capture_ids = [first_capture, changed_capture, capture];
     let capture_prefix = shortest_unique_prefix(capture, &capture_ids);
     let capture_display = displayed_id(capture, &capture_ids);
@@ -150,6 +157,39 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         reexported_instances[0]["definition"],
         "optic_mvp_kernel::ReexportedKernel::identity"
     );
+
+    let generic_method = fixture.run([
+        "find",
+        "--capture",
+        capture_prefix,
+        "optic_mvp_kernel::GenericKernel",
+        "--format",
+        "json",
+    ]);
+    assert_success(&generic_method);
+    let generic_method = json(&generic_method);
+    let generic_methods = generic_method["result"]["instances"]
+        .as_array()
+        .expect("find returns the generic parent method");
+    assert_eq!(generic_methods.len(), 1);
+    assert_eq!(
+        generic_methods[0]["definition"],
+        "optic_mvp_kernel::GenericKernel::<T>::new"
+    );
+    let generic_method_id = generic_methods[0]["id"]
+        .as_str()
+        .expect("the generic parent method has an instance ID");
+    let generic_source = fixture.run([
+        "show",
+        "--instance",
+        generic_method_id,
+        "--source",
+        "--format",
+        "json",
+    ]);
+    assert_success(&generic_source);
+    let generic_source = json(&generic_source);
+    assert!(string(&generic_source, "/result/source/text").contains("pub fn new(value: T)"));
 
     let nested = fixture.run([
         "find",

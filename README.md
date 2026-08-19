@@ -153,16 +153,16 @@ serializes capture writers, but read-only queries can use completed captures in 
 There is no current capture and no session state. Each read-only command uses an explicit capture
 or instance ID. An instance ID identifies its capture. Content-addressed blobs hold the evidence.
 
-The current store schema is version 5. Cargo Optic rejects older stores. Run `cargo optic clean`
+The current store schema is version 6. Cargo Optic rejects older stores. Run `cargo optic clean`
 once to replace an older prototype store.
 
 Cargo Optic asks Cargo to evaluate the selected target before it reuses a capture. This design
 includes Cargo-tracked build-script inputs, `include_bytes!` files, and compiler environment
 inputs. Optic does not use a source-file digest as a substitute for Cargo freshness.
 
-Optic uses a stable analysis fingerprint for one compiler, target, profile, feature set, and
-compiler environment. If Cargo reports the target as fresh, Optic reuses the matching verified
-capture. If no matching capture exists, Optic asks you to repeat the command with `--fresh`.
+Optic stores the analysis fingerprint that produced each cached capture. A normal command uses that
+exact fingerprint when it asks Cargo to check freshness. A fresh command creates and stores a new
+fingerprint. The next normal command can therefore reuse the fresh capture.
 
 Cargo cannot track a build-script input that the script does not declare. If a script has an
 undeclared input, use `--fresh` after that input changes.
@@ -193,8 +193,8 @@ The faithful profile permits the normal link step. Existing normal artifacts rem
   stages.
 - If ThinLTO artifacts exist, optimized output uses `thin-lto-after-pm` instead of the earlier
   `rcgu` artifact.
-- Source lookup uses exact rustc spans when they match captured local source. Syntax scoring is a
-  fallback for identities that do not have a span.
+- Source lookup requires an exact rustc definition span and canonical local source path. It returns
+  no source when either identity is unavailable.
 - The prototype does not navigate inline occurrences to their enclosing optimized bodies.
 - The prototype is verified on Apple silicon macOS.
 

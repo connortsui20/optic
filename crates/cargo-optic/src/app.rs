@@ -11,8 +11,10 @@ use std::path::{Path, PathBuf};
 use cargo_ir::BuildRequest;
 use serde::Serialize;
 
-use crate::source::{SourceBaseline, find_item, find_item_at};
-use crate::store::{FileLock, Store, lock_workspace_exclusive, lock_workspace_shared};
+use crate::source::{SourceBaseline, find_item_at};
+use crate::store::{
+    AnalysisKey, CaptureCacheKey, FileLock, Store, lock_workspace_exclusive, lock_workspace_shared,
+};
 use crate::{
     BodySetDelta, BodySetSummary, BuildSpec, CachePolicy, CaptureDetails, CaptureId,
     CaptureSummary, CleanSummary, CompareView, CompilerOutput, FindResult, GcSummary, InstanceId,
@@ -112,10 +114,14 @@ impl Application {
         staging: &Path,
     ) -> Result<CaptureSummary> {
         let request_key = request_key(spec, toolchain, &self.target_directory)?;
-        let analysis_directory = match cache_policy {
-            CachePolicy::Reuse => self.store.analysis_directory(&request_key),
-            CachePolicy::Refresh => staging.join("compiler"),
+        let cached = match cache_policy {
+            CachePolicy::Reuse => self.store.cached_capture(&request_key)?,
+            CachePolicy::Refresh => None,
         };
+        let analysis_key = cached
+            .as_ref()
+            .map_or_else(AnalysisKey::new, |cached| cached.analysis_key.clone());
+        let analysis_directory = self.store.analysis_directory(&analysis_key);
         prepare_analysis_directory(&analysis_directory)?;
         let sources = SourceBaseline::capture(&self.workspace_root, spec, staging)?;
         let request = self.build_request(spec, analysis_directory.clone());
@@ -125,7 +131,7 @@ impl Application {
                 sources.validate()?;
                 self.store.publish(
                     capture_id,
-                    &request_key,
+                    CaptureCacheKey::new(&request_key, &analysis_key),
                     spec,
                     &bundle,
                     &sources,
@@ -134,7 +140,7 @@ impl Application {
             }
             Ok(cargo_ir::CaptureOutcome::Fresh { .. }) => {
                 sources.validate()?;
-                self.store.cached_capture(&request_key)?.ok_or_else(|| {
+                cached.map(|cached| cached.summary).ok_or_else(|| {
                     crate::Error::EvidenceUnavailable {
                         message: "Cargo reused the selected target, but Optic has no verified capture for this build. Run the same command with --fresh".to_owned(),
                     }
@@ -246,10 +252,9 @@ impl Application {
             view.source = if let Some(location) = &view.instance.source {
                 self.store
                     .source_file(&view.capture_id, location)?
-                    .and_then(|source| find_item_at(&view.instance.definition, location, &source))
+                    .and_then(|source| find_item_at(location, &source))
             } else {
-                let sources = self.store.sources(&view.capture_id)?;
-                find_item(&view.instance.definition, &sources)
+                None
             };
         }
 

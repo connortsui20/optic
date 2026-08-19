@@ -32,7 +32,7 @@ Read [README.md](README.md) before you change the product behavior. Use the
 - An instance ID identifies its capture, so `show --instance` does not need a capture ID.
 - New IDs contain random UUIDv4 suffixes.
 - Text output shows at least 12 hexadecimal characters and highlights the shortest unique prefix.
-- The schema version is 5. Older stores require `cargo optic clean`.
+- The schema version is 6. Older stores require `cargo optic clean`.
 
 Capture writers use a file lock. Read commands can use completed captures in parallel. An operation
 lock prevents `clean` from removing a store that another process uses.
@@ -86,7 +86,7 @@ The end-to-end test requires nightly rustc and its matching `llvm-tools` and `ru
 
 - The prototype supports optimized and pre-optimization LLVM IR only.
 - It does not support MIR, assembly, object files, compiler remarks, or a TUI.
-- Source lookup uses exact rustc spans and a syntax fallback.
+- Source lookup requires an exact rustc definition span and canonical local source path.
 - Cargo cannot find undeclared build-script inputs.
 - Inline occurrences do not link to enclosing optimized bodies.
 - The current acceptance test covers Apple silicon macOS.
