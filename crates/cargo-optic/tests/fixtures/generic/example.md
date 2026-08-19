@@ -12,10 +12,11 @@ cargo +stable install --locked --path crates/cargo-optic --force
 cd crates/cargo-optic/tests/fixtures/generic
 ```
 
-The example requires the nightly toolchain and its LLVM tools. Install them if they are absent:
+The example requires the nightly toolchain. Install its compiler and LLVM libraries if they are
+absent:
 
 ```console
-rustup toolchain install nightly --component llvm-tools
+rustup toolchain install nightly --component llvm-tools --component rustc-dev
 ```
 
 ## Show the example function

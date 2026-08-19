@@ -10,6 +10,8 @@ pub use capture::{BodyRange, EvidenceBundle, LlvmStage, ModuleEvidence, capture}
 mod error;
 pub use error::{Error, Result};
 
+mod driver;
+
 mod llvm;
 
 mod mono;

@@ -16,6 +16,9 @@ use crate::{Error, Result};
 /// The exact active compiler and matching LLVM disassembler.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Toolchain {
+    /// The active rustc executable or command name.
+    pub rustc: PathBuf,
+
     /// The rustc release string.
     pub release: String,
 
@@ -31,6 +34,9 @@ pub struct Toolchain {
     /// The active compiler sysroot.
     pub sysroot: PathBuf,
 
+    /// The directory that contains rustc-private libraries for this host.
+    pub rustc_private_lib: PathBuf,
+
     /// The matching `llvm-dis` executable.
     pub llvm_dis: PathBuf,
 }
@@ -42,6 +48,7 @@ pub struct Toolchain {
 /// Returns an error if rustc fails, the active compiler is not nightly, or its matching
 /// `llvm-dis` executable is absent.
 pub fn inspect_toolchain() -> Result<Toolchain> {
+    let rustc = env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
     let verbose = run_rustc(["-vV"])?;
     let release = field(&verbose, "release")?.to_owned();
 
@@ -53,6 +60,7 @@ pub fn inspect_toolchain() -> Result<Toolchain> {
     let host = field(&verbose, "host")?.to_owned();
     let llvm_version = field(&verbose, "LLVM version")?.to_owned();
     let sysroot = PathBuf::from(run_rustc(["--print", "sysroot"])?.trim());
+    let rustc_private_lib = sysroot.join("lib").join("rustlib").join(&host).join("lib");
     let executable = if cfg!(windows) {
         "llvm-dis.exe"
     } else {
@@ -70,11 +78,13 @@ pub fn inspect_toolchain() -> Result<Toolchain> {
     }
 
     Ok(Toolchain {
+        rustc: PathBuf::from(rustc),
         release,
         commit_hash,
         host,
         llvm_version,
         sysroot,
+        rustc_private_lib,
         llvm_dis,
     })
 }

@@ -135,6 +135,26 @@ fn captures_finds_and_shows_concrete_generic_instances() {
             .iter()
             .all(|instance| instance["has_body"] == true)
     );
+    let reexported = fixture.run([
+        "find",
+        "--capture",
+        capture_prefix,
+        "optic_mvp_kernel::ReexportedKernel::identity",
+        "--format",
+        "json",
+    ]);
+    assert_success(&reexported);
+    let reexported = json(&reexported);
+    let reexported_instances = reexported["result"]["instances"]
+        .as_array()
+        .expect("find returns the re-exported instance");
+    assert_eq!(reexported_instances.len(), 1);
+    assert_eq!(reexported_instances[0]["has_body"], true);
+    assert_eq!(
+        reexported_instances[0]["definition"],
+        "optic_mvp_kernel::ReexportedKernel::identity"
+    );
+
     let instance_ids = [first_capture, changed_capture, capture]
         .into_iter()
         .flat_map(|capture_id| stored_instance_ids(&fixture, capture_id))
@@ -307,6 +327,81 @@ fn captures_finds_and_shows_concrete_generic_instances() {
     let clean_again = fixture.run(["clean", "--format", "json"]);
     assert_success(&clean_again);
     assert_eq!(json(&clean_again)["result"]["removed"], false);
+}
+
+#[cfg(unix)]
+#[test]
+fn preserves_compiler_wrappers_and_reuses_dependency_artifacts() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new();
+    let global_wrapper = fixture.root.join("global-wrapper.sh");
+    let workspace_wrapper = fixture.root.join("workspace-wrapper.sh");
+    let log = fixture.root.join("wrapper.log");
+    let wrapper_source = concat!(
+        "#!/bin/sh\n",
+        "crate=\n",
+        "previous=\n",
+        "for argument do\n",
+        "  if [ \"$previous\" = --crate-name ]; then crate=$argument; break; fi\n",
+        "  previous=$argument\n",
+        "done\n",
+        "kind=${0##*/}\n",
+        "if [ -n \"$crate\" ]; then printf '%s:%s\\n' \"$kind\" \"$crate\" >> ",
+        "\"$OPTIC_TEST_WRAPPER_LOG\"; fi\n",
+        "exec \"$@\"\n",
+    );
+    for wrapper in [&global_wrapper, &workspace_wrapper] {
+        fs::write(wrapper, wrapper_source).expect("the test can write the compiler wrapper");
+        fs::set_permissions(wrapper, fs::Permissions::from_mode(0o700))
+            .expect("the test can make the compiler wrapper executable");
+    }
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let warm = Command::new(cargo)
+        .arg("build")
+        .args(["-p", "optic-mvp-app", "--bin", "optic-mvp-app", "--release"])
+        .current_dir(&fixture.root)
+        .env("RUSTUP_TOOLCHAIN", "nightly")
+        .env("RUSTC_WRAPPER", &global_wrapper)
+        .env("RUSTC_WORKSPACE_WRAPPER", &workspace_wrapper)
+        .env("OPTIC_TEST_WRAPPER_LOG", &log)
+        .output()
+        .expect("the warm Cargo build starts");
+    assert_success(&warm);
+    fs::write(&log, []).expect("the test can clear the compiler wrapper log");
+
+    let capture = fixture
+        .command([
+            "capture",
+            "-p",
+            "optic-mvp-app",
+            "--bin",
+            "optic-mvp-app",
+            "--release",
+            "--fresh",
+            "--format",
+            "json",
+        ])
+        .env("RUSTC_WRAPPER", &global_wrapper)
+        .env("RUSTC_WORKSPACE_WRAPPER", &workspace_wrapper)
+        .env("OPTIC_TEST_WRAPPER_LOG", &log)
+        .output()
+        .expect("the Cargo Optic capture starts");
+    assert_success(&capture);
+    let compiled_crates = fs::read_to_string(&log).expect("the compiler wrapper log is readable");
+    let compiler_invocations = compiled_crates
+        .lines()
+        .filter(|invocation| !invocation.ends_with(":___"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        compiler_invocations,
+        [
+            "global-wrapper.sh:optic_mvp_app",
+            "workspace-wrapper.sh:optic_mvp_app"
+        ]
+    );
 }
 
 struct Fixture {

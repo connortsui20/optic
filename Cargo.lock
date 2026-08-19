@@ -142,6 +142,8 @@ dependencies = [
 name = "cargo-ir"
 version = "0.0.1"
 dependencies = [
+ "blake3",
+ "fs2",
  "rustc-demangle",
  "serde",
  "serde_json",

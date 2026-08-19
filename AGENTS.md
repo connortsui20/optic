@@ -32,7 +32,7 @@ Read [README.md](README.md) before you change the product behavior. Use the
 - An instance ID identifies its capture, so `show --instance` does not need a capture ID.
 - New IDs contain random UUIDv4 suffixes.
 - Text output shows at least 12 hexadecimal characters and highlights the shortest unique prefix.
-- The schema version is 3. The store migrates schema versions 1 and 2.
+- The schema version is 4. The store migrates schema versions 1, 2, and 3.
 
 Capture writers use a file lock. Read commands can use completed captures in parallel. An operation
 lock prevents `clean` from removing a store that another process uses.
@@ -46,7 +46,8 @@ The selected target uses analysis flags and `-Z no-link`. It has a separate Carg
 normal Cargo command can compile or link that target after an Optic capture.
 
 The evidence does not exactly match a normal build. Optic enables saved temporary files, v0 symbol
-names, line-table debug information, and mono-item output.
+names, and line-table debug information. An exact-version rustc driver records compiler identities.
+The driver runs only for the selected target.
 
 ## Code map
 
@@ -79,7 +80,7 @@ RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 git diff --check
 ```
 
-The end-to-end test requires nightly rustc and its matching `llvm-tools` component.
+The end-to-end test requires nightly rustc and its matching `llvm-tools` and `rustc-dev` components.
 
 ## Known limits
 

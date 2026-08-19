@@ -8,6 +8,13 @@ use std::path::PathBuf;
 /// A compiler-evidence failure.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// The compiler environment cannot support an exact capture.
+    #[error("invalid compiler environment: {message}")]
+    CompilerEnvironment {
+        /// The failed environment requirement.
+        message: String,
+    },
+
     /// Cargo or rustc could not be started.
     #[error("failed to start {program}: {source}")]
     StartProcess {
@@ -54,6 +61,18 @@ pub enum Error {
         path: PathBuf,
     },
 
+    /// The active toolchain does not contain compiler libraries for an external driver.
+    #[error(
+        "the active toolchain does not contain rustc-dev libraries at {path}; run `rustup component add --toolchain {toolchain} rustc-dev`"
+    )]
+    MissingRustcDev {
+        /// The directory that must contain rustc compiler libraries.
+        path: PathBuf,
+
+        /// The active rustup toolchain name, or the nightly default.
+        toolchain: String,
+    },
+
     /// A filesystem operation failed.
     #[error("failed to {operation} {path}: {source}")]
     Filesystem {
@@ -81,6 +100,16 @@ pub enum Error {
         path: PathBuf,
 
         /// The structural error.
+        message: String,
+    },
+
+    /// A compiler identity manifest did not satisfy its protocol.
+    #[error("invalid compiler identity manifest in {path}: {message}")]
+    InvalidIdentityManifest {
+        /// The invalid manifest path.
+        path: PathBuf,
+
+        /// The failed protocol requirement.
         message: String,
     },
 

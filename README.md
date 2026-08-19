@@ -13,10 +13,10 @@ information. Therefore, the output does not exactly match a normal Cargo build.
 
 ## Install
 
-Install a nightly toolchain and its matching LLVM tools:
+Install a nightly toolchain and its matching compiler and LLVM libraries:
 
 ```console
-rustup toolchain install nightly --component llvm-tools
+rustup toolchain install nightly --component llvm-tools --component rustc-dev
 cargo +stable install --locked --path crates/cargo-optic
 ```
 
@@ -120,6 +120,7 @@ The cache key includes these inputs:
 - Cargo manifests, the lock file, and Cargo configuration files.
 - The contents of local Rust source files.
 - Compiler and Cargo environment variables.
+- The Cargo Optic evidence version.
 
 If a build script reads an undeclared input, use `--fresh`. The first MVP does not find all
 external build-script inputs.
@@ -129,12 +130,22 @@ external build-script inputs.
 Cargo Optic uses `cargo rustc`, the normal target directory, and the normal Cargo dependency graph.
 Cargo can reuse dependency artifacts from normal commands.
 
-The analysis flags apply only to the selected target. If no normal linked artifact exists, the next
-normal Cargo command compiles that target. Existing normal artifacts remain available.
+Cargo Optic installs an outer global compiler wrapper. This wrapper preserves existing global and
+workspace wrappers. It passes dependency compilations and compiler probes through without changes.
+
+The analysis flags and the compiler identity driver apply only to the selected target. Cargo Optic
+compiles this target once. It collects identity data before code generation and then continues the
+same compilation.
+
+The driver is a small internal program. Cargo Optic builds it once for each rustc commit and source
+revision. It stores the driver below `$CARGO_HOME/optic/drivers`.
+
+If no normal linked artifact exists, the next normal Cargo command compiles the selected target.
+Existing normal artifacts remain available.
 
 ## MVP limits
 
-- Cargo Optic requires nightly rustc and the matching `llvm-tools` component.
+- Cargo Optic requires nightly rustc and the matching `llvm-tools` and `rustc-dev` components.
 - The prototype records source from workspace packages and local path dependencies.
 - The prototype records one selected library, binary, benchmark, or example target.
 - The prototype does not record MIR, assembly, object files, or LTO transition stages.
@@ -143,25 +154,13 @@ normal Cargo command compiles that target. Existing normal artifacts remain avai
 
 ### Instance-to-body identity
 
-Cargo Optic joins rustc mono items to definitions from demangled LLVM v0 symbols. These sources do
-not always use the same path for one Rust item. Rustc can use a public path such as
-`std::iter::Map` or `vortex_buffer::BufferMut`. The symbol uses the canonical definition path, such
-as `core::iter::adapters::map::Map` or `vortex_buffer::buffer_mut::BufferMut`.
+Cargo Optic uses a small rustc driver to collect each concrete function and its raw LLVM symbol.
+It joins compiler instances to LLVM bodies only when the raw symbols are equal. Display paths do
+not control this relationship.
 
-Inlining can also move the surviving body into a generic function. For example, a Vortex caller can
-survive as a specialized `Iterator::fold` body that contains Vortex types and closures. This body
-belongs to the selected Vortex code-generation unit even though its name starts in `core`.
-
-The current matcher removes selected-crate prefixes and numeric `.llvm.N` clone suffixes. It does
-not map public paths to canonical definition paths. A complete matcher must use structured item
-identity instead of unrestricted fuzzy text matching:
-
-- If rustc exposes a common identity, use it for both evidence sources.
-- Otherwise, parse both names and map known public paths to canonical definition paths.
-- Include the crate identity, code-generation unit, definition path, and generic arguments.
-- Keep all candidates until the complete identity selects one body.
-- Omit the body when more than one candidate remains.
-- Cover `std` and `core` paths, crate re-exports, nested generic types, and inlined iterator bodies.
+LLVM can remove, clone, or rename a body during optimization. Cargo Optic does not infer a
+relationship from similar text. If the exact symbol is absent, the selected output has no
+standalone body. A pre-optimization body can still be available.
 
 The unpublished `cargo-ir` crate owns the compiler and LLVM boundary. `cargo-optic` owns the
 persistent store and the user interface.

@@ -13,6 +13,7 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
+use crate::driver::RustcDriver;
 use crate::llvm;
 use crate::mono;
 use crate::{BuildRequest, CargoTarget, Error, MonoItem, Result, Toolchain, inspect_toolchain};
@@ -97,13 +98,20 @@ pub struct EvidenceBundle {
 pub fn capture(request: &BuildRequest) -> Result<EvidenceBundle> {
     let toolchain = inspect_toolchain()?;
     prepare_analysis_directory(&request.analysis_directory)?;
+    let driver = RustcDriver::prepare(&toolchain, &request.workspace_root)?;
+    let manifest_path = request.analysis_directory.join(mono::MANIFEST_NAME);
 
-    let output = cargo_command(request)
-        .output()
-        .map_err(|source| Error::StartProcess {
-            program: "cargo rustc".to_owned(),
-            source,
-        })?;
+    let mut command = cargo_command(request);
+    driver.configure(
+        &mut command,
+        &request.analysis_directory,
+        &manifest_path,
+        &toolchain.commit_hash,
+    );
+    let output = command.output().map_err(|source| Error::StartProcess {
+        program: "cargo rustc".to_owned(),
+        source,
+    })?;
     if !output.status.success() {
         return Err(Error::ProcessFailed {
             program: "cargo rustc".to_owned(),
@@ -112,17 +120,13 @@ pub fn capture(request: &BuildRequest) -> Result<EvidenceBundle> {
         });
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
     let artifacts = supported_bitcode(&request.analysis_directory)?;
 
     if artifacts.is_empty() {
         return Err(Error::MissingEvidence);
     }
 
-    let mono_output = format!("{stdout}\n{stderr}");
-    let mono_items = mono::parse(&mono_output);
+    let mono_items = mono::read(&manifest_path, &toolchain.commit_hash)?;
     let modules = artifacts
         .into_iter()
         .map(|artifact| disassemble(&toolchain, artifact, &request.analysis_directory))
@@ -191,7 +195,6 @@ fn cargo_command(request: &BuildRequest) -> Command {
 
     command.arg("--");
     command.args(["-Z", "no-link", "-C", "save-temps"]);
-    command.args(["-Z", "print-mono-items=yes"]);
     command
         .arg("-Z")
         .arg(temps_argument(&request.analysis_directory));

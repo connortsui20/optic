@@ -14,3 +14,18 @@ where
         .into_iter()
         .fold(T::default(), |sum, value| sum + value)
 }
+
+mod implementation {
+    /// A type whose public path differs from its canonical definition path.
+    pub struct ReexportedKernel;
+
+    impl ReexportedKernel {
+        /// Returns one value through a standalone generic compiler instance.
+        #[inline(never)]
+        pub fn identity<T>(value: T) -> T {
+            std::hint::black_box(value)
+        }
+    }
+}
+
+pub use implementation::ReexportedKernel;

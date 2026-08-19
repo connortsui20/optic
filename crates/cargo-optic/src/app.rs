@@ -18,6 +18,8 @@ use crate::{
     InstanceId, Result, ShowView,
 };
 
+const EVIDENCE_VERSION: u32 = 2;
+
 /// Product workflows for one Cargo workspace and its `.optic` store.
 pub struct Application {
     /// Prevents `clean` from removing the store while this application uses it.
@@ -229,6 +231,7 @@ fn request_key(
 ) -> Result<String> {
     #[derive(Serialize)]
     struct CacheKey<'a> {
+        evidence_version: u32,
         spec: &'a BuildSpec,
         rustc_commit: &'a str,
         target_directory: &'a Path,
@@ -238,6 +241,7 @@ fn request_key(
 
     let inputs = source_digest.to_hex();
     let key = CacheKey {
+        evidence_version: EVIDENCE_VERSION,
         spec,
         rustc_commit: &toolchain.commit_hash,
         target_directory,

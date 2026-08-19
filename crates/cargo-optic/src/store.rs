@@ -21,7 +21,7 @@ use crate::{
     InstanceSummary, Result, ShowView,
 };
 
-const STORE_VERSION: u32 = 3;
+const STORE_VERSION: u32 = 4;
 
 pub(crate) struct Store {
     root: PathBuf,
@@ -580,6 +580,7 @@ fn initialize_schema(connection: &mut Connection) -> Result<()> {
         0 => create_schema(connection),
         1 => migrate_schema_v1(connection),
         2 => migrate_schema_v2(connection),
+        3 => migrate_schema_v3(connection),
         STORE_VERSION => Ok(()),
         actual => Err(Error::StoreVersion {
             expected: STORE_VERSION,
@@ -615,6 +616,7 @@ fn create_schema(connection: &mut Connection) -> Result<()> {
              capture_id TEXT NOT NULL REFERENCES captures(id),
              definition TEXT NOT NULL,
              display_name TEXT NOT NULL,
+             compiler_symbol TEXT,
              has_body INTEGER NOT NULL
          );
          CREATE INDEX instances_definition ON instances(capture_id, definition);
@@ -666,7 +668,8 @@ fn migrate_schema_v1(connection: &mut Connection) -> Result<()> {
     transaction.execute_batch(
         "CREATE INDEX IF NOT EXISTS instances_display_name
          ON instances(capture_id, display_name);
-         CREATE INDEX IF NOT EXISTS bodies_instance ON bodies(instance_id);",
+         CREATE INDEX IF NOT EXISTS bodies_instance ON bodies(instance_id);
+         ALTER TABLE instances ADD COLUMN compiler_symbol TEXT;",
     )?;
     transaction.pragma_update(None, "user_version", STORE_VERSION)?;
     transaction.commit()?;
@@ -678,8 +681,18 @@ fn migrate_schema_v2(connection: &mut Connection) -> Result<()> {
     let transaction = connection.transaction()?;
     transaction.execute_batch(
         "CREATE INDEX instances_display_name ON instances(capture_id, display_name);
-         CREATE INDEX bodies_instance ON bodies(instance_id);",
+         CREATE INDEX bodies_instance ON bodies(instance_id);
+         ALTER TABLE instances ADD COLUMN compiler_symbol TEXT;",
     )?;
+    transaction.pragma_update(None, "user_version", STORE_VERSION)?;
+    transaction.commit()?;
+
+    Ok(())
+}
+
+fn migrate_schema_v3(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction()?;
+    transaction.execute_batch("ALTER TABLE instances ADD COLUMN compiler_symbol TEXT;")?;
     transaction.pragma_update(None, "user_version", STORE_VERSION)?;
     transaction.commit()?;
 
@@ -753,7 +766,7 @@ fn insert_modules(
 
         for body in &module.bodies {
             body_index
-                .entry(mono_body_index_name(&module.name, &body.demangled))
+                .entry(body.raw_symbol.clone())
                 .or_default()
                 .push(IndexedBody {
                     module_id: module_id.clone(),
@@ -767,35 +780,6 @@ fn insert_modules(
     Ok(body_index)
 }
 
-fn mono_body_index_name(module_name: &str, body_name: &str) -> String {
-    let body_name = mono_body_name(body_name);
-    let Some((crate_name, _)) = module_name.split_once('-') else {
-        return body_name.to_owned();
-    };
-
-    body_name.replace(&format!("{crate_name}::"), "")
-}
-
-fn mono_body_name(original: &str) -> &str {
-    if let Some(without_closing_parenthesis) = original.strip_suffix(')')
-        && let Some((name, suffix)) = without_closing_parenthesis.rsplit_once(" (.llvm.")
-        && !suffix.is_empty()
-        && suffix.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return name;
-    }
-
-    let Some((name, suffix)) = original.rsplit_once(".llvm.") else {
-        return original;
-    };
-
-    if !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()) {
-        name
-    } else {
-        original
-    }
-}
-
 fn insert_instances(
     transaction: &Transaction<'_>,
     capture_id: &CaptureId,
@@ -805,15 +789,16 @@ fn insert_instances(
     for item in mono_items {
         let instance_id = InstanceId::new();
         let bodies = bodies_for_item(item, body_index);
-        let definition = definition_name(&item.name);
         transaction.execute(
-            "INSERT INTO instances(id, capture_id, definition, display_name, has_body)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO instances(
+                 id, capture_id, definition, display_name, compiler_symbol, has_body
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 instance_id.as_str(),
                 capture_id.as_str(),
-                definition,
-                item.name,
+                item.definition,
+                item.display_name,
+                item.raw_symbol,
                 !bodies.is_empty(),
             ],
         )?;
@@ -844,29 +829,7 @@ fn bodies_for_item<'a>(
     item: &cargo_ir::MonoItem,
     body_index: &'a HashMap<String, Vec<IndexedBody>>,
 ) -> &'a [IndexedBody] {
-    if let Some(bodies) = body_index.get(&item.name) {
-        return bodies;
-    }
-
-    let Some(qualified_name) = qualified_item_name(item) else {
-        return &[];
-    };
-
-    body_index.get(&qualified_name).map_or(&[], Vec::as_slice)
-}
-
-fn qualified_item_name(item: &cargo_ir::MonoItem) -> Option<String> {
-    let mut crate_names = item
-        .codegen_units
-        .iter()
-        .filter_map(|unit| unit.split_once('.').map(|(name, _)| name));
-    let crate_name = crate_names.next()?;
-
-    if crate_name.is_empty() || crate_names.any(|name| name != crate_name) {
-        return None;
-    }
-
-    Some(format!("{crate_name}::{}", item.name))
+    body_index.get(&item.raw_symbol).map_or(&[], Vec::as_slice)
 }
 
 fn insert_sources(
@@ -882,37 +845,6 @@ fn insert_sources(
     }
 
     Ok(())
-}
-
-fn definition_name(instance: &str) -> String {
-    let Some(start) = instance.rfind("::<") else {
-        return instance.to_owned();
-    };
-    let Some(end) = generic_arguments_end(instance, start + 2) else {
-        return instance.to_owned();
-    };
-
-    format!("{}{}", &instance[..start], &instance[end..])
-}
-
-fn generic_arguments_end(instance: &str, start: usize) -> Option<usize> {
-    let mut depth = 0_usize;
-
-    for (offset, character) in instance[start..].char_indices() {
-        match character {
-            '<' => depth += 1,
-            '>' => {
-                depth = depth.checked_sub(1)?;
-
-                if depth == 0 {
-                    return Some(start + offset + character.len_utf8());
-                }
-            }
-            _ => {}
-        }
-    }
-
-    None
 }
 
 fn summary_from_row(row: &rusqlite::Row<'_>, reused: bool) -> rusqlite::Result<CaptureSummary> {
@@ -1003,28 +935,17 @@ mod tests {
     use rusqlite::Connection;
 
     use super::{
-        IndexedBody, STORE_VERSION, Store, bodies_for_item, definition_name, mono_body_index_name,
-        mono_body_name, schema_object_exists, unique_prefix_length,
+        IndexedBody, STORE_VERSION, Store, bodies_for_item, schema_object_exists,
+        unique_prefix_length,
     };
     use crate::{CaptureId, Error, InstanceId};
 
     #[test]
-    fn removes_only_the_final_generic_arguments() {
-        assert_eq!(
-            definition_name("crate::kernel::<Vec<u64>, 8>"),
-            "crate::kernel"
-        );
-        assert_eq!(
-            definition_name("crate::kernel::<Vec<u64>, 8>::{closure#0}"),
-            "crate::kernel::{closure#0}"
-        );
-        assert_eq!(definition_name("crate::plain"), "crate::plain");
-    }
-
-    #[test]
-    fn associates_a_crate_local_item_with_its_qualified_llvm_body() {
+    fn associates_an_item_only_with_its_exact_compiler_symbol() {
         let item = MonoItem {
-            name: "for_each_set_index".to_owned(),
+            definition: "mask_iteration::for_each_set_index".to_owned(),
+            display_name: "mask_iteration::for_each_set_index".to_owned(),
+            raw_symbol: "_Rmask_iteration".to_owned(),
             codegen_units: vec![
                 "mask_iteration.abc-cgu.00".to_owned(),
                 "mask_iteration.abc-cgu.08".to_owned(),
@@ -1032,7 +953,7 @@ mod tests {
         };
         let mut body_index = HashMap::new();
         body_index.insert(
-            "mask_iteration::for_each_set_index".to_owned(),
+            "_Rmask_iteration".to_owned(),
             vec![IndexedBody {
                 module_id: "module".to_owned(),
                 symbol: "symbol".to_owned(),
@@ -1048,36 +969,24 @@ mod tests {
     }
 
     #[test]
-    fn removes_only_a_numeric_llvm_clone_suffix() {
-        assert_eq!(
-            mono_body_name("mask_iteration::make.llvm.7879930411852097767"),
-            "mask_iteration::make"
-        );
-        assert_eq!(
-            mono_body_name("mask_iteration::make (.llvm.7879930411852097767)"),
-            "mask_iteration::make"
-        );
-        assert_eq!(
-            mono_body_name("mask_iteration::make"),
-            "mask_iteration::make"
-        );
-        assert_eq!(
-            mono_body_name("mask_iteration::make.llvm.clone"),
-            "mask_iteration::make.llvm.clone"
-        );
-    }
+    fn does_not_associate_an_llvm_clone_by_its_display_name() {
+        let item = MonoItem {
+            definition: "mask_iteration::make".to_owned(),
+            display_name: "mask_iteration::make".to_owned(),
+            raw_symbol: "_Rmake".to_owned(),
+            codegen_units: vec!["mask_iteration.abc-cgu.00".to_owned()],
+        };
+        let body_index = HashMap::from([(
+            "_Rmake.llvm.123".to_owned(),
+            vec![IndexedBody {
+                module_id: "module".to_owned(),
+                symbol: "_Rmake.llvm.123".to_owned(),
+                start: 0,
+                end: 1,
+            }],
+        )]);
 
-    #[test]
-    fn removes_the_selected_crate_prefix_from_nested_types() {
-        assert_eq!(
-            mono_body_index_name(
-                "vortex_array-hash.vortex_array-cgu.00.rcgu.bc",
-                "<std::iter::Map<vortex_array::arrays::BinaryView> as \
-                 std::iter::Iterator>::fold<vortex_array::arrays::BinaryView>",
-            ),
-            "<std::iter::Map<arrays::BinaryView> as \
-             std::iter::Iterator>::fold<arrays::BinaryView>"
-        );
+        assert!(bodies_for_item(&item, &body_index).is_empty());
     }
 
     #[test]
@@ -1116,6 +1025,7 @@ mod tests {
             .execute_batch(
                 "DROP INDEX instances_display_name;
                  DROP INDEX bodies_instance;
+                 ALTER TABLE instances DROP COLUMN compiler_symbol;
                  ALTER TABLE capture_cache RENAME TO analysis_cache;
                  PRAGMA user_version = 1;",
             )
@@ -1150,6 +1060,11 @@ mod tests {
             schema_object_exists(&store.connection, "index", "bodies_instance")
                 .expect("the test can inspect the migrated schema")
         );
+        assert!(column_exists(
+            &store.connection,
+            "instances",
+            "compiler_symbol"
+        ));
     }
 
     #[test]
@@ -1161,6 +1076,7 @@ mod tests {
             .execute_batch(
                 "DROP INDEX instances_display_name;
                  DROP INDEX bodies_instance;
+                 ALTER TABLE instances DROP COLUMN compiler_symbol;
                  PRAGMA user_version = 2;",
             )
             .expect("the test can create the version 2 layout");
@@ -1181,6 +1097,38 @@ mod tests {
             schema_object_exists(&store.connection, "index", "bodies_instance")
                 .expect("the test can inspect the migrated schema")
         );
+        assert!(column_exists(
+            &store.connection,
+            "instances",
+            "compiler_symbol"
+        ));
+    }
+
+    #[test]
+    fn adds_compiler_symbols_to_schema_v3() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let store = Store::open(temporary.path()).expect("the test can create a current store");
+        store
+            .connection
+            .execute_batch(
+                "ALTER TABLE instances DROP COLUMN compiler_symbol;
+                 PRAGMA user_version = 3;",
+            )
+            .expect("the test can create the version 3 layout");
+        drop(store);
+
+        let store = Store::open(temporary.path()).expect("the store can migrate schema version 3");
+        let version = store
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+            .expect("the migrated schema has a version");
+
+        assert_eq!(version, STORE_VERSION);
+        assert!(column_exists(
+            &store.connection,
+            "instances",
+            "compiler_symbol"
+        ));
     }
 
     #[test]
@@ -1243,5 +1191,15 @@ mod tests {
             .expect("the test can insert an invalid stored identifier");
 
         assert!(matches!(store.captures(), Err(Error::Database(_))));
+    }
+
+    fn column_exists(connection: &Connection, table: &str, column: &str) -> bool {
+        let mut statement = connection
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .expect("the test can inspect table columns");
+        statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("the test can query table columns")
+            .any(|name| name.is_ok_and(|name| name == column))
     }
 }
