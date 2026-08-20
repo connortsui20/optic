@@ -7,6 +7,7 @@ This prototype supports these compiler outputs:
 
 - `llvm` is the saved LLVM IR after the optimization pipeline. This output is the default.
 - `llvm-pre-opt` is the LLVM IR before the LLVM optimization pipeline.
+- `remarks` contains the saved LLVM optimization remarks for one concrete compiler instance.
 
 The default `faithful` profile preserves the code-generation settings of the selected target. It
 adds only the arguments that save compiler evidence. The saved temporary files still change the
@@ -34,12 +35,12 @@ rustup component add rustc-dev llvm-tools
 Use `cargo optic` without a toolchain prefix. Cargo Optic uses the Cargo and rustc that the
 workspace selects through the normal Rust configuration.
 
-Cargo Optic accepts the workspace rustc without a release-channel restriction. It enables unstable
-access only for Cargo configuration discovery, exact-version driver compilation, and
-selected-target compilation.
+Cargo Optic accepts the workspace rustc without a release-channel restriction. Its internal
+unstable-access policy is limited to Cargo configuration discovery, exact-version driver
+compilation, and selected-target compilation.
 
-Dependencies, build scripts, and compiler probes do not receive unstable access. Do not set
-`RUSTC_BOOTSTRAP` for Cargo Optic.
+Cargo Optic does not add unstable access to dependencies, build scripts, or compiler probes. Do not
+set `RUSTC_BOOTSTRAP` for Cargo Optic.
 
 ## Try the included example
 
@@ -75,7 +76,8 @@ cargo optic show \
 ```
 
 The default command shows only optimized LLVM IR. Use `--output llvm-pre-opt` to show the
-pre-optimization LLVM IR. The source is absent unless you add `--source`.
+pre-optimization LLVM IR. Use `--output remarks` to capture and show optimization remarks. The
+source is absent unless you add `--source`.
 
 The default format is plain text. Add `--format json` to get a versioned JSON envelope.
 
@@ -103,6 +105,10 @@ command after each instance. You do not need to copy an ID into a new command.
 Plain `capture` output prints `find` and `show` command templates for the new capture. Replace
 `QUERY` with a definition path.
 
+Use `find --crate NAME` or `find --definition PATH` to restrict a large result set. Use
+`--available llvm` or `--available llvm-pre-opt` to require a standalone body. The default result
+limit is 50 and the maximum is 500.
+
 Plain output shows at least 12 hexadecimal characters for each ID. Color highlights the shortest
 unique prefix and dims the remaining characters. JSON output keeps the full IDs.
 
@@ -112,8 +118,28 @@ than one stored ID.
 Use `--fresh` with `capture` or a build-based `show` command to create new evidence. This option
 uses a unique Cargo fingerprint and invokes rustc for the selected target.
 
-The JSON transport version is 2. Instance results report definitions, declarations, and aliases
+The JSON transport version is 3. Instance results report definitions, declarations, and aliases
 for each LLVM stage. A result does not use one combined `has_body` value.
+
+If compilation succeeds but ingestion fails, Cargo Optic retains the bounded staging evidence. The
+next matching request validates Cargo freshness and resumes ingestion without another compilation.
+`status` reports the retained file count and bytes. `clean` removes this pending evidence.
+
+## Capture optimization remarks
+
+A build-based `show` command captures remarks automatically when you select them:
+
+```console
+cargo optic show my_crate::kernel \
+  -p my-crate --lib --release \
+  --output remarks
+```
+
+Use `capture --remarks` when you want to capture first and query later. Stored captures distinguish
+remarks that were not requested, a completed capture with no records, and matching records.
+
+Use `--kind KIND`, `--pass NAME`, and `--limit NUMBER` to filter remark output. These options apply
+only to `--output remarks`. Use the `enriched` evidence profile when source locations are needed.
 
 ## Inspect and compare evidence
 
@@ -134,9 +160,10 @@ cargo optic compare \
   --after NEW_INSTANCE_ID
 ```
 
-The comparison reports body bytes, instruction-like lines, vector lines, calls, and safety-check
-symbols. It also reports incompatible compiler or Cargo dimensions. These counts are structural
-LLVM summaries, not performance measurements.
+The comparison reports body bytes, instruction-like lines, vector lines, call categories, and
+safety-check symbols. Call categories separate runtime calls, indirect calls, memory intrinsics,
+and compiler metadata intrinsics. The result also reports incompatible compiler or Cargo
+dimensions. These counts are structural LLVM summaries, not performance measurements.
 
 ## Manage stored evidence
 
@@ -218,7 +245,7 @@ The faithful profile permits the normal link step. Existing normal artifacts rem
 - Cargo Optic requires matching `llvm-tools` and `rustc-dev` components for the selected rustc.
 - The prototype records source from workspace packages and local path dependencies.
 - The prototype records one selected library, binary, benchmark, or example target.
-- The prototype does not record MIR, assembly, object files, or compiler optimization remarks.
+- The prototype does not record MIR, assembly, or object files.
 - The store retains exact compiler stage names. The user interface shows only supported LLVM
   stages.
 - If ThinLTO artifacts exist, optimized output uses `thin-lto-after-pm` instead of the earlier

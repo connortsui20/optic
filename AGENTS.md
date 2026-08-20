@@ -18,6 +18,7 @@ Read [README.md](README.md) before you change the product behavior. Use the
 - Optimized LLVM IR is the default output.
 - The `--source` option adds the captured Rust item.
 - The `--output llvm-pre-opt` option selects LLVM IR from before optimization.
+- The `--output remarks` option captures or shows LLVM optimization remarks.
 - Plain text is the default format for humans and agents.
 - The `--format json` option provides a versioned transport format for programs.
 - An ambiguous query prints complete `show --instance` commands.
@@ -35,6 +36,8 @@ Read [README.md](README.md) before you change the product behavior. Use the
 - New IDs contain random UUIDv4 suffixes.
 - Text output shows at least 12 hexadecimal characters and highlights the shortest unique prefix.
 - The schema version is 7. Older stores require `cargo optic clean`.
+- Failed post-compilation ingestion can leave bounded evidence below `.optic/store/pending`.
+- A matching request validates Cargo freshness before it resumes retained ingestion.
 
 Capture writers use a file lock. Read commands can use completed captures in parallel. An operation
 lock prevents `clean` from removing a store that another process uses.
@@ -66,8 +69,10 @@ rustc driver records compiler identities for the selected target.
 - `crates/cargo-optic/src/cli.rs` owns command validation and text or JSON output.
 - `crates/cargo-optic/src/store.rs` owns SQLite, IDs, locks, lifecycle operations, and blobs.
 - `crates/cargo-optic/src/source.rs` snapshots build inputs and finds source items.
+- `crates/cargo-optic/src/pending.rs` validates recoverable post-compilation evidence.
 - `crates/cargo-ir/src/capture.rs` runs Cargo and collects LLVM evidence.
 - `crates/cargo-ir/src/llvm.rs` indexes LLVM function bodies by byte range.
+- `crates/cargo-ir/src/remarks.rs` parses bounded LLVM optimization remarks.
 - `crates/cargo-optic/tests/e2e.rs` covers the complete supported workflow.
 
 ## Change rules
@@ -96,8 +101,8 @@ workspace rustc.
 
 ## Known limits
 
-- The prototype supports optimized and pre-optimization LLVM IR only.
-- It does not support MIR, assembly, object files, compiler remarks, or a TUI.
+- The prototype supports optimized LLVM IR, pre-optimization LLVM IR, and optimization remarks.
+- It does not support MIR, assembly, object files, or a TUI.
 - Source lookup requires an exact rustc definition span and canonical local source path.
 - Cargo cannot find undeclared build-script inputs.
 - Inline occurrences do not link to enclosing optimized bodies.

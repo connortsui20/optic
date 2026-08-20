@@ -98,6 +98,22 @@ cargo optic show optic_mvp_kernel::outlined_sum \
 
 The generated instance commands keep the `--output` and `--source` options.
 
+## Show optimization remarks
+
+Run this command to capture and show LLVM optimization remarks:
+
+```console
+cargo optic show optic_mvp_kernel::outlined_sum \
+  -p optic-mvp-app \
+  --bin optic-mvp-app \
+  --release \
+  --output remarks \
+  --evidence-profile enriched
+```
+
+The result reports whether remarks were captured, whether the capture contained records, and which
+records link to the selected compiler instance.
+
 ## Restore the source
 
 Run this command to restore the original vectorized example:
