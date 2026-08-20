@@ -320,7 +320,7 @@ impl Command {
 
 #[derive(Clone, Debug, Default, Args)]
 struct BuildOptions {
-    /// Runs the compiler even if matching evidence exists.
+    /// Requests new compiler evidence after pending-ingestion recovery.
     #[arg(long)]
     fresh: bool,
 

@@ -142,8 +142,9 @@ cargo optic show my_crate::kernel \
   --output remarks
 ```
 
-Use `capture --remarks` when you want to capture first and query later. Stored captures distinguish
-remarks that were not requested, a completed capture with no records, and matching records.
+Use `capture --remarks` when you want to capture first and query later. Capture-wide states
+distinguish remarks that were not requested, a completed capture with no records, and a capture
+with records. A selected instance or filter can still have no matching remarks.
 
 Use `--kind KIND`, `--pass NAME`, and `--limit NUMBER` to filter remark output. These options apply
 only to `--output remarks`. Use the `enriched` evidence profile when source locations are needed.

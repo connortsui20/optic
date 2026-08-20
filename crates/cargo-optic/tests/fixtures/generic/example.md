@@ -111,8 +111,9 @@ cargo optic show optic_mvp_kernel::outlined_sum \
   --evidence-profile enriched
 ```
 
-The result reports whether remarks were captured, whether the capture contained records, and which
-records link to the selected compiler instance.
+The query finds two compiler instances and prints a complete remarks command for each one. Run one
+generated `show --instance` command. Its result reports the capture state and the records that link
+to that compiler instance.
 
 ## Restore the source
 
