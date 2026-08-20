@@ -215,6 +215,9 @@ or instance ID. An instance ID identifies its capture. Content-addressed blobs h
 The current store schema is version 7. Cargo Optic rejects older stores. Run `cargo optic clean`
 once to replace an older prototype store.
 
+This prototype also uses JSON transport version 3, evidence request version 4, pending marker
+version 1, and compiler manifest protocol version 2. These formats have no compatibility promise.
+
 Cargo Optic asks Cargo to evaluate the selected target before it reuses a capture. This design
 includes Cargo-tracked build-script inputs, `include_bytes!` files, and compiler environment
 inputs. Optic does not use a source-file digest as a substitute for Cargo freshness.
