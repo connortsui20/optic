@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
-use crate::{CaptureId, InstanceId, LlvmStage};
+use crate::{CallSiteDelta, CallSiteSummary, CaptureId, InstanceId, LlvmStage};
 
 /// One Cargo target selected through the product API.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -415,11 +415,8 @@ pub struct LlvmBodySummary {
     /// Distinct fixed vector lane counts in ascending order.
     pub vector_widths: Vec<usize>,
 
-    /// Direct and indirect call instructions.
-    pub calls: usize,
-
-    /// Calls through an SSA value instead of a global symbol.
-    pub indirect_calls: usize,
+    /// Structural classification of `call`, `invoke`, and `callbr` instructions.
+    pub call_sites: CallSiteSummary,
 
     /// References to bounds-check or panic runtime symbols.
     pub safety_checks: usize,
@@ -432,16 +429,15 @@ impl LlvmBodySummary {
             instructions: 0,
             vector_lines: 0,
             vector_widths: Vec::new(),
-            calls: 0,
-            indirect_calls: 0,
+            call_sites: CallSiteSummary::default(),
             safety_checks: 0,
         };
 
         for line in text.lines().map(str::trim) {
+            let is_call_site = summary.call_sites.record_line(line);
             if line.starts_with('%')
                 || line.starts_with("store ")
-                || line.starts_with("call ")
-                || line.starts_with("tail call ")
+                || is_call_site
                 || line.starts_with("ret ")
                 || line.starts_with("br ")
                 || line.starts_with("switch ")
@@ -452,17 +448,6 @@ impl LlvmBodySummary {
             if let Some(width) = vector_width(line) {
                 summary.vector_lines += 1;
                 summary.vector_widths.push(width);
-            }
-            if line.contains(" call ") || line.starts_with("call ") {
-                summary.calls += 1;
-                if line.rsplit_once("(").is_some_and(|(callee, _)| {
-                    callee
-                        .split_whitespace()
-                        .next_back()
-                        .is_some_and(|name| name.starts_with('%'))
-                }) {
-                    summary.indirect_calls += 1;
-                }
             }
             if line.contains("panic_bounds_check")
                 || line.contains("slice_index_fail")
@@ -541,6 +526,9 @@ pub struct BodySetSummary {
     /// Total indirect calls.
     pub indirect_calls: usize,
 
+    /// Structural classification of `call`, `invoke`, and `callbr` instructions.
+    pub call_sites: CallSiteSummary,
+
     /// Total references to bounds-check or panic runtime symbols.
     pub safety_checks: usize,
 }
@@ -555,6 +543,7 @@ impl BodySetSummary {
             vector_widths: Vec::new(),
             calls: 0,
             indirect_calls: 0,
+            call_sites: CallSiteSummary::default(),
             safety_checks: 0,
         };
         for body in bodies {
@@ -564,8 +553,9 @@ impl BodySetSummary {
             summary
                 .vector_widths
                 .extend(body.summary.vector_widths.iter().copied());
-            summary.calls += body.summary.calls;
-            summary.indirect_calls += body.summary.indirect_calls;
+            summary.calls += body.summary.call_sites.total;
+            summary.indirect_calls += body.summary.call_sites.indirect;
+            summary.call_sites.add_assign(&body.summary.call_sites);
             summary.safety_checks += body.summary.safety_checks;
         }
         summary.vector_widths.sort_unstable();
@@ -596,6 +586,9 @@ pub struct BodySetDelta {
     /// Change in indirect calls.
     pub indirect_calls: i128,
 
+    /// Changes in classified `call`, `invoke`, and `callbr` instructions.
+    pub call_sites: CallSiteDelta,
+
     /// Change in safety-check references.
     pub safety_checks: i128,
 }
@@ -609,6 +602,7 @@ impl BodySetDelta {
             vector_lines: delta(before.vector_lines, after.vector_lines),
             calls: delta(before.calls, after.calls),
             indirect_calls: delta(before.indirect_calls, after.indirect_calls),
+            call_sites: CallSiteDelta::between(&before.call_sites, &after.call_sites),
             safety_checks: delta(before.safety_checks, after.safety_checks),
         }
     }
@@ -645,7 +639,18 @@ pub struct CompareView {
 
 #[cfg(test)]
 mod tests {
-    use super::LlvmBodySummary;
+    use super::{BodySetDelta, BodySetSummary, BodyView, LlvmBodySummary};
+    use crate::LlvmStage;
+
+    fn body(text: &str) -> BodyView {
+        BodyView {
+            stage: LlvmStage::Optimized,
+            module: "module".to_owned(),
+            symbol: "symbol".to_owned(),
+            text: text.to_owned(),
+            summary: LlvmBodySummary::from_text(text),
+        }
+    }
 
     #[test]
     fn summarizes_vector_calls_and_safety_checks() {
@@ -661,8 +666,48 @@ mod tests {
         assert_eq!(summary.instructions, 4);
         assert_eq!(summary.vector_lines, 1);
         assert_eq!(summary.vector_widths, [4]);
-        assert_eq!(summary.calls, 2);
-        assert_eq!(summary.indirect_calls, 1);
+        assert_eq!(summary.call_sites.total, 2);
+        assert_eq!(summary.call_sites.direct_non_intrinsic, 1);
+        assert_eq!(summary.call_sites.indirect, 1);
         assert_eq!(summary.safety_checks, 1);
+    }
+
+    #[test]
+    fn aggregates_and_compares_call_site_categories() {
+        let runtime_and_memory = body(concat!(
+            "define void @first() {\n",
+            "  call void @runtime()\n",
+            "  call void @llvm.memset.p0.i64(ptr null, i8 0, i64 8, i1 false)\n",
+            "  ret void\n",
+            "}\n",
+        ));
+        let indirect_and_assembly = body(concat!(
+            "define void @second(ptr %callback) {\n",
+            "  invoke void %callback() to label %ok unwind label %error\n",
+            "ok:\n",
+            "  callbr void asm sideeffect \"\", \"\"() to label %exit [label %error]\n",
+            "exit:\n",
+            "  ret void\n",
+            "error:\n",
+            "  unreachable\n",
+            "}\n",
+        ));
+
+        let before = BodySetSummary::from_bodies(std::slice::from_ref(&runtime_and_memory));
+        let after = BodySetSummary::from_bodies(&[runtime_and_memory, indirect_and_assembly]);
+        let delta = BodySetDelta::between(&before, &after);
+
+        assert_eq!(after.call_sites.total, 4);
+        assert_eq!(after.call_sites.direct_non_intrinsic, 1);
+        assert_eq!(after.call_sites.indirect, 1);
+        assert_eq!(after.call_sites.inline_asm, 1);
+        assert_eq!(after.call_sites.memory_intrinsics, 1);
+        assert_eq!(after.calls, after.call_sites.total);
+        assert_eq!(after.indirect_calls, after.call_sites.indirect);
+        assert_eq!(delta.call_sites.total, 2);
+        assert_eq!(delta.call_sites.indirect, 1);
+        assert_eq!(delta.call_sites.inline_asm, 1);
+        assert_eq!(delta.calls, delta.call_sites.total);
+        assert_eq!(delta.indirect_calls, delta.call_sites.indirect);
     }
 }

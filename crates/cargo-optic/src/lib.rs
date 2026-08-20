@@ -7,6 +7,9 @@
 mod app;
 pub use app::Application;
 
+mod call_site;
+pub use call_site::{CallSiteDelta, CallSiteSummary};
+
 mod cli;
 pub use cli::run_cli;
 
