@@ -22,7 +22,7 @@ use crate::{
     RemoveSummary, Result, ShowView, StoreStatus, VerifySummary,
 };
 
-const EVIDENCE_VERSION: u32 = 3;
+const EVIDENCE_VERSION: u32 = 4;
 
 /// Product workflows for one Cargo workspace and its `.optic` store.
 pub struct Application {
@@ -92,7 +92,7 @@ impl Application {
         }
 
         let _writer = self.store.lock_writer()?;
-        let toolchain = cargo_ir::inspect_toolchain()?;
+        let toolchain = cargo_ir::inspect_workspace_toolchain(&self.workspace_root)?;
         let capture_id = CaptureId::new();
         let staging = self.store.staging_directory(&capture_id);
         fs::create_dir_all(&staging)
@@ -391,7 +391,7 @@ fn request_key(
     struct CacheKey<'a> {
         evidence_version: u32,
         spec: &'a BuildSpec,
-        rustc_commit: &'a str,
+        toolchain: &'a cargo_ir::Toolchain,
         target_directory: &'a Path,
         environment: Vec<(String, String)>,
     }
@@ -399,7 +399,7 @@ fn request_key(
     let key = CacheKey {
         evidence_version: EVIDENCE_VERSION,
         spec,
-        rustc_commit: &toolchain.commit_hash,
+        toolchain,
         target_directory,
         environment: compiler_environment(),
     };
