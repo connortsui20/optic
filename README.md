@@ -111,8 +111,8 @@ limit is 50 and the maximum is 500.
 
 Lookup first checks exact definition paths, display names, and compiler symbols. A fallback lookup
 matches a case-sensitive literal substring and requires at least three Unicode characters. Results
-report the match kind and truncation. JSON also includes the full compiler symbol and a stable
-identity fingerprint.
+report truncation. JSON also reports the match kind, full compiler symbol, and a stable identity
+fingerprint.
 
 Plain output shows at least 12 hexadecimal characters for each ID. Color highlights the shortest
 unique prefix and dims the remaining characters. JSON output keeps the full IDs.
@@ -243,9 +243,9 @@ rustc and compiler wrappers from the same workspace configuration.
 The selected rustc requires matching `rustc-dev` and `llvm-tools` components. Cargo Optic reports a
 specific error when one of these components is absent. It does not install components.
 
-The driver is a small internal program. Its cache identity includes the compiler release, commit,
-host, LLVM version, canonical sysroot digest, driver source revision, and protocol. Cargo Optic
-stores the driver below `$CARGO_HOME/optic/drivers`.
+The driver is a small internal program. Its cache identity includes the compiler host, commit,
+canonical sysroot digest, driver source revision, and protocol. Cargo Optic stores the driver below
+`$CARGO_HOME/optic/drivers`.
 
 The faithful profile permits the normal link step. Existing normal artifacts remain available.
 
