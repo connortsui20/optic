@@ -9,7 +9,8 @@ pub use capture::{
     AliasTarget, ArtifactProvenance, BodyRange, CaptureInvocation, CaptureMethod, CargoArtifact,
     CommandInvocation, CompileOutcome, CompiledCapture, EnvironmentVariable, EvidenceBundle,
     LlvmAlias, LlvmDeclaration, LlvmStage, LtoScope, ModuleEvidence, UnstableAccess,
-    UnstableAccessMechanism, UnstableAccessScope, compile, ingest, require_compiled_evidence,
+    UnstableAccessMechanism, UnstableAccessScope, check_fresh, compile, ingest,
+    require_compiled_evidence,
 };
 
 mod error;

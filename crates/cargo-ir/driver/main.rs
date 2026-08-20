@@ -33,6 +33,8 @@ const SELECTED_TEMPS_ENV: &str = "OPTIC_SELECTED_TEMPS_DIR";
 const WORKSPACE_WRAPPER_ENV: &str = "OPTIC_HAS_WORKSPACE_WRAPPER";
 const WRAPPER_ACTIVE_ENV: &str = "OPTIC_RUSTC_WRAPPER_ACTIVE";
 const DRIVER_INNER_ENV: &str = "OPTIC_RUSTC_DRIVER_INNER";
+const FRESHNESS_CHECK_ENV: &str = "OPTIC_FRESHNESS_CHECK";
+const FRESHNESS_STALE_DIAGNOSTIC: &str = "cargo-optic selected target is not fresh";
 
 #[derive(Default)]
 struct IdentityCallbacks {
@@ -239,6 +241,12 @@ fn run_wrapper() -> ExitCode {
     let selected_target = arguments[compiler_index + 1..]
         .windows(2)
         .any(|pair| pair[0] == OsStr::new("-Z") && pair[1] == selected_argument);
+
+    if selected_target && env::var_os(FRESHNESS_CHECK_ENV).is_some() {
+        eprintln!("{FRESHNESS_STALE_DIAGNOSTIC}");
+
+        return ExitCode::FAILURE;
+    }
 
     if selected_target {
         let rustc = arguments[compiler_index].clone();

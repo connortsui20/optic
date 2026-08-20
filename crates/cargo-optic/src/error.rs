@@ -91,6 +91,10 @@ pub enum Error {
         path: PathBuf,
     },
 
+    /// Cargo reports that retained compiler evidence no longer represents the selected target.
+    #[error("build inputs changed after compiler evidence was retained")]
+    PendingInputsChanged,
+
     /// Retained compiler evidence does not satisfy the pending format.
     #[error("invalid pending compiler evidence in {path}: {message}")]
     InvalidPendingEvidence {

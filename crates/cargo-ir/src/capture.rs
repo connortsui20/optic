@@ -384,6 +384,55 @@ pub fn compile(request: &BuildRequest) -> Result<CompileOutcome> {
     })
 }
 
+/// Asks Cargo whether retained evidence still represents the selected target.
+///
+/// This check never compiles the selected target. The Optic wrapper stops a stale target before
+/// rustc starts, so retained compiler artifacts remain unchanged.
+///
+/// # Errors
+///
+/// Returns an error if Cargo or compiler discovery fails for a reason other than staleness.
+pub fn check_fresh(request: &BuildRequest, expected_toolchain: &Toolchain) -> Result<bool> {
+    const FRESHNESS_CHECK_ENV: &str = "OPTIC_FRESHNESS_CHECK";
+    const FRESHNESS_STALE_DIAGNOSTIC: &str = "cargo-optic selected target is not fresh";
+
+    let cargo = CargoContext::discover(&request.workspace_root)?;
+    let toolchain = inspect_rustc(cargo.rustc())?;
+    if &toolchain != expected_toolchain {
+        return Ok(false);
+    }
+    let driver = RustcDriver::prepare(&toolchain, &cargo)?;
+    let manifest_path = request.analysis_directory.join(mono::MANIFEST_NAME);
+    let mut command = cargo_command(request, &cargo);
+    driver.configure(
+        &mut command,
+        &request.analysis_directory,
+        &manifest_path,
+        &toolchain.commit_hash,
+    );
+    command.env(FRESHNESS_CHECK_ENV, "1");
+    let output = command.output().map_err(|source| Error::StartProcess {
+        program: "cargo rustc freshness check".to_owned(),
+        source,
+    })?;
+    if !output.status.success() {
+        let diagnostics = cargo_diagnostics(&output.stdout, &output.stderr);
+        if diagnostics.contains(FRESHNESS_STALE_DIAGNOSTIC) {
+            return Ok(false);
+        }
+
+        return Err(Error::ProcessFailed {
+            program: "cargo rustc freshness check".to_owned(),
+            status: output.status.to_string(),
+            diagnostics,
+        });
+    }
+
+    let artifacts = cargo_artifacts(&output.stdout);
+
+    Ok(!artifacts.is_empty() && artifacts.iter().all(|artifact| artifact.fresh))
+}
+
 /// Confirms that a successful compiler run left the identity manifest and supported bitcode.
 ///
 /// # Errors

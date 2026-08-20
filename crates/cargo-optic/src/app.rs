@@ -105,6 +105,7 @@ impl Application {
                 spec,
                 &request_template,
                 &toolchain,
+                true,
             ) {
                 Ok(pending) => {
                     return self.resume_capture(
@@ -115,7 +116,7 @@ impl Application {
                         CaptureDisposition::Resumed,
                     );
                 }
-                Err(crate::Error::InputChanged { .. }) => {
+                Err(crate::Error::InputChanged { .. } | crate::Error::PendingInputsChanged) => {
                     remove_pending(&pending_directory)?;
                 }
                 Err(error) => return Err(error),
@@ -158,6 +159,7 @@ impl Application {
                     spec,
                     &self.build_request(spec, PathBuf::new()),
                     &toolchain,
+                    false,
                 )?;
 
                 self.resume_capture(

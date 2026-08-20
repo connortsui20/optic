@@ -78,55 +78,10 @@ impl SourceBaseline {
         spec: &BuildSpec,
         staging_directory: &Path,
     ) -> Result<Self> {
-        let mut command = cargo_metadata::MetadataCommand::new();
-        command.current_dir(workspace_root);
-        if let Some(path) = &spec.manifest_path {
-            command.manifest_path(path);
-        }
-        command.other_options(metadata_options(spec));
-        let metadata = command.exec()?;
         let source_directory = staging_directory.join("sources");
         fs::create_dir_all(&source_directory)
             .map_err(|source| Error::filesystem("create", &source_directory, source))?;
-
-        let local_packages = selected_local_packages(&metadata, spec);
-        let mut paths = BTreeSet::new();
-        let mut cache_paths = BTreeSet::new();
-
-        for package in local_packages {
-            cache_paths.insert(package.manifest_path.clone().into_std_path_buf());
-
-            let Some(root) = package.manifest_path.parent() else {
-                continue;
-            };
-
-            for entry in WalkDir::new(root).into_iter().filter_entry(included_entry) {
-                let entry = entry.map_err(|source| {
-                    Error::filesystem("walk", root.as_std_path(), source.into())
-                })?;
-
-                if entry.file_type().is_file()
-                    && entry
-                        .path()
-                        .extension()
-                        .is_some_and(|extension| extension == "rs")
-                {
-                    let path = fs::canonicalize(entry.path()).map_err(|source| {
-                        Error::filesystem("canonicalize", entry.path(), source)
-                    })?;
-                    paths.insert(path.clone());
-                    cache_paths.insert(path);
-                }
-            }
-        }
-
-        let lock_file = workspace_root.join("Cargo.lock");
-        if lock_file.is_file() {
-            cache_paths.insert(lock_file);
-        }
-        for path in cargo_configuration_paths(workspace_root) {
-            cache_paths.insert(path);
-        }
+        let SourcePaths { paths, cache_paths } = source_paths(workspace_root, spec)?;
 
         let mut entries = Vec::with_capacity(paths.len());
         let mut source_digests = BTreeMap::new();
@@ -217,10 +172,50 @@ impl SourceBaseline {
     }
 
     pub(crate) fn resume(
+        workspace_root: &Path,
+        spec: &BuildSpec,
         staging_directory: &Path,
         pending: &PendingSourceBaseline,
         marker_path: &Path,
     ) -> Result<Self> {
+        const MAX_SOURCE_ENTRIES: usize = 200_000;
+        const MAX_CACHE_INPUTS: usize = 400_000;
+
+        if pending.entries.len() > MAX_SOURCE_ENTRIES {
+            return Err(Error::InvalidPendingEvidence {
+                path: marker_path.to_owned(),
+                message: format!(
+                    "source entry count must be at most {MAX_SOURCE_ENTRIES}, got {}",
+                    pending.entries.len()
+                ),
+            });
+        }
+        if pending.cache_inputs.len() > MAX_CACHE_INPUTS {
+            return Err(Error::InvalidPendingEvidence {
+                path: marker_path.to_owned(),
+                message: format!(
+                    "cache input count must be at most {MAX_CACHE_INPUTS}, got {}",
+                    pending.cache_inputs.len()
+                ),
+            });
+        }
+        let expected = source_paths(workspace_root, spec)?;
+        let entry_paths = pending
+            .entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>();
+        let cache_paths = pending
+            .cache_inputs
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>();
+        if entry_paths != expected.paths.into_iter().collect::<Vec<_>>()
+            || cache_paths != expected.cache_paths.into_iter().collect::<Vec<_>>()
+        {
+            return Err(Error::PendingInputsChanged);
+        }
+
         let source_directory = staging_directory.join("sources");
         let mut entries = Vec::with_capacity(pending.entries.len());
 
@@ -259,6 +254,59 @@ impl SourceBaseline {
 
         Ok(baseline)
     }
+}
+
+struct SourcePaths {
+    paths: BTreeSet<PathBuf>,
+    cache_paths: BTreeSet<PathBuf>,
+}
+
+fn source_paths(workspace_root: &Path, spec: &BuildSpec) -> Result<SourcePaths> {
+    let mut command = cargo_metadata::MetadataCommand::new();
+    command.current_dir(workspace_root);
+    if let Some(path) = &spec.manifest_path {
+        command.manifest_path(path);
+    }
+    command.other_options(metadata_options(spec));
+    let metadata = command.exec()?;
+    let local_packages = selected_local_packages(&metadata, spec);
+    let mut paths = BTreeSet::new();
+    let mut cache_paths = BTreeSet::new();
+
+    for package in local_packages {
+        cache_paths.insert(package.manifest_path.clone().into_std_path_buf());
+
+        let Some(root) = package.manifest_path.parent() else {
+            continue;
+        };
+
+        for entry in WalkDir::new(root).into_iter().filter_entry(included_entry) {
+            let entry = entry
+                .map_err(|source| Error::filesystem("walk", root.as_std_path(), source.into()))?;
+
+            if entry.file_type().is_file()
+                && entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "rs")
+            {
+                let path = fs::canonicalize(entry.path())
+                    .map_err(|source| Error::filesystem("canonicalize", entry.path(), source))?;
+                paths.insert(path.clone());
+                cache_paths.insert(path);
+            }
+        }
+    }
+
+    let lock_file = workspace_root.join("Cargo.lock");
+    if lock_file.is_file() {
+        cache_paths.insert(lock_file);
+    }
+    for path in cargo_configuration_paths(workspace_root) {
+        cache_paths.insert(path);
+    }
+
+    Ok(SourcePaths { paths, cache_paths })
 }
 
 fn parse_digest(digest: &str, marker_path: &Path) -> Result<blake3::Hash> {
@@ -468,8 +516,11 @@ fn function_span(
 mod tests {
     use std::fs;
 
-    use super::{CacheInput, SourceBaseline, StoredSource, find_item_at};
-    use crate::{Error, SourceLocation};
+    use super::{
+        CacheInput, PendingSourceBaseline, PendingSourceEntry, SourceBaseline, StoredSource,
+        find_item_at,
+    };
+    use crate::{BuildSpec, Error, SourceLocation};
 
     #[test]
     fn retained_baseline_reports_a_changed_input_as_stale() {
@@ -489,6 +540,37 @@ mod tests {
             baseline.validate(),
             Err(Error::InputChanged { path }) if path == input
         ));
+    }
+
+    #[test]
+    fn retained_paths_must_match_current_cargo_metadata_before_reads() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary workspace");
+        fs::create_dir(temporary.path().join("src"))
+            .expect("the test can create the source directory");
+        fs::write(
+            temporary.path().join("Cargo.toml"),
+            "[package]\nname = \"pending-source\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )
+        .expect("the test can create a manifest");
+        fs::write(temporary.path().join("src/lib.rs"), "pub fn value() {}\n")
+            .expect("the test can create source");
+        let pending = PendingSourceBaseline {
+            entries: vec![PendingSourceEntry {
+                path: temporary.path().join("not-a-cargo-input.rs"),
+                digest: blake3::hash(b"").to_hex().to_string(),
+            }],
+            cache_inputs: Vec::new(),
+        };
+
+        let result = SourceBaseline::resume(
+            temporary.path(),
+            &BuildSpec::default(),
+            &temporary.path().join("staging"),
+            &pending,
+            &temporary.path().join("pending.json"),
+        );
+
+        assert!(matches!(result, Err(Error::PendingInputsChanged)));
     }
 
     #[test]
