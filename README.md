@@ -18,15 +18,28 @@ experiment.
 
 ## Install
 
-Install a nightly toolchain and its matching compiler and LLVM libraries:
+Install Cargo Optic from this repository:
 
 ```console
-rustup toolchain install nightly --component llvm-tools --component rustc-dev
-cargo +stable install --locked --path crates/cargo-optic
+cargo install --locked --path crates/cargo-optic
 ```
 
-Cargo Optic uses the active compiler. Use `cargo +nightly optic` to select the installed nightly
-toolchain.
+The repository toolchain file installs `rustc-dev` and `llvm-tools`. For a different workspace, add
+these components to the toolchain that the workspace selects:
+
+```console
+rustup component add rustc-dev llvm-tools
+```
+
+Use `cargo optic` without a toolchain prefix. Cargo Optic uses the Cargo and rustc that the
+workspace selects through the normal Rust configuration.
+
+Cargo Optic accepts the workspace rustc without a release-channel restriction. It enables unstable
+access only for Cargo configuration discovery, exact-version driver compilation, and
+selected-target compilation.
+
+Dependencies, build scripts, and compiler probes do not receive unstable access. Do not set
+`RUSTC_BOOTSTRAP` for Cargo Optic.
 
 ## Try the included example
 
@@ -34,7 +47,7 @@ Run these commands from the Optic repository. They work in Fish, Bash, and Zsh.
 
 ```console
 cd crates/cargo-optic/tests/fixtures/generic
-cargo +nightly optic show optic_mvp_kernel::outlined_sum -p optic-mvp-app --bin optic-mvp-app --release --source
+cargo optic show optic_mvp_kernel::outlined_sum -p optic-mvp-app --bin optic-mvp-app --release --source
 ```
 
 The example creates `u32` and `u64` instances of the same generic function. Cargo Optic lists both
@@ -48,7 +61,7 @@ evidence before and after a source change.
 Run `show` with the Cargo target options and a Rust definition path:
 
 ```console
-cargo +nightly optic show my_crate::kernel -p my-crate --lib --release --source
+cargo optic show my_crate::kernel -p my-crate --lib --release --source
 ```
 
 Cargo Optic captures the selected target and finds its concrete compiler instances. If the query is
@@ -56,7 +69,7 @@ ambiguous, the command prints a complete `show` command for each candidate. Copy
 request that result. The command keeps your `--source` and `--output` options.
 
 ```console
-cargo +nightly optic show \
+cargo optic show \
   --instance ins_01234567 \
   --source
 ```
@@ -77,11 +90,11 @@ escape sequences.
 Use these commands when an agent or another program controls the workflow:
 
 ```console
-cargo +nightly optic capture -p my-crate --lib --release --format json
-cargo +nightly optic find --capture CAPTURE_ID_PREFIX my_crate::kernel --format json
-cargo +nightly optic show --instance INSTANCE_ID_PREFIX --format json
-cargo +nightly optic captures --format json
-cargo +nightly optic inspect --capture CAPTURE_ID_PREFIX --format json
+cargo optic capture -p my-crate --lib --release --format json
+cargo optic find --capture CAPTURE_ID_PREFIX my_crate::kernel --format json
+cargo optic show --instance INSTANCE_ID_PREFIX --format json
+cargo optic captures --format json
+cargo optic inspect --capture CAPTURE_ID_PREFIX --format json
 ```
 
 Omit `--format json` for an interactive workflow. Plain `find` output prints a complete `show`
@@ -107,13 +120,16 @@ for each LLVM stage. A result does not use one combined `has_body` value.
 Use `inspect` to show the request, compiler commands, wrappers, environment, and artifact stages:
 
 ```console
-cargo +nightly optic inspect --capture CAPTURE_ID_PREFIX
+cargo optic inspect --capture CAPTURE_ID_PREFIX
 ```
+
+The result includes the Cargo and rustc paths. It also includes the rustc release, commit, host,
+LLVM version, and sysroot. The bootstrap scope identifies each internal use of unstable access.
 
 Use `compare` to compare compact LLVM structure for two exact instances:
 
 ```console
-cargo +nightly optic compare \
+cargo optic compare \
   --before OLD_INSTANCE_ID \
   --after NEW_INSTANCE_ID
 ```
@@ -127,10 +143,10 @@ LLVM summaries, not performance measurements.
 Use these commands to inspect and manage the store:
 
 ```console
-cargo +nightly optic status
-cargo +nightly optic verify
-cargo +nightly optic remove --capture CAPTURE_ID_PREFIX
-cargo +nightly optic gc
+cargo optic status
+cargo optic verify
+cargo optic remove --capture CAPTURE_ID_PREFIX
+cargo optic gc
 ```
 
 The `remove` command removes one catalog capture. Shared blobs remain until `gc` removes all
@@ -139,21 +155,29 @@ unreferenced blobs. The `verify` command reads each referenced blob and checks i
 Run this command from the Cargo workspace that you want to clean:
 
 ```console
-cargo +nightly optic clean
+cargo optic clean
 ```
 
-The command removes only `.optic` in the workspace. It does not remove the Cargo `target`
-directory. The command succeeds when the Optic cache does not exist.
+The command removes only `.optic/store`. It preserves `.optic/locks` and other entries below
+`.optic`. It does not remove the Cargo `target` directory. The command succeeds when `.optic/store`
+does not exist.
+
+The `.optic` root is reserved for durable workspace state. A future release can add
+`.optic/config.toml` without changing the `clean` contract. Cargo Optic does not create
+`.optic.lock` in the workspace root.
 
 ## Persistent state
 
-Cargo Optic stores immutable captures in `.optic`. The SQLite catalog uses WAL mode. A file lock
-serializes capture writers, but read-only queries can use completed captures in parallel.
+Cargo Optic stores immutable captures in `.optic/store`. The SQLite catalog uses WAL mode. A file
+lock serializes capture writers, but read-only queries can use completed captures in parallel.
+
+Cargo Optic stores its operation and data locks in `.optic/locks`. These locks remain after
+`cargo optic clean` so that `clean` can coordinate with other commands.
 
 There is no current capture and no session state. Each read-only command uses an explicit capture
 or instance ID. An instance ID identifies its capture. Content-addressed blobs hold the evidence.
 
-The current store schema is version 6. Cargo Optic rejects older stores. Run `cargo optic clean`
+The current store schema is version 7. Cargo Optic rejects older stores. Run `cargo optic clean`
 once to replace an older prototype store.
 
 Cargo Optic asks Cargo to evaluate the selected target before it reuses a capture. This design
@@ -178,6 +202,12 @@ workspace wrappers. It passes dependency compilations and compiler probes throug
 The evidence arguments and the compiler identity driver apply only to the selected target. Cargo
 Optic records identities before code generation and continues the same compilation.
 
+Cargo Optic uses the Cargo process that invoked the external subcommand. It resolves the effective
+rustc and compiler wrappers from the same workspace configuration.
+
+The selected rustc requires matching `rustc-dev` and `llvm-tools` components. Cargo Optic reports a
+specific error when one of these components is absent. It does not install components.
+
 The driver is a small internal program. Cargo Optic builds it once for each rustc commit and source
 revision. It stores the driver below `$CARGO_HOME/optic/drivers`.
 
@@ -185,7 +215,7 @@ The faithful profile permits the normal link step. Existing normal artifacts rem
 
 ## MVP limits
 
-- Cargo Optic requires nightly rustc and the matching `llvm-tools` and `rustc-dev` components.
+- Cargo Optic requires matching `llvm-tools` and `rustc-dev` components for the selected rustc.
 - The prototype records source from workspace packages and local path dependencies.
 - The prototype records one selected library, binary, benchmark, or example target.
 - The prototype does not record MIR, assembly, object files, or compiler optimization remarks.

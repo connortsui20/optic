@@ -8,23 +8,19 @@ Bash, and Zsh. They do not use shell variables.
 Run these commands from the root of the Optic repository:
 
 ```console
-cargo +stable install --locked --path crates/cargo-optic --force
+cargo install --locked --path crates/cargo-optic --force
 cd crates/cargo-optic/tests/fixtures/generic
 ```
 
-The example requires the nightly toolchain. Install its compiler and LLVM libraries if they are
-absent:
-
-```console
-rustup toolchain install nightly --component llvm-tools --component rustc-dev
-```
+The repository toolchain file selects stable rustc. It also installs the matching `rustc-dev` and
+`llvm-tools` components.
 
 ## Show the example function
 
 Run this command from the `generic` fixture directory:
 
 ```console
-cargo +nightly optic show optic_mvp_kernel::outlined_sum \
+cargo optic show optic_mvp_kernel::outlined_sum \
   -p optic-mvp-app \
   --bin optic-mvp-app \
   --release \
@@ -64,7 +60,7 @@ not rebuild the instance.
 Use the two instance IDs in this command:
 
 ```console
-cargo +nightly optic compare \
+cargo optic compare \
   --before OLD_INSTANCE_ID \
   --after NEW_INSTANCE_ID
 ```
@@ -74,16 +70,17 @@ The command reports structural LLVM changes and incompatible capture dimensions.
 Use this command to list all completed captures:
 
 ```console
-cargo +nightly optic captures
+cargo optic captures
 ```
 
 Use this command to inspect one capture:
 
 ```console
-cargo +nightly optic inspect --capture CAPTURE_ID
+cargo optic inspect --capture CAPTURE_ID
 ```
 
-The result includes the request, compiler commands, wrappers, environment, and artifact stages.
+The result includes the request, compiler commands, wrappers, environment, and artifact stages. It
+also identifies the workspace Cargo, rustc, sysroot, and internal bootstrap scopes.
 
 ## Select a different compiler output
 
@@ -91,7 +88,7 @@ The generated command shows optimized LLVM IR by default. Run this command to sh
 optimization:
 
 ```console
-cargo +nightly optic show optic_mvp_kernel::outlined_sum \
+cargo optic show optic_mvp_kernel::outlined_sum \
   -p optic-mvp-app \
   --bin optic-mvp-app \
   --release \
@@ -114,26 +111,27 @@ git restore kernel/src/lib.rs
 Use these commands to inspect the store and verify its blobs:
 
 ```console
-cargo +nightly optic status
-cargo +nightly optic verify
+cargo optic status
+cargo optic verify
 ```
 
 Use these commands to remove one capture and its unreferenced blobs:
 
 ```console
-cargo +nightly optic remove --capture CAPTURE_ID
-cargo +nightly optic gc
+cargo optic remove --capture CAPTURE_ID
+cargo optic gc
 ```
 
 ## Remove the Optic cache
 
-Run this command only when you want to remove all stored Optic evidence for this fixture:
+If you want to remove all stored Optic evidence for this fixture, run this command:
 
 ```console
-cargo +nightly optic clean
+cargo optic clean
 ```
 
-The command removes `.optic`. It keeps the Cargo `target` directory and its build artifacts.
+The command removes `.optic/store`. It keeps `.optic/locks`, other `.optic` entries, and the Cargo
+`target` directory.
 
 If Cargo Optic rejects an old catalog version, run `clean` once. Then run the main `show` command
 again.

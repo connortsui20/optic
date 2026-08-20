@@ -24,15 +24,17 @@ Read [README.md](README.md) before you change the product behavior. Use the
 
 ## Persistent state
 
-- `.optic` contains immutable captures, a SQLite catalog, blobs, and temporary staging files.
-- `.optic.lock` coordinates store operations and remains after `cargo optic clean`.
-- The clean command removes `.optic` only. It keeps the Cargo target directory.
+- `.optic/store` contains immutable captures, the SQLite catalog, blobs, and temporary staging files.
+- `.optic/locks` coordinates store operations and remains after `cargo optic clean`.
+- The clean command removes `.optic/store` only. It keeps the Cargo target directory.
+- Keep other entries below `.optic`, including a future `.optic/config.toml` file.
+- Cargo Optic does not create a `.optic.lock` file in the workspace root.
 - There is no current capture and no persistent client session.
 - Each read command uses a capture ID or an instance ID.
 - An instance ID identifies its capture, so `show --instance` does not need a capture ID.
 - New IDs contain random UUIDv4 suffixes.
 - Text output shows at least 12 hexadecimal characters and highlights the shortest unique prefix.
-- The schema version is 6. Older stores require `cargo optic clean`.
+- The schema version is 7. Older stores require `cargo optic clean`.
 
 Capture writers use a file lock. Read commands can use completed captures in parallel. An operation
 lock prevents `clean` from removing a store that another process uses.
@@ -41,6 +43,15 @@ lock prevents `clean` from removing a store that another process uses.
 
 `cargo-ir` uses `cargo rustc` with the normal target directory and dependency graph. Normal Cargo
 commands can reuse dependency artifacts from an Optic build.
+
+Use `cargo optic` without a toolchain prefix. Cargo Optic uses the Cargo and rustc that the
+workspace selects through the normal Rust configuration.
+
+The selected rustc requires matching `rustc-dev` and `llvm-tools` components. Cargo Optic enables
+unstable access only for Cargo configuration discovery, exact-version driver compilation, and
+selected-target compilation. It does not require a user-supplied `RUSTC_BOOTSTRAP` value.
+
+Cargo Optic does not enable unstable access for dependencies, build scripts, or compiler probes.
 
 The selected target uses saved-temporary arguments and has a separate Cargo fingerprint. Cargo
 checks this fingerprint before Optic reuses evidence.
@@ -80,7 +91,8 @@ RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 git diff --check
 ```
 
-The end-to-end test requires nightly rustc and its matching `llvm-tools` and `rustc-dev` components.
+The end-to-end test requires the matching `llvm-tools` and `rustc-dev` components for the selected
+workspace rustc.
 
 ## Known limits
 
