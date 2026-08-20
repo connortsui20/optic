@@ -19,7 +19,7 @@ use crate::terminal::{CodeSyntax, Terminal};
 use crate::{
     Application, BuildSpec, BuildTarget, CachePolicy, CaptureDetails, CaptureId, CaptureProfile,
     CaptureSummary, CleanSummary, CompareView, CompilerOutput, FindOptions, FindResult, InstanceId,
-    InstanceSummary, ShowView,
+    InstanceSummary, ShowView, UnstableAccessMechanism, UnstableAccessScope,
 };
 
 const MINIMUM_DISPLAY_ID_HEX_DIGITS: usize = 12;
@@ -1263,11 +1263,31 @@ fn capture_details_text(
     terminal: &Terminal,
 ) -> String {
     let mut output = format!(
-        "{}\n  Capture  {}\n  Profile  {:?}\n  Target   {}\n  Cargo    {} {}\n",
+        concat!(
+            "{}\n",
+            "  Capture   {}\n",
+            "  Profile   {:?}\n",
+            "  Target    {}\n",
+            "  Compiler  {}\n",
+            "  Release   {}\n",
+            "  Commit    {}\n",
+            "  Host      {}\n",
+            "  LLVM      {}\n",
+            "  Sysroot   {}\n",
+            "  llvm-dis  {}\n",
+            "  Cargo     {} {}\n",
+        ),
         terminal.heading("Capture details"),
         terminal.identifier(&display_id.text, display_id.unique_prefix_length),
         details.summary.capture_profile,
         details.summary.target,
+        details.compiler.rustc.display(),
+        details.compiler.release,
+        details.compiler.commit_hash,
+        details.compiler.host,
+        details.compiler.llvm_version,
+        details.compiler.sysroot.display(),
+        details.compiler.llvm_dis.display(),
         details.cargo.program,
         details.cargo.arguments.join(" "),
     );
@@ -1280,6 +1300,20 @@ fn capture_details_text(
         )
         .expect("writing capture details to a String cannot fail");
     }
+    let authorized_scopes = details
+        .unstable_access
+        .authorized_scopes
+        .iter()
+        .map(|scope| unstable_access_scope_name(*scope))
+        .collect::<Vec<_>>()
+        .join(", ");
+    writeln!(
+        output,
+        "  Unstable  {} (authorized: {})",
+        unstable_access_mechanism_name(details.unstable_access.mechanism),
+        authorized_scopes,
+    )
+    .expect("writing capture details to a String cannot fail");
     writeln!(
         output,
         "  Artifacts  {} ({} instances)",
@@ -1301,6 +1335,20 @@ fn capture_details_text(
     }
 
     output
+}
+
+fn unstable_access_mechanism_name(mechanism: UnstableAccessMechanism) -> &'static str {
+    match mechanism {
+        UnstableAccessMechanism::RustcBootstrap => "rustc-bootstrap",
+    }
+}
+
+fn unstable_access_scope_name(scope: UnstableAccessScope) -> &'static str {
+    match scope {
+        UnstableAccessScope::CargoConfigDiscovery => "cargo-config-discovery",
+        UnstableAccessScope::DriverBuild => "driver-build",
+        UnstableAccessScope::SelectedTarget => "selected-target",
+    }
 }
 
 fn compare_text(comparison: &CompareView) -> String {

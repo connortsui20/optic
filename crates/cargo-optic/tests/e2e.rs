@@ -459,8 +459,46 @@ fn captures_finds_and_shows_concrete_generic_instances() {
     let details = fixture.run(["inspect", "--capture", capture, "--format", "json"]);
     assert_success(&details);
     let details = json(&details);
+    let compiler = cargo_ir::inspect_workspace_toolchain(&fixture.root)
+        .expect("the fixture compiler identity is available");
     assert_eq!(details["result"]["summary"]["capture_profile"], "faithful");
     assert_eq!(details["result"]["request"]["package"], "optic-mvp-app");
+    assert_eq!(
+        string(&details, "/result/compiler/rustc"),
+        compiler.rustc.to_string_lossy()
+    );
+    assert_eq!(
+        string(&details, "/result/compiler/release"),
+        compiler.release
+    );
+    assert_eq!(
+        string(&details, "/result/compiler/commit_hash"),
+        compiler.commit_hash
+    );
+    assert_eq!(string(&details, "/result/compiler/host"), compiler.host);
+    assert_eq!(
+        string(&details, "/result/compiler/llvm_version"),
+        compiler.llvm_version
+    );
+    assert_eq!(
+        string(&details, "/result/compiler/sysroot"),
+        compiler.sysroot.to_string_lossy()
+    );
+    assert_eq!(
+        string(&details, "/result/compiler/llvm_dis"),
+        compiler.llvm_dis.to_string_lossy()
+    );
+    assert_eq!(
+        details["result"]["unstable_access"],
+        serde_json::json!({
+            "mechanism": "rustc-bootstrap",
+            "authorized_scopes": [
+                "cargo-config-discovery",
+                "driver-build",
+                "selected-target",
+            ],
+        })
+    );
     assert!(
         !details["result"]["artifacts"]
             .as_array()
@@ -469,6 +507,15 @@ fn captures_finds_and_shows_concrete_generic_instances() {
     );
     let encoded_details = serde_json::to_vec(&details).expect("capture details re-encode as JSON");
     assert!(!String::from_utf8_lossy(&encoded_details).contains("/.optic/"));
+
+    let details_text = fixture.run(["inspect", "--capture", capture]);
+    assert_success(&details_text);
+    let details_text = String::from_utf8_lossy(&details_text.stdout);
+    assert!(details_text.contains(&format!("  Commit    {}", compiler.commit_hash)));
+    assert!(details_text.contains(
+        "  Unstable  rustc-bootstrap (authorized: cargo-config-discovery, driver-build, \
+         selected-target)"
+    ));
 
     let comparison = fixture.run([
         "compare", "--before", instance, "--after", instance, "--format", "json",

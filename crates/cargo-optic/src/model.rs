@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
-use crate::{CallSiteDelta, CallSiteSummary, CaptureId, InstanceId, LlvmStage};
+use crate::{CallSiteDelta, CallSiteSummary, CaptureId, InstanceId, LlvmStage, UnstableAccess};
 
 /// One Cargo target selected through the product API.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -275,6 +275,31 @@ pub struct ArtifactSummary {
     pub aliases: usize,
 }
 
+/// The exact compiler and matching LLVM disassembler used for one capture.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CompilerProvenance {
+    /// The rustc executable selected by Cargo.
+    pub rustc: PathBuf,
+
+    /// The rustc release string.
+    pub release: String,
+
+    /// The complete rustc commit hash.
+    pub commit_hash: String,
+
+    /// The compiler host triple.
+    pub host: String,
+
+    /// The LLVM version embedded in rustc.
+    pub llvm_version: String,
+
+    /// The canonical compiler sysroot.
+    pub sysroot: PathBuf,
+
+    /// The matching `llvm-dis` executable.
+    pub llvm_dis: PathBuf,
+}
+
 /// Reproducibility details for one immutable capture.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CaptureDetails {
@@ -283,6 +308,12 @@ pub struct CaptureDetails {
 
     /// The normalized product request.
     pub request: BuildSpec,
+
+    /// The exact compiler and matching LLVM disassembler.
+    pub compiler: CompilerProvenance,
+
+    /// The bounded policy for unstable compiler access.
+    pub unstable_access: UnstableAccess,
 
     /// The exact Cargo subprocess command.
     pub cargo: CommandView,

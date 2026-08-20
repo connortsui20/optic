@@ -19,10 +19,10 @@ use walkdir::WalkDir;
 use crate::source::{SourceBaseline, StoredSource};
 use crate::{
     ArtifactSummary, BodyView, BuildSpec, CaptureDetails, CaptureDisposition, CaptureId,
-    CaptureProfile, CaptureSummary, CommandView, CompilerOutput, EnvironmentView, Error,
-    FindMatchKind, FindOptions, FindResult, GcSummary, InstanceId, InstanceSummary,
-    OutputAvailability, RemoveSummary, Result, ShowView, SourceLocation, StoreStatus,
-    VerifySummary,
+    CaptureProfile, CaptureSummary, CommandView, CompilerOutput, CompilerProvenance,
+    EnvironmentView, Error, FindMatchKind, FindOptions, FindResult, GcSummary, InstanceId,
+    InstanceSummary, OutputAvailability, RemoveSummary, Result, ShowView, SourceLocation,
+    StoreStatus, VerifySummary,
 };
 
 const STORE_VERSION: u32 = 7;
@@ -402,10 +402,26 @@ impl Store {
     pub(crate) fn capture_details(&self, capture_prefix: &CaptureId) -> Result<CaptureDetails> {
         let capture_id = self.resolve_capture(capture_prefix)?;
         let summary = self.capture_summary(&capture_id, CaptureDisposition::Captured)?;
-        let (request_json, invocation_json) = self.connection.query_row(
-            "SELECT request_json, invocation_json FROM captures WHERE id = ?1",
+        let (request_json, invocation_json, compiler) = self.connection.query_row(
+            "SELECT request_json, invocation_json, rustc_path, rustc_release, rustc_commit,
+                    rustc_host, llvm_version, rustc_sysroot, llvm_dis_path
+             FROM captures WHERE id = ?1",
             [capture_id.as_str()],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    CompilerProvenance {
+                        rustc: PathBuf::from(row.get::<_, String>(2)?),
+                        release: row.get(3)?,
+                        commit_hash: row.get(4)?,
+                        host: row.get(5)?,
+                        llvm_version: row.get(6)?,
+                        sysroot: PathBuf::from(row.get::<_, String>(7)?),
+                        llvm_dis: PathBuf::from(row.get::<_, String>(8)?),
+                    },
+                ))
+            },
         )?;
         let request = serde_json::from_str::<BuildSpec>(&request_json)?;
         let invocation = serde_json::from_str::<cargo_ir::CaptureInvocation>(&invocation_json)?;
@@ -424,6 +440,8 @@ impl Store {
         Ok(CaptureDetails {
             summary,
             request,
+            compiler,
+            unstable_access: invocation.unstable_access,
             cargo: command_view(invocation.cargo, &self.root),
             rustc: invocation
                 .rustc
@@ -1320,9 +1338,13 @@ fn create_schema(connection: &mut Connection) -> Result<()> {
              created_at_ms INTEGER NOT NULL,
              request_key TEXT NOT NULL,
              request_json TEXT NOT NULL,
+             rustc_path TEXT NOT NULL,
              rustc_release TEXT NOT NULL,
              rustc_commit TEXT NOT NULL,
+             rustc_host TEXT NOT NULL,
              llvm_version TEXT NOT NULL,
+             rustc_sysroot TEXT NOT NULL,
+             llvm_dis_path TEXT NOT NULL,
              target TEXT NOT NULL,
              profile TEXT NOT NULL,
              invocation_json TEXT NOT NULL
@@ -1456,17 +1478,22 @@ fn insert_capture(transaction: &Transaction<'_>, capture: PublishedCapture<'_>) 
 
     transaction.execute(
         "INSERT INTO captures(
-             id, created_at_ms, request_key, request_json, rustc_release, rustc_commit,
-             llvm_version, target, profile, invocation_json
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             id, created_at_ms, request_key, request_json, rustc_path, rustc_release,
+             rustc_commit, rustc_host, llvm_version, rustc_sysroot, llvm_dis_path, target,
+             profile, invocation_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             capture.capture_id.as_str(),
             created_at_ms,
             capture.request_key,
             capture.request_json,
+            capture.toolchain.rustc.to_string_lossy(),
             capture.toolchain.release,
             capture.toolchain.commit_hash,
+            capture.toolchain.host,
             capture.toolchain.llvm_version,
+            capture.toolchain.sysroot.to_string_lossy(),
+            capture.toolchain.llvm_dis.to_string_lossy(),
             capture.target,
             capture_profile_name(capture.spec.capture_profile),
             capture.invocation_json,
@@ -2245,10 +2272,13 @@ mod tests {
             .connection
             .execute_batch(
                 "INSERT INTO captures(
-                     id, created_at_ms, request_key, request_json, rustc_release, rustc_commit,
-                     llvm_version, target, profile, invocation_json
-                 ) VALUES ('cap_00000000000000000000000000000000', 0, 'key', '{}', '', '', '',
-                           '', 'faithful', '{}');
+                     id, created_at_ms, request_key, request_json, rustc_path, rustc_release,
+                     rustc_commit, rustc_host, llvm_version, rustc_sysroot, llvm_dis_path, target,
+                     profile, invocation_json
+                 ) VALUES (
+                     'cap_00000000000000000000000000000000', 0, 'key', '{}', '', '', '', '',
+                     '', '', '', '', 'faithful', '{}'
+                 );
                  INSERT INTO modules(
                      id, capture_id, name, stage, compiler_stage, codegen_unit, lto,
                      capture_method, bitcode_blob, text_blob
@@ -2689,11 +2719,14 @@ mod tests {
             .connection
             .execute_batch(
                 "INSERT INTO captures(
-                     id, created_at_ms, request_key, request_json, rustc_release, rustc_commit,
-                     llvm_version, target, profile, invocation_json
+                     id, created_at_ms, request_key, request_json, rustc_path, rustc_release,
+                     rustc_commit, rustc_host, llvm_version, rustc_sysroot, llvm_dis_path, target,
+                     profile, invocation_json
                  ) VALUES
-                     ('cap_00000000000000000000000000000000', 0, 'a', '{}', '', '', '', '', '', '{}'),
-                     ('cap_0fffffffffffffffffffffffffffffff', 0, 'b', '{}', '', '', '', '', '', '{}');
+                     ('cap_00000000000000000000000000000000', 0, 'a', '{}', '', '', '', '', '',
+                      '', '', '', 'faithful', '{}'),
+                     ('cap_0fffffffffffffffffffffffffffffff', 0, 'b', '{}', '', '', '', '', '',
+                      '', '', '', 'faithful', '{}');
                  INSERT INTO definitions(id, capture_id, crate_name, path) VALUES
                      ('def_00000000000000000000000000000000',
                       'cap_00000000000000000000000000000000', '', ''),
@@ -2742,9 +2775,12 @@ mod tests {
             .connection
             .execute(
                 "INSERT INTO captures(
-                     id, created_at_ms, request_key, request_json, rustc_release, rustc_commit,
-                     llvm_version, target, profile, invocation_json
-                 ) VALUES ('invalid', 0, 'request', '{}', '', '', '', '', '', '{}')",
+                     id, created_at_ms, request_key, request_json, rustc_path, rustc_release,
+                     rustc_commit, rustc_host, llvm_version, rustc_sysroot, llvm_dis_path, target,
+                     profile, invocation_json
+                 ) VALUES (
+                     'invalid', 0, 'request', '{}', '', '', '', '', '', '', '', '', '', '{}'
+                 )",
                 [],
             )
             .expect("the test can insert an invalid stored identifier");
@@ -2760,11 +2796,12 @@ mod tests {
             .connection
             .execute_batch(
                 "INSERT INTO captures(
-                     id, created_at_ms, request_key, request_json, rustc_release, rustc_commit,
-                     llvm_version, target, profile, invocation_json
+                     id, created_at_ms, request_key, request_json, rustc_path, rustc_release,
+                     rustc_commit, rustc_host, llvm_version, rustc_sysroot, llvm_dis_path, target,
+                     profile, invocation_json
                  ) VALUES (
                      'cap_00000000000000000000000000000000', 0, 'request', '{}', '', '', '', '',
-                     'faithful', '{}'
+                     '', '', '', '', 'faithful', '{}'
                  );
                  INSERT INTO capture_cache(request_key, capture_id, analysis_key) VALUES (
                      'request', 'cap_00000000000000000000000000000000', '../outside'
@@ -2791,11 +2828,12 @@ mod tests {
             .connection
             .execute_batch(
                 "INSERT INTO captures(
-                     id, created_at_ms, request_key, request_json, rustc_release, rustc_commit,
-                     llvm_version, target, profile, invocation_json
+                     id, created_at_ms, request_key, request_json, rustc_path, rustc_release,
+                     rustc_commit, rustc_host, llvm_version, rustc_sysroot, llvm_dis_path, target,
+                     profile, invocation_json
                  ) VALUES (
                      'cap_00000000000000000000000000000000', 0, 'request', '{}', '', '', '', '',
-                     'faithful', '{}'
+                     '', '', '', '', 'faithful', '{}'
                  );
                  INSERT INTO capture_cache(request_key, capture_id, analysis_key) VALUES (
                      'request', 'cap_00000000000000000000000000000000',
@@ -2824,9 +2862,12 @@ mod tests {
             .connection
             .execute(
                 "INSERT INTO captures(
-                     id, created_at_ms, request_key, request_json, rustc_release, rustc_commit,
-                     llvm_version, target, profile, invocation_json
-                 ) VALUES (?1, 0, 'lookup', '{}', '', '', '', '', 'faithful', '{}')",
+                     id, created_at_ms, request_key, request_json, rustc_path, rustc_release,
+                     rustc_commit, rustc_host, llvm_version, rustc_sysroot, llvm_dis_path, target,
+                     profile, invocation_json
+                 ) VALUES (
+                     ?1, 0, 'lookup', '{}', '', '', '', '', '', '', '', '', 'faithful', '{}'
+                 )",
                 [lookup_capture_id().as_str()],
             )
             .expect("the test can insert the lookup capture");

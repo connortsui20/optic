@@ -210,7 +210,7 @@ pub struct EnvironmentVariable {
     pub value: String,
 }
 
-/// The unstable-access mechanism used by Optic for one compiler subprocess.
+/// One unstable-access mechanism that Optic can use in a bounded compiler subprocess.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum UnstableAccessMechanism {
@@ -218,7 +218,7 @@ pub enum UnstableAccessMechanism {
     RustcBootstrap,
 }
 
-/// One child-process scope in which Optic enables unstable compiler access.
+/// One child-process scope in which Optic is authorized to enable unstable compiler access.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum UnstableAccessScope {
@@ -232,14 +232,18 @@ pub enum UnstableAccessScope {
     SelectedTarget,
 }
 
-/// Unstable compiler access that Optic injected for a capture.
+/// The bounded unstable-access policy for one capture.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UnstableAccess {
-    /// The mechanism used for each recorded scope.
+    /// The mechanism available to each authorized scope.
     pub mechanism: UnstableAccessMechanism,
 
-    /// The only child-process scopes that receive the mechanism.
-    pub scopes: Vec<UnstableAccessScope>,
+    /// The only child-process scopes in which Optic can use the mechanism.
+    ///
+    /// A scope can be authorized without running. For example, Optic does not build a cached
+    /// compiler driver again.
+    #[serde(alias = "scopes")]
+    pub authorized_scopes: Vec<UnstableAccessScope>,
 }
 
 /// The request and effective process metadata for one Cargo analysis.
@@ -263,7 +267,7 @@ pub struct CaptureInvocation {
     /// Compiler arguments injected to collect evidence or implement the capture profile.
     pub injected_rustc_arguments: Vec<String>,
 
-    /// Unstable compiler access injected by Optic.
+    /// The bounded policy for unstable compiler access.
     pub unstable_access: UnstableAccess,
 }
 
@@ -364,7 +368,7 @@ pub fn compile(request: &BuildRequest) -> Result<CompileOutcome> {
         injected_rustc_arguments: injected_rustc_arguments(request),
         unstable_access: UnstableAccess {
             mechanism: UnstableAccessMechanism::RustcBootstrap,
-            scopes: vec![
+            authorized_scopes: vec![
                 UnstableAccessScope::CargoConfigDiscovery,
                 UnstableAccessScope::DriverBuild,
                 UnstableAccessScope::SelectedTarget,
@@ -1005,7 +1009,10 @@ mod tests {
         collect_remarks_with_limits, injected_rustc_arguments, prepare_analysis_directory,
         prepare_remarks_directory, requested_remarks,
     };
-    use crate::{BuildRequest, CaptureProfile, Error, LlvmStage, LtoScope};
+    use crate::{
+        BuildRequest, CaptureProfile, Error, LlvmStage, LtoScope, UnstableAccess,
+        UnstableAccessScope,
+    };
 
     const REMARK: &str = r#"--- !Passed
 Pass: inline
@@ -1015,6 +1022,27 @@ Args:
   - String: inlined
 ...
 "#;
+
+    #[test]
+    fn unstable_access_serializes_authorized_scopes_and_accepts_the_legacy_name() {
+        let policy = serde_json::from_value::<UnstableAccess>(serde_json::json!({
+            "mechanism": "rustc-bootstrap",
+            "scopes": ["selected-target"],
+        }))
+        .expect("the legacy scope name remains readable");
+
+        assert_eq!(
+            policy.authorized_scopes,
+            vec![UnstableAccessScope::SelectedTarget]
+        );
+        assert_eq!(
+            serde_json::to_value(policy).expect("the policy is serializable"),
+            serde_json::json!({
+                "mechanism": "rustc-bootstrap",
+                "authorized_scopes": ["selected-target"],
+            })
+        );
+    }
 
     #[test]
     fn renders_cargo_json_diagnostics_and_standard_error() {
