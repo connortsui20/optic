@@ -468,6 +468,46 @@ fn captures_finds_and_shows_concrete_generic_instances() {
 }
 
 #[test]
+fn resumes_retained_ingestion_before_cargo_even_with_fresh() {
+    let fixture = Fixture::new();
+    let catalog = fixture.install_failing_capture_trigger();
+    let failed = fixture.run(capture_fresh_arguments());
+    assert!(!failed.status.success());
+    assert!(string(&json(&failed), "/error/message").contains("test capture publication failure"));
+    let retained = json(&fixture.run(["status", "--format", "json"]));
+    assert_eq!(retained["result"]["pending"], 1);
+    catalog
+        .execute("DROP TRIGGER fail_capture_publication", [])
+        .expect("the test can enable capture publication");
+
+    let resumed = fixture.run(capture_fresh_arguments());
+    assert_success(&resumed);
+    assert_eq!(json(&resumed)["result"]["disposition"], "resumed");
+    let completed = json(&fixture.run(["status", "--format", "json"]));
+    assert_eq!(completed["result"]["pending"], 0);
+}
+
+#[test]
+fn changed_cargo_input_discards_retained_ingestion() {
+    let fixture = Fixture::new();
+    let catalog = fixture.install_failing_capture_trigger();
+    let failed = fixture.run(capture_fresh_arguments());
+    assert!(!failed.status.success());
+    fs::write(
+        fixture.root.join("kernel/src/build-data.txt"),
+        "changed after compilation\n",
+    )
+    .expect("the test can change the included compiler input");
+    catalog
+        .execute("DROP TRIGGER fail_capture_publication", [])
+        .expect("the test can enable capture publication");
+
+    let captured = fixture.run(capture_fresh_arguments());
+    assert_success(&captured);
+    assert_eq!(json(&captured)["result"]["disposition"], "captured");
+}
+
+#[test]
 fn cargo_observed_reuse_tracks_non_rust_and_environment_inputs() {
     let fixture = Fixture::new();
     let arguments = [
@@ -745,12 +785,44 @@ impl Fixture {
         fs::write(&path, source).expect("the test can change the fixture source");
     }
 
+    fn install_failing_capture_trigger(&self) -> Connection {
+        assert_success(&self.run(["status"]));
+        let catalog = Connection::open(self.root.join(".optic/store/catalog.sqlite"))
+            .expect("the test can open the Optic catalog");
+        catalog
+            .execute_batch(
+                "CREATE TRIGGER fail_capture_publication
+                 BEFORE INSERT ON captures
+                 BEGIN
+                     SELECT RAISE(FAIL, 'test capture publication failure');
+                 END;",
+            )
+            .expect("the test can disable capture publication");
+
+        catalog
+    }
+
     fn work_is_empty(&self) -> bool {
         fs::read_dir(self.root.join(".optic/store/work"))
             .expect("the store contains a work directory")
             .next()
             .is_none()
     }
+}
+
+fn capture_fresh_arguments() -> [&'static str; 10] {
+    [
+        "capture",
+        "-p",
+        "optic-mvp-app",
+        "--bin",
+        "optic-mvp-app",
+        "--release",
+        "--fresh",
+        "--format",
+        "json",
+        "--locked",
+    ]
 }
 
 #[track_caller]
