@@ -21,7 +21,8 @@ use crate::{
     ArtifactSummary, BodyView, BuildSpec, CaptureDetails, CaptureDisposition, CaptureId,
     CaptureProfile, CaptureSummary, CommandView, CompilerOutput, EnvironmentView, Error,
     FindMatchKind, FindOptions, FindResult, GcSummary, InstanceId, InstanceSummary,
-    OutputAvailability, RemoveSummary, Result, ShowView, SourceLocation, StoreStatus, VerifySummary,
+    OutputAvailability, RemoveSummary, Result, ShowView, SourceLocation, StoreStatus,
+    VerifySummary,
 };
 
 const STORE_VERSION: u32 = 7;
@@ -278,12 +279,7 @@ impl Store {
             },
         )?;
         let evidence_index = insert_modules(&transaction, capture_id, &modules)?;
-        insert_instances(
-            &transaction,
-            capture_id,
-            &bundle.instances,
-            &evidence_index,
-        )?;
+        insert_instances(&transaction, capture_id, &bundle.instances, &evidence_index)?;
         insert_sources(&transaction, capture_id, &published_sources)?;
         transaction.execute(
             "INSERT INTO capture_cache(request_key, capture_id, analysis_key) VALUES (?1, ?2, ?3)
@@ -869,7 +865,8 @@ impl Store {
         options: &FindOptions,
     ) -> Result<Vec<InstanceId>> {
         let selection = match match_kind {
-            InstanceMatch::Exact => "instances.id IN (
+            InstanceMatch::Exact => {
+                "instances.id IN (
                 SELECT exact_definition.id
                 FROM definitions AS exact_origin
                 JOIN instances AS exact_definition
@@ -881,11 +878,14 @@ impl Store {
                 UNION
                 SELECT exact_symbol.id FROM instances AS exact_symbol
                 WHERE exact_symbol.capture_id = ?1 AND exact_symbol.compiler_symbol = ?2
-            )",
-            InstanceMatch::Substring => "instances.rowid IN (
+            )"
+            }
+            InstanceMatch::Substring => {
+                "instances.rowid IN (
                 SELECT instance_search.rowid FROM instance_search
                 WHERE instance_search MATCH ?2 AND instance_search.capture_id = ?1
-            )",
+            )"
+            }
         };
         let sql = format!(
             "SELECT instances.id
@@ -899,7 +899,8 @@ impl Store {
                    OR (?5 = 'llvm-optimized' AND instances.llvm_definitions > 0)
                    OR (?5 = 'llvm-pre-optimization' AND instances.pre_opt_definitions > 0)
                )
-             ORDER BY instances.display_name, instances.id
+             ORDER BY instances.display_name, definitions.path,
+                      instances.compiler_symbol, instances.id
              LIMIT ?6"
         );
         let mut statement = self.connection.prepare(&sql)?;
@@ -927,14 +928,29 @@ impl Store {
     }
 
     fn hydrate_instances(&self, instance_ids: &[InstanceId]) -> Result<Vec<InstanceSummary>> {
-        let mut statement = self
-            .connection
-            .prepare(&format!("{} WHERE instances.id = ?1", instance_select()))?;
-        let mut instances = Vec::with_capacity(instance_ids.len());
-
-        for instance_id in instance_ids {
-            instances.push(statement.query_row([instance_id.as_str()], instance_from_row)?);
+        if instance_ids.is_empty() {
+            return Ok(Vec::new());
         }
+
+        let requested = instance_ids
+            .iter()
+            .enumerate()
+            .map(|(position, _)| format!("(?{}, {position})", position + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "WITH requested(id, position) AS (VALUES {requested})
+             {} JOIN requested ON requested.id = instances.id
+             ORDER BY requested.position",
+            instance_select()
+        );
+        let mut statement = self.connection.prepare(&sql)?;
+        let instances = statement
+            .query_map(
+                rusqlite::params_from_iter(instance_ids.iter().map(InstanceId::as_str)),
+                instance_from_row,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(instances)
     }
@@ -944,9 +960,13 @@ impl Store {
             "SELECT EXISTS(
                  SELECT 1 FROM instances
                  LEFT JOIN instance_search ON instance_search.rowid = instances.rowid
+                 JOIN definitions ON definitions.id = instances.definition_id
                  WHERE instance_search.rowid IS NULL
                     OR instance_search.instance_id != instances.id
                     OR instance_search.capture_id != instances.capture_id
+                    OR instance_search.definition_path != definitions.path
+                    OR instance_search.display_name != instances.display_name
+                    OR instance_search.compiler_symbol != instances.compiler_symbol
              )",
             [],
             |row| row.get::<_, bool>(0),
@@ -1342,23 +1362,28 @@ fn create_schema(connection: &mut Connection) -> Result<()> {
              source_line_end INTEGER,
              source_column_end INTEGER
          );
-         CREATE INDEX definitions_path ON definitions(capture_id, path);
-         CREATE INDEX definitions_crate_name ON definitions(capture_id, crate_name);
+         CREATE INDEX definitions_path ON definitions(capture_id, path, id);
+         CREATE INDEX definitions_identity ON definitions(capture_id, crate_name, path, id);
          CREATE TABLE instances(
              id TEXT PRIMARY KEY,
              capture_id TEXT NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
              definition_id TEXT NOT NULL REFERENCES definitions(id) ON DELETE CASCADE,
              display_name TEXT NOT NULL,
              compiler_symbol TEXT NOT NULL,
-             llvm_definitions INTEGER NOT NULL DEFAULT 0,
-             llvm_declarations INTEGER NOT NULL DEFAULT 0,
-             llvm_aliases INTEGER NOT NULL DEFAULT 0,
-             pre_opt_definitions INTEGER NOT NULL DEFAULT 0,
-             pre_opt_declarations INTEGER NOT NULL DEFAULT 0,
-             pre_opt_aliases INTEGER NOT NULL DEFAULT 0
+             llvm_definitions INTEGER NOT NULL DEFAULT 0 CHECK(llvm_definitions >= 0),
+             llvm_declarations INTEGER NOT NULL DEFAULT 0 CHECK(llvm_declarations >= 0),
+             llvm_aliases INTEGER NOT NULL DEFAULT 0 CHECK(llvm_aliases >= 0),
+             pre_opt_definitions INTEGER NOT NULL DEFAULT 0 CHECK(pre_opt_definitions >= 0),
+             pre_opt_declarations INTEGER NOT NULL DEFAULT 0 CHECK(pre_opt_declarations >= 0),
+             pre_opt_aliases INTEGER NOT NULL DEFAULT 0 CHECK(pre_opt_aliases >= 0)
          );
-         CREATE INDEX instances_display_name ON instances(capture_id, display_name);
-         CREATE INDEX instances_compiler_symbol ON instances(capture_id, compiler_symbol);
+         CREATE INDEX instances_definition ON instances(capture_id, definition_id, id);
+         CREATE INDEX instances_display_name ON instances(capture_id, display_name, id);
+         CREATE INDEX instances_compiler_symbol ON instances(capture_id, compiler_symbol, id);
+         CREATE INDEX instances_llvm_available ON instances(capture_id, id)
+             WHERE llvm_definitions > 0;
+         CREATE INDEX instances_pre_opt_available ON instances(capture_id, id)
+             WHERE pre_opt_definitions > 0;
          CREATE VIRTUAL TABLE instance_search USING fts5(
              instance_id UNINDEXED,
              capture_id UNINDEXED,
@@ -1603,7 +1628,10 @@ fn insert_instances(
                 instance.display_name,
                 instance.raw_symbol,
                 sqlite_usize("optimized LLVM definitions", availability.llvm_definitions)?,
-                sqlite_usize("optimized LLVM declarations", availability.llvm_declarations)?,
+                sqlite_usize(
+                    "optimized LLVM declarations",
+                    availability.llvm_declarations
+                )?,
                 sqlite_usize("optimized LLVM aliases", availability.llvm_aliases)?,
                 sqlite_usize(
                     "pre-optimization LLVM definitions",
@@ -2042,15 +2070,20 @@ mod tests {
     use std::fs::{self, OpenOptions};
     use std::io;
 
-    use cargo_ir::{CompilerInstance, DefinitionOrigin};
+    use cargo_ir::{
+        ArtifactProvenance, BodyRange, CaptureMethod, CompilerInstance, DefinitionOrigin, LtoScope,
+    };
     use fs2::FileExt as _;
     use rusqlite::Connection;
 
     use super::{
-        IndexedBody, STORE_VERSION, Store, bodies_for_instance, lock_workspace_exclusive,
-        lock_workspace_shared, unique_prefix_length,
+        IndexedBody, PublishedModule, STORE_VERSION, Store, bodies_for_instance, insert_instances,
+        insert_modules, lock_workspace_exclusive, lock_workspace_shared, unique_prefix_length,
     };
-    use crate::{CaptureDisposition, CaptureId, Error, InstanceId};
+    use crate::{
+        CaptureDisposition, CaptureId, CompilerOutput, Error, FindMatchKind, FindOptions,
+        InstanceId,
+    };
 
     #[test]
     fn creates_the_store_below_the_retained_optic_root() {
@@ -2237,6 +2270,318 @@ mod tests {
             .expect("the selected optimized artifact is readable");
 
         assert_eq!(selected, "thin");
+    }
+
+    #[test]
+    fn materialized_availability_uses_only_the_selected_thin_lto_body() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let mut store = lookup_store(temporary.path());
+        let capture_id = lookup_capture_id();
+        let body = BodyRange {
+            raw_symbol: "_Rthin".to_owned(),
+            demangled: "crate_a::thin".to_owned(),
+            start: 0,
+            end: 1,
+        };
+        let modules = [
+            published_module("rcgu", "rcgu", false, body.clone()),
+            published_module("thin", "thin-lto-after-pm", true, body),
+        ];
+        let instance = CompilerInstance {
+            origin: DefinitionOrigin {
+                crate_name: "crate_a".to_owned(),
+                definition_path: "crate_a::thin".to_owned(),
+                source: None,
+            },
+            display_name: "crate_a::thin".to_owned(),
+            raw_symbol: "_Rthin".to_owned(),
+            placements: Vec::new(),
+        };
+        let transaction = store
+            .connection
+            .transaction()
+            .expect("the test can start a catalog transaction");
+        let index = insert_modules(&transaction, &capture_id, &modules)
+            .expect("the test can index the duplicate compiler stages");
+        insert_instances(&transaction, &capture_id, &[instance], &index)
+            .expect("the test can materialize instance availability");
+        transaction
+            .commit()
+            .expect("the test can commit materialized availability");
+
+        let result = store
+            .find(&capture_id, &FindOptions::new("crate_a::thin"))
+            .expect("the exact lookup succeeds");
+        let optimized = &result.instances[0].availability[0];
+
+        assert_eq!(optimized.definitions, 1);
+    }
+
+    #[test]
+    fn exact_lookup_accepts_a_short_query_and_exposes_symbol_identity() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let store = lookup_store(temporary.path());
+        insert_search_instance(
+            &store,
+            1,
+            "left",
+            "crate_a",
+            "x",
+            "x::<u64>",
+            "_Rexact",
+            [1, 0, 0, 0, 0, 0],
+        );
+        let capture_id = lookup_capture_id();
+
+        let result = store
+            .find(&capture_id, &FindOptions::new("x"))
+            .expect("the exact lookup succeeds");
+
+        assert_eq!(result.match_kind, FindMatchKind::Exact);
+        assert!(!result.truncated);
+        assert_eq!(result.instances.len(), 1);
+        assert_eq!(result.instances[0].compiler_symbol, "_Rexact");
+        assert_eq!(
+            result.instances[0].symbol_fingerprint,
+            &blake3::hash(b"_Rexact").to_hex()[..12]
+        );
+    }
+
+    #[test]
+    fn short_substring_lookup_is_rejected_after_an_exact_miss() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let store = lookup_store(temporary.path());
+        insert_search_instance(
+            &store,
+            1,
+            "short",
+            "crate_a",
+            "crate_a::kernel",
+            "crate_a::kernel",
+            "_Rshort",
+            [1, 0, 0, 0, 0, 0],
+        );
+
+        assert!(matches!(
+            store.find(&lookup_capture_id(), &FindOptions::new("ke")),
+            Err(Error::InvalidRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn substring_lookup_is_case_sensitive_unicode_and_literal() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let store = lookup_store(temporary.path());
+        insert_search_instance(
+            &store,
+            1,
+            "unicode",
+            "crate_a",
+            "crate_a::Café[slot]",
+            "crate_a::Café[slot]::<u64>",
+            "_Runicode",
+            [1, 0, 0, 0, 0, 0],
+        );
+
+        let literal = store
+            .find(&lookup_capture_id(), &FindOptions::new("fé[slot]"))
+            .expect("FTS treats punctuation as literal text");
+        let different_case = store
+            .find(&lookup_capture_id(), &FindOptions::new("CAFÉ"))
+            .expect("a different case is a valid lookup");
+
+        assert_eq!(literal.match_kind, FindMatchKind::Substring);
+        assert_eq!(literal.instances.len(), 1);
+        assert!(different_case.instances.is_empty());
+    }
+
+    #[test]
+    fn substring_lookup_quotes_fts_operators_and_double_quotes() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let store = lookup_store(temporary.path());
+        insert_search_instance(
+            &store,
+            1,
+            "operators",
+            "crate_a",
+            "crate_a::kernel_\"AND OR NOT\"",
+            "crate_a::kernel_\"AND OR NOT\"::<u64>",
+            "_Roperators",
+            [1, 0, 0, 0, 0, 0],
+        );
+
+        let result = store
+            .find(&lookup_capture_id(), &FindOptions::new("\"AND OR NOT\""))
+            .expect("FTS operators and quotes are literal text");
+
+        assert_eq!(result.instances.len(), 1);
+        assert_eq!(result.match_kind, FindMatchKind::Substring);
+    }
+
+    #[test]
+    fn lookup_filters_availability_and_reports_truncation() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let store = lookup_store(temporary.path());
+        insert_search_instance(
+            &store,
+            1,
+            "first",
+            "crate_a",
+            "crate_a::common_first",
+            "common::<u32>",
+            "_Rfirst",
+            [1, 0, 0, 0, 0, 0],
+        );
+        insert_search_instance(
+            &store,
+            2,
+            "second",
+            "crate_b",
+            "crate_b::common_second",
+            "common::<u64>",
+            "_Rsecond",
+            [0, 0, 0, 1, 0, 0],
+        );
+        let mut options = FindOptions::new("common");
+        options.crate_name = Some("crate_b".to_owned());
+        options.definition = Some("crate_b::common_second".to_owned());
+        options.available = Some(CompilerOutput::LlvmPreOpt);
+        options.limit = 1;
+
+        let filtered = store
+            .find(&lookup_capture_id(), &options)
+            .expect("the filtered lookup succeeds");
+        options.crate_name = None;
+        options.definition = None;
+        options.available = None;
+        let truncated = store
+            .find(&lookup_capture_id(), &options)
+            .expect("the limited lookup succeeds");
+
+        assert_eq!(filtered.instances.len(), 1);
+        assert_eq!(filtered.instances[0].crate_name, "crate_b");
+        assert!(!filtered.truncated);
+        assert_eq!(truncated.instances.len(), 1);
+        assert!(truncated.truncated);
+    }
+
+    #[test]
+    fn capture_removal_cleans_the_explicit_search_index() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let mut store = lookup_store(temporary.path());
+        insert_search_instance(
+            &store,
+            1,
+            "remove",
+            "crate_a",
+            "crate_a::remove_kernel",
+            "crate_a::remove_kernel",
+            "_Rremove",
+            [1, 0, 0, 0, 0, 0],
+        );
+
+        store
+            .remove_capture(&lookup_capture_id())
+            .expect("capture removal succeeds");
+        let rows = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM instance_search", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("the search index remains readable");
+
+        assert_eq!(rows, 0);
+        store.verify().expect("the empty search index verifies");
+    }
+
+    #[test]
+    fn verification_rejects_stale_search_text() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let store = lookup_store(temporary.path());
+        insert_search_instance(
+            &store,
+            1,
+            "stale",
+            "crate_a",
+            "crate_a::kernel",
+            "crate_a::kernel",
+            "_Rstale",
+            [1, 0, 0, 0, 0, 0],
+        );
+        store
+            .connection
+            .execute("UPDATE instance_search SET display_name = 'corrupt'", [])
+            .expect("the test can corrupt the search index");
+
+        assert!(matches!(
+            store.verify(),
+            Err(Error::InvalidStoredData { .. })
+        ));
+    }
+
+    #[test]
+    #[ignore = "creates a synthetic 100,000-instance lookup catalog"]
+    fn broad_lookup_stays_below_one_second_after_warmup() {
+        use std::time::{Duration, Instant};
+
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let store = lookup_store(temporary.path());
+        store
+            .connection
+            .execute_batch(
+                "BEGIN;
+                 WITH RECURSIVE numbers(value) AS (
+                     VALUES(1)
+                     UNION ALL
+                     SELECT value + 1 FROM numbers WHERE value < 100000
+                 )
+                 INSERT INTO definitions(id, capture_id, crate_name, path)
+                 SELECT 'def_' || printf('%032x', value),
+                        'cap_11111111111111111111111111111111',
+                        'synthetic',
+                        'synthetic::synthetic_kernel_' || printf('%06d', value)
+                 FROM numbers;
+                 INSERT INTO instances(
+                     id, capture_id, definition_id, display_name, compiler_symbol,
+                     llvm_definitions
+                 )
+                 SELECT 'ins_' || substr(definitions.id, 5),
+                        definitions.capture_id,
+                        definitions.id,
+                        definitions.path,
+                        '_Rsynthetic_' || substr(definitions.id, 5),
+                        1
+                 FROM definitions;
+                 INSERT INTO instance_search(
+                     rowid, instance_id, capture_id, definition_path, display_name,
+                     compiler_symbol
+                 )
+                 SELECT instances.rowid, instances.id, instances.capture_id, definitions.path,
+                        instances.display_name, instances.compiler_symbol
+                 FROM instances JOIN definitions ON definitions.id = instances.definition_id;
+                 COMMIT;",
+            )
+            .expect("the test can create the synthetic lookup catalog");
+        let options = FindOptions::new("synthetic_kernel");
+        let run = || {
+            let start = Instant::now();
+            let result = store
+                .find(&lookup_capture_id(), &options)
+                .expect("the synthetic lookup succeeds");
+            assert_eq!(result.instances.len(), FindOptions::DEFAULT_LIMIT);
+            assert!(result.truncated);
+
+            start.elapsed()
+        };
+        let _warmup = run();
+        let samples = (0..5).map(|_| run()).collect::<Vec<_>>();
+
+        eprintln!("100k lookup samples: {samples:?}");
+        assert!(
+            samples
+                .iter()
+                .all(|sample| *sample < Duration::from_secs(1))
+        );
     }
 
     #[test]
@@ -2471,6 +2816,125 @@ mod tests {
 
         assert_eq!(summary.id, capture_id);
         assert_eq!(summary.disposition, CaptureDisposition::Resumed);
+    }
+
+    fn lookup_store(path: &std::path::Path) -> Store {
+        let store = Store::open(path).expect("the test can open a lookup store");
+        store
+            .connection
+            .execute(
+                "INSERT INTO captures(
+                     id, created_at_ms, request_key, request_json, rustc_release, rustc_commit,
+                     llvm_version, target, profile, invocation_json
+                 ) VALUES (?1, 0, 'lookup', '{}', '', '', '', '', 'faithful', '{}')",
+                [lookup_capture_id().as_str()],
+            )
+            .expect("the test can insert the lookup capture");
+
+        store
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_search_instance(
+        store: &Store,
+        rowid: i64,
+        id_suffix: &str,
+        crate_name: &str,
+        definition: &str,
+        display_name: &str,
+        compiler_symbol: &str,
+        availability: [i64; 6],
+    ) {
+        let definition_id = format!("def_{id_suffix}");
+        let instance_id = format!("ins_{rowid:032x}");
+        store
+            .connection
+            .execute(
+                "INSERT INTO definitions(id, capture_id, crate_name, path)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    definition_id,
+                    lookup_capture_id().as_str(),
+                    crate_name,
+                    definition,
+                ],
+            )
+            .expect("the test can insert a searchable definition");
+        store
+            .connection
+            .execute(
+                "INSERT INTO instances(
+                     id, capture_id, definition_id, display_name, compiler_symbol,
+                     llvm_definitions, llvm_declarations, llvm_aliases,
+                     pre_opt_definitions, pre_opt_declarations, pre_opt_aliases
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                rusqlite::params![
+                    instance_id,
+                    lookup_capture_id().as_str(),
+                    definition_id,
+                    display_name,
+                    compiler_symbol,
+                    availability[0],
+                    availability[1],
+                    availability[2],
+                    availability[3],
+                    availability[4],
+                    availability[5],
+                ],
+            )
+            .expect("the test can insert a searchable instance");
+        let stored_rowid = store.connection.last_insert_rowid();
+        store
+            .connection
+            .execute(
+                "INSERT INTO instance_search(
+                     rowid, instance_id, capture_id, definition_path, display_name,
+                     compiler_symbol
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    stored_rowid,
+                    instance_id,
+                    lookup_capture_id().as_str(),
+                    definition,
+                    display_name,
+                    compiler_symbol,
+                ],
+            )
+            .expect("the test can index a searchable instance");
+    }
+
+    fn lookup_capture_id() -> CaptureId {
+        "cap_11111111111111111111111111111111"
+            .parse()
+            .expect("the lookup capture ID is valid")
+    }
+
+    fn published_module(
+        name: &str,
+        compiler_stage: &str,
+        selected: bool,
+        body: BodyRange,
+    ) -> PublishedModule {
+        PublishedModule {
+            name: name.to_owned(),
+            provenance: ArtifactProvenance {
+                stage: Some(crate::LlvmStage::Optimized),
+                compiler_stage: compiler_stage.to_owned(),
+                codegen_unit: Some("crate.cgu.0".to_owned()),
+                lto: if selected {
+                    LtoScope::Thin
+                } else {
+                    LtoScope::None
+                },
+                capture_method: CaptureMethod::SavedTemporary,
+            },
+            bitcode_blob: format!("{name}-bc"),
+            text_blob: format!("{name}-ll"),
+            bodies: vec![body],
+            declarations: Vec::new(),
+            aliases: Vec::new(),
+            selected,
+        }
     }
 
     #[track_caller]

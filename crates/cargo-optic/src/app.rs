@@ -291,20 +291,7 @@ impl Application {
     /// Returns an error if the options are invalid, the capture selector is not unique, or the
     /// catalog cannot be read.
     pub fn find(&self, capture_id: &CaptureId, options: &FindOptions) -> Result<FindResult> {
-        if options.query.is_empty() {
-            return Err(crate::Error::InvalidRequest {
-                message: "find requires a non-empty query, got an empty query".to_owned(),
-            });
-        }
-        if !(1..=FindOptions::MAX_LIMIT).contains(&options.limit) {
-            return Err(crate::Error::InvalidRequest {
-                message: format!(
-                    "find limit must be from 1 through {}, got {}",
-                    FindOptions::MAX_LIMIT,
-                    options.limit
-                ),
-            });
-        }
+        validate_find_options(options)?;
 
         self.store.find(capture_id, options)
     }
@@ -426,6 +413,30 @@ impl Application {
     }
 }
 
+fn validate_find_options(options: &FindOptions) -> Result<()> {
+    if options.query.is_empty() {
+        return Err(crate::Error::InvalidRequest {
+            message: "find requires a non-empty query, got an empty query".to_owned(),
+        });
+    }
+    if options.query.contains('\0') {
+        return Err(crate::Error::InvalidRequest {
+            message: "find query must not contain NUL, got a query with NUL".to_owned(),
+        });
+    }
+    if !(1..=FindOptions::MAX_LIMIT).contains(&options.limit) {
+        return Err(crate::Error::InvalidRequest {
+            message: format!(
+                "find limit must be from 1 through {}, got {}",
+                FindOptions::MAX_LIMIT,
+                options.limit
+            ),
+        });
+    }
+
+    Ok(())
+}
+
 fn metadata(directory: &Path, manifest_path: Option<&Path>) -> Result<cargo_metadata::Metadata> {
     let mut command = cargo_metadata::MetadataCommand::new();
     command.current_dir(directory).no_deps();
@@ -541,6 +552,27 @@ fn remove_pending(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use crate::{Error, FindOptions};
+
+    #[test]
+    fn find_options_reject_nul_and_out_of_range_limits() {
+        assert!(matches!(
+            super::validate_find_options(&FindOptions::new("kernel\0suffix")),
+            Err(Error::InvalidRequest { .. })
+        ));
+        let mut options = FindOptions::new("kernel");
+        options.limit = 0;
+        assert!(matches!(
+            super::validate_find_options(&options),
+            Err(Error::InvalidRequest { .. })
+        ));
+        options.limit = FindOptions::MAX_LIMIT + 1;
+        assert!(matches!(
+            super::validate_find_options(&options),
+            Err(Error::InvalidRequest { .. })
+        ));
+    }
+
     #[test]
     fn clean_removes_only_current_and_legacy_evidence() {
         use std::fs;

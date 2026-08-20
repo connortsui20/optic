@@ -136,11 +136,26 @@ fn captures_finds_and_shows_concrete_generic_instances() {
     ]);
     assert_success(&found);
     let found = json(&found);
+    assert_eq!(found["result"]["match_kind"], "exact");
+    assert_eq!(found["result"]["truncated"], false);
     let instances = found["result"]["instances"]
         .as_array()
         .expect("find returns an instance array");
     assert_eq!(instances.len(), 2);
     assert!(instances.iter().all(has_optimized_definition));
+    assert!(instances.iter().all(|instance| {
+        instance["compiler_symbol"]
+            .as_str()
+            .is_some_and(|symbol| !symbol.is_empty())
+            && instance["symbol_fingerprint"]
+                .as_str()
+                .is_some_and(|fingerprint| {
+                    fingerprint.len() == 12
+                        && fingerprint
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+    }));
     let reexported = fixture.run([
         "find",
         "--capture",
@@ -159,6 +174,67 @@ fn captures_finds_and_shows_concrete_generic_instances() {
     assert_eq!(
         reexported_instances[0]["definition"],
         "optic_mvp_kernel::ReexportedKernel::identity"
+    );
+    let filtered = fixture.run([
+        "find",
+        "--capture",
+        capture_prefix,
+        "optic_mvp_kernel::ReexportedKernel::identity",
+        "--crate",
+        "optic_mvp_kernel",
+        "--definition",
+        "optic_mvp_kernel::ReexportedKernel::identity",
+        "--available",
+        "llvm",
+        "--limit",
+        "1",
+        "--format",
+        "json",
+    ]);
+    assert_success(&filtered);
+    let filtered = json(&filtered);
+    assert_eq!(
+        filtered["result"]["instances"]
+            .as_array()
+            .expect("filtered find returns candidates")
+            .len(),
+        1
+    );
+
+    let limited = fixture.run([
+        "find",
+        "--capture",
+        capture_prefix,
+        "optic_mvp_kernel",
+        "--limit",
+        "1",
+        "--format",
+        "json",
+    ]);
+    assert_success(&limited);
+    let limited = json(&limited);
+    assert_eq!(limited["result"]["match_kind"], "substring");
+    assert_eq!(limited["result"]["truncated"], true);
+    assert_eq!(
+        limited["result"]["instances"]
+            .as_array()
+            .expect("limited find returns candidates")
+            .len(),
+        1
+    );
+
+    let short_substring = fixture.run([
+        "find",
+        "--capture",
+        capture_prefix,
+        "zz",
+        "--format",
+        "json",
+    ]);
+    assert!(!short_substring.status.success());
+    assert!(
+        String::from_utf8_lossy(&short_substring.stdout)
+            .contains("substring queries must contain at least 3 Unicode characters")
     );
 
     let generic_method = fixture.run([
@@ -567,7 +643,7 @@ fn malformed_arguments_use_the_json_error_contract() {
         assert_eq!(output.status.code(), Some(2));
         assert!(output.stderr.is_empty());
         let output = json(&output);
-        assert_eq!(output["version"], 2);
+        assert_eq!(output["version"], 3);
         assert_eq!(output["ok"], false);
         assert_eq!(output["error"]["code"], "invalid_arguments");
     }
@@ -892,13 +968,22 @@ fn has_optimized_definition(instance: &Value) -> bool {
 
 #[track_caller]
 fn stored_instance_ids(fixture: &Fixture, capture_id: &str) -> Vec<String> {
-    let output = fixture.run(["find", "--capture", capture_id, "", "--format", "json"]);
+    let output = fixture.run([
+        "find",
+        "--capture",
+        capture_id,
+        "optic_mvp",
+        "--limit",
+        "500",
+        "--format",
+        "json",
+    ]);
     assert_success(&output);
     let output = json(&output);
 
     output["result"]["instances"]
         .as_array()
-        .expect("an empty query returns all instances")
+        .expect("the fixture query returns instances")
         .iter()
         .map(|instance| {
             instance["id"]

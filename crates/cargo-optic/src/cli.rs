@@ -1440,7 +1440,12 @@ fn instance_text(
     if disambiguate {
         let origin = instance.source.as_ref().map_or_else(
             || instance.definition.clone(),
-            |source| format!("{} at {}:{}", instance.definition, source.path, source.line_start),
+            |source| {
+                format!(
+                    "{} at {}:{}",
+                    instance.definition, source.path, source.line_start
+                )
+            },
         );
         writeln!(
             output,
@@ -1618,7 +1623,10 @@ fn normalized_arguments() -> Vec<OsString> {
 
 #[cfg(test)]
 mod tests {
-    use super::DisplayIdentifier;
+    use super::{DisplayIdentifier, find_text};
+    use crate::{
+        CaptureId, FindMatchKind, FindResult, InstanceId, InstanceSummary, SourceLocation,
+    };
 
     #[test]
     fn displays_twelve_hexadecimal_characters() {
@@ -1637,6 +1645,60 @@ mod tests {
         assert_eq!(identifier.unique_prefix_length, 17);
     }
 
+    #[test]
+    fn plain_find_disambiguates_only_duplicate_display_names() {
+        let duplicate = instance_summary(
+            "ins_11111111111111111111111111111111",
+            "same",
+            "crate_a::first",
+            "_Rfirst",
+            "111111111111",
+            Some("src/lib.rs"),
+        );
+        let second_duplicate = instance_summary(
+            "ins_22222222222222222222222222222222",
+            "same",
+            "crate_a::second",
+            "_Rsecond",
+            "222222222222",
+            None,
+        );
+        let unique = instance_summary(
+            "ins_33333333333333333333333333333333",
+            "unique",
+            "crate_a::unique",
+            "_Runique",
+            "abcdefabcdef",
+            None,
+        );
+        let result = FindResult {
+            capture_id: "cap_11111111111111111111111111111111"
+                .parse::<CaptureId>()
+                .expect("the capture ID is valid"),
+            match_kind: FindMatchKind::Substring,
+            truncated: false,
+            instances: vec![duplicate, second_duplicate, unique],
+        };
+        let display_capture = DisplayIdentifier::full(result.capture_id.as_str());
+        let display_instances = result
+            .instances
+            .iter()
+            .map(|instance| DisplayIdentifier::full(instance.id.as_str()))
+            .collect::<Vec<_>>();
+
+        let output = find_text(
+            &result,
+            &display_capture,
+            &display_instances,
+            &crate::terminal::Terminal::new(false),
+        );
+
+        assert!(output.contains("crate_a::first at src/lib.rs:7  symbol 111111111111"));
+        assert!(output.contains("crate_a::second  symbol 222222222222"));
+        assert!(!output.contains("symbol abcdefabcdef"));
+        assert!(!output.contains("_Rfirst"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn reports_non_utf8_json_paths_as_errors() {
@@ -1653,5 +1715,33 @@ mod tests {
         };
 
         assert!(success(Format::Json, &summary, String::new()).is_err());
+    }
+
+    fn instance_summary(
+        id: &str,
+        display_name: &str,
+        definition: &str,
+        compiler_symbol: &str,
+        symbol_fingerprint: &str,
+        source_path: Option<&str>,
+    ) -> InstanceSummary {
+        InstanceSummary {
+            id: id.parse::<InstanceId>().expect("the instance ID is valid"),
+            crate_name: "crate_a".to_owned(),
+            definition: definition.to_owned(),
+            display_name: display_name.to_owned(),
+            compiler_symbol: compiler_symbol.to_owned(),
+            symbol_fingerprint: symbol_fingerprint.to_owned(),
+            source: source_path.map(|path| SourceLocation {
+                path: path.to_owned(),
+                byte_start: 0,
+                byte_end: 1,
+                line_start: 7,
+                column_start: 0,
+                line_end: 7,
+                column_end: 1,
+            }),
+            availability: Vec::new(),
+        }
     }
 }

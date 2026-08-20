@@ -24,9 +24,9 @@ pub use cargo_ir::LlvmStage;
 pub use model::{
     ArtifactSummary, BodySetDelta, BodySetSummary, BodyView, BuildSpec, BuildTarget, CachePolicy,
     CaptureDetails, CaptureDisposition, CaptureProfile, CaptureSummary, CleanSummary, CommandView,
-    CompareView, CompilerOutput, EnvironmentView, FindMatchKind, FindOptions, FindResult, GcSummary,
-    InstanceSummary, LlvmBodySummary, OutputAvailability, RemoveSummary, ShowView, SourceLocation,
-    SourceView, StoreStatus, VerifySummary,
+    CompareView, CompilerOutput, EnvironmentView, FindMatchKind, FindOptions, FindResult,
+    GcSummary, InstanceSummary, LlvmBodySummary, OutputAvailability, RemoveSummary, ShowView,
+    SourceLocation, SourceView, StoreStatus, VerifySummary,
 };
 
 mod pending;
