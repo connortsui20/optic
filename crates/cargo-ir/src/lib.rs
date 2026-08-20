@@ -25,5 +25,11 @@ pub use mono::{CodegenUnitPlacement, CompilerInstance, DefinitionOrigin, SourceS
 mod request;
 pub use request::{BuildRequest, CaptureProfile, CargoTarget};
 
+mod remarks;
+pub use remarks::{
+    OptimizationRemark, RemarkArgument, RemarkKind, RemarkParseLimits, RemarkSourceLocation,
+    parse_optimization_remarks,
+};
+
 mod toolchain;
 pub use toolchain::{Toolchain, inspect_toolchain, inspect_workspace_toolchain};

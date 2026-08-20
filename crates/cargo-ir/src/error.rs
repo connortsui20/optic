@@ -123,6 +123,16 @@ pub enum Error {
         message: String,
     },
 
+    /// An LLVM optimization-remark file did not satisfy its protocol.
+    #[error("invalid LLVM optimization remarks in {path}: {message}")]
+    InvalidOptimizationRemarks {
+        /// The invalid remark file.
+        path: PathBuf,
+
+        /// The failed protocol requirement.
+        message: String,
+    },
+
     /// Cargo completed a compilation without the required artifacts.
     #[error("Cargo compiled the selected target but produced no supported LLVM artifacts")]
     MissingEvidence,
