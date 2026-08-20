@@ -680,8 +680,12 @@ fn execute(application: &mut Application, cli: Cli) -> Result<Execution, Failure
                 format,
                 &status,
                 format!(
-                    "{} captures, {} blobs, {} bytes\n",
-                    status.captures, status.blobs, status.blob_bytes
+                    "{} captures, {} blobs, {} bytes, {} pending captures, {} pending bytes\n",
+                    status.captures,
+                    status.blobs,
+                    status.blob_bytes,
+                    status.pending,
+                    status.pending_bytes
                 ),
             )
         }
@@ -1126,7 +1130,11 @@ fn capture_text(
     display_id: &DisplayIdentifier,
     terminal: &Terminal,
 ) -> String {
-    let status = if summary.reused { "reused" } else { "captured" };
+    let status = match summary.disposition {
+        crate::CaptureDisposition::Captured => "captured",
+        crate::CaptureDisposition::Reused => "reused",
+        crate::CaptureDisposition::Resumed => "resumed",
+    };
     let find = terminal.command_with_identifier(
         "cargo optic find --capture ",
         &display_id.text,

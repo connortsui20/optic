@@ -14,13 +14,14 @@ use cargo_ir::{EvidenceBundle, LlvmStage, Toolchain};
 use fs2::FileExt;
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use walkdir::WalkDir;
 
 use crate::source::{SourceBaseline, StoredSource};
 use crate::{
-    ArtifactSummary, BodyView, BuildSpec, CaptureDetails, CaptureId, CaptureProfile,
-    CaptureSummary, CommandView, CompilerOutput, EnvironmentView, Error, FindResult, GcSummary,
-    InstanceId, InstanceSummary, OutputAvailability, RemoveSummary, Result, ShowView,
-    SourceLocation, StoreStatus, VerifySummary,
+    ArtifactSummary, BodyView, BuildSpec, CaptureDetails, CaptureDisposition, CaptureId,
+    CaptureProfile, CaptureSummary, CommandView, CompilerOutput, EnvironmentView, Error,
+    FindResult, GcSummary, InstanceId, InstanceSummary, OutputAvailability, RemoveSummary, Result,
+    ShowView, SourceLocation, StoreStatus, VerifySummary,
 };
 
 const STORE_VERSION: u32 = 6;
@@ -33,7 +34,24 @@ impl AnalysisKey {
         Self(uuid::Uuid::new_v4().simple().to_string())
     }
 
-    fn as_str(&self) -> &str {
+    pub(crate) fn parse(value: &str) -> Result<Self> {
+        let valid = value.len() == 32
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        if !valid {
+            return Err(Error::InvalidPendingEvidence {
+                path: PathBuf::from("pending.json"),
+                message: format!(
+                    "analysis key must contain 32 lowercase hexadecimal characters, got {value}"
+                ),
+            });
+        }
+
+        Ok(Self(value.to_owned()))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -81,7 +99,7 @@ pub(crate) struct Store {
 
     blobs: PathBuf,
 
-    work: PathBuf,
+    pending: PathBuf,
 
     connection: Connection,
 }
@@ -147,17 +165,15 @@ impl Store {
             root,
             locks,
             blobs,
-            work,
+            pending,
             connection,
         })
     }
 
-    pub(crate) fn staging_directory(&self, capture_id: &CaptureId) -> PathBuf {
-        self.work.join(capture_id.as_str())
-    }
+    pub(crate) fn pending_directory(&self, request_key: &str) -> Result<PathBuf> {
+        validate_request_key(request_key)?;
 
-    pub(crate) fn analysis_directory(&self, analysis_key: &AnalysisKey) -> PathBuf {
-        self.work.join(analysis_key.as_str())
+        Ok(self.pending.join(request_key))
     }
 
     pub(crate) fn lock_writer(&self) -> Result<FileLock> {
@@ -195,7 +211,7 @@ impl Store {
                 self.verify_capture_blobs(&capture_id)?;
                 Ok(CachedCapture {
                     analysis_key,
-                    summary: self.capture_summary(&capture_id, true)?,
+                    summary: self.capture_summary(&capture_id, CaptureDisposition::Reused)?,
                 })
             })
             .transpose()
@@ -268,7 +284,7 @@ impl Store {
         )?;
         transaction.commit()?;
 
-        self.capture_summary(capture_id, false)
+        self.capture_summary(capture_id, CaptureDisposition::Captured)
     }
 
     pub(crate) fn captures(&self) -> Result<Vec<CaptureSummary>> {
@@ -279,7 +295,9 @@ impl Store {
              FROM captures ORDER BY created_at_ms DESC",
         )?;
         let captures = statement
-            .query_map([], |row| summary_from_row(row, false))?
+            .query_map([], |row| {
+                summary_from_row(row, CaptureDisposition::Captured)
+            })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(captures)
@@ -293,10 +311,14 @@ impl Store {
             })?;
         let blobs = self.blob_entries()?;
 
+        let (pending, pending_bytes) = pending_entries(&self.pending)?;
+
         Ok(StoreStatus {
             captures,
             blobs: blobs.len(),
             blob_bytes: blobs.iter().map(|blob| blob.bytes).sum(),
+            pending,
+            pending_bytes,
         })
     }
 
@@ -364,7 +386,7 @@ impl Store {
 
     pub(crate) fn capture_details(&self, capture_prefix: &CaptureId) -> Result<CaptureDetails> {
         let capture_id = self.resolve_capture(capture_prefix)?;
-        let summary = self.capture_summary(&capture_id, false)?;
+        let summary = self.capture_summary(&capture_id, CaptureDisposition::Captured)?;
         let (request_json, invocation_json) = self.connection.query_row(
             "SELECT request_json, invocation_json FROM captures WHERE id = ?1",
             [capture_id.as_str()],
@@ -655,7 +677,53 @@ impl Store {
         self.blobs.join(prefix).join(digest)
     }
 
-    fn capture_summary(&self, capture_id: &CaptureId, reused: bool) -> Result<CaptureSummary> {
+    pub(crate) fn completed_capture(
+        &self,
+        capture_id: &CaptureId,
+        request_key: &str,
+        analysis_key: &AnalysisKey,
+        disposition: CaptureDisposition,
+    ) -> Result<Option<CaptureSummary>> {
+        let summary = self
+            .connection
+            .query_row(
+                "SELECT id, created_at_ms, rustc_release, llvm_version, target, profile,
+                        (SELECT COUNT(*) FROM instances WHERE capture_id = captures.id),
+                        (SELECT COUNT(*) FROM modules WHERE capture_id = captures.id)
+                 FROM captures WHERE id = ?1",
+                [capture_id.as_str()],
+                |row| summary_from_row(row, disposition),
+            )
+            .optional()
+            .map_err(Error::from)?;
+        if summary.is_none() {
+            return Ok(None);
+        }
+        let matches = self.connection.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM capture_cache
+                 WHERE request_key = ?1 AND capture_id = ?2 AND analysis_key = ?3
+             )",
+            params![request_key, capture_id.as_str(), analysis_key.as_str()],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !matches {
+            return Err(Error::InvalidPendingEvidence {
+                path: PathBuf::from("pending.json"),
+                message: format!(
+                    "completed capture does not match the retained request, got {capture_id}"
+                ),
+            });
+        }
+
+        Ok(summary)
+    }
+
+    fn capture_summary(
+        &self,
+        capture_id: &CaptureId,
+        disposition: CaptureDisposition,
+    ) -> Result<CaptureSummary> {
         self.connection
             .query_row(
                 "SELECT id, created_at_ms, rustc_release, llvm_version, target, profile,
@@ -663,7 +731,7 @@ impl Store {
                         (SELECT COUNT(*) FROM modules WHERE capture_id = captures.id)
                  FROM captures WHERE id = ?1",
                 [capture_id.as_str()],
-                |row| summary_from_row(row, reused),
+                |row| summary_from_row(row, disposition),
             )
             .optional()?
             .ok_or_else(|| Error::UnknownCapture {
@@ -929,7 +997,7 @@ fn verify_digest(path: &Path, expected: blake3::Hash, actual: blake3::Hash) -> R
     ))
 }
 
-fn sync_directory(path: &Path) -> Result<()> {
+pub(crate) fn sync_directory(path: &Path) -> Result<()> {
     let directory = File::open(path).map_err(|source| Error::filesystem("open", path, source))?;
     directory
         .sync_all()
@@ -1411,13 +1479,16 @@ fn insert_sources(
     Ok(())
 }
 
-fn summary_from_row(row: &rusqlite::Row<'_>, reused: bool) -> rusqlite::Result<CaptureSummary> {
+fn summary_from_row(
+    row: &rusqlite::Row<'_>,
+    disposition: CaptureDisposition,
+) -> rusqlite::Result<CaptureSummary> {
     let profile = capture_profile_from_name(row.get::<_, String>(5)?.as_str(), 5)?;
 
     Ok(CaptureSummary {
         id: row.get(0)?,
         created_at_ms: integer_from_row(row, 1)?,
-        reused,
+        disposition,
         rustc_release: row.get(2)?,
         llvm_version: row.get(3)?,
         target: row.get(4)?,
@@ -1425,6 +1496,47 @@ fn summary_from_row(row: &rusqlite::Row<'_>, reused: bool) -> rusqlite::Result<C
         instance_count: integer_from_row(row, 6)?,
         module_count: integer_from_row(row, 7)?,
     })
+}
+
+fn validate_request_key(value: &str) -> Result<()> {
+    let valid = value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    if !valid {
+        return Err(Error::InvalidPendingEvidence {
+            path: PathBuf::from("pending.json"),
+            message: format!(
+                "request key must contain 64 lowercase hexadecimal characters, got {value}"
+            ),
+        });
+    }
+
+    Ok(())
+}
+
+fn pending_entries(root: &Path) -> Result<(usize, u64)> {
+    let mut pending = 0;
+    let mut bytes = 0_u64;
+
+    for entry in WalkDir::new(root).min_depth(1) {
+        let entry = entry.map_err(|source| Error::filesystem("walk", root, source.into()))?;
+        if entry.file_type().is_file() {
+            bytes = bytes.saturating_add(
+                entry
+                    .metadata()
+                    .map_err(|source| {
+                        Error::filesystem("read metadata for", entry.path(), source.into())
+                    })?
+                    .len(),
+            );
+            if entry.file_name() == "pending.json" {
+                pending += 1;
+            }
+        }
+    }
+
+    Ok((pending, bytes))
 }
 
 fn artifact_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactSummary> {
@@ -1717,7 +1829,7 @@ mod tests {
         IndexedBody, STORE_VERSION, Store, bodies_for_instance, lock_workspace_exclusive,
         lock_workspace_shared, unique_prefix_length,
     };
-    use crate::{CaptureId, Error, InstanceId};
+    use crate::{CaptureDisposition, CaptureId, Error, InstanceId};
 
     #[test]
     fn creates_the_store_below_the_retained_optic_root() {
@@ -1737,6 +1849,23 @@ mod tests {
             assert!(temporary.path().join(path).exists(), "missing {path}");
         }
         assert!(!temporary.path().join(".optic.lock").exists());
+    }
+
+    #[test]
+    fn status_counts_recoverable_pending_evidence() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let store = Store::open(temporary.path()).expect("the test can open a store");
+        let pending = store.pending.join("0".repeat(64));
+        fs::create_dir(&pending).expect("the test can create a pending request");
+        fs::write(pending.join("artifact.bc"), b"bitcode")
+            .expect("the test can create a retained artifact");
+        fs::write(pending.join("pending.json"), b"marker")
+            .expect("the test can create a pending marker");
+
+        let status = store.status().expect("the test can read store status");
+
+        assert_eq!(status.pending, 1);
+        assert_eq!(status.pending_bytes, 13);
     }
 
     #[test]
@@ -2077,6 +2206,46 @@ mod tests {
             store.cached_capture("request"),
             Err(Error::Database(_))
         ));
+    }
+
+    #[test]
+    fn recognizes_a_committed_pending_capture_before_reingestion() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let store = Store::open(temporary.path()).expect("the test can open a store");
+        let capture_id = "cap_00000000000000000000000000000000"
+            .parse::<CaptureId>()
+            .expect("the test capture ID is valid");
+        let analysis_key =
+            super::AnalysisKey::parse(&"0".repeat(32)).expect("the test analysis key is valid");
+        store
+            .connection
+            .execute_batch(
+                "INSERT INTO captures(
+                     id, created_at_ms, request_key, request_json, rustc_release, rustc_commit,
+                     llvm_version, target, profile, invocation_json
+                 ) VALUES (
+                     'cap_00000000000000000000000000000000', 0, 'request', '{}', '', '', '', '',
+                     'faithful', '{}'
+                 );
+                 INSERT INTO capture_cache(request_key, capture_id, analysis_key) VALUES (
+                     'request', 'cap_00000000000000000000000000000000',
+                     '00000000000000000000000000000000'
+                 );",
+            )
+            .expect("the test can record a committed capture");
+
+        let summary = store
+            .completed_capture(
+                &capture_id,
+                "request",
+                &analysis_key,
+                CaptureDisposition::Resumed,
+            )
+            .expect("the committed capture can be checked")
+            .expect("the committed capture is present");
+
+        assert_eq!(summary.id, capture_id);
+        assert_eq!(summary.disposition, CaptureDisposition::Resumed);
     }
 
     #[track_caller]

@@ -91,6 +91,16 @@ pub enum Error {
         path: PathBuf,
     },
 
+    /// Retained compiler evidence does not satisfy the pending format.
+    #[error("invalid pending compiler evidence in {path}: {message}")]
+    InvalidPendingEvidence {
+        /// The pending marker that contains invalid data.
+        path: PathBuf,
+
+        /// The failed format requirement.
+        message: String,
+    },
+
     /// The system clock is before the Unix epoch.
     #[error("system clock must be after the Unix epoch, got {source}")]
     SystemClock {

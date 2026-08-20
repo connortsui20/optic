@@ -11,15 +11,16 @@ use std::path::{Path, PathBuf};
 use cargo_ir::BuildRequest;
 use serde::Serialize;
 
+use crate::pending::{PendingCapture, ResumableCapture};
 use crate::source::{SourceBaseline, find_item_at};
 use crate::store::{
     AnalysisKey, CaptureCacheKey, FileLock, LEGACY_STORE_ENTRIES, Store, lock_workspace_exclusive,
     lock_workspace_shared,
 };
 use crate::{
-    BodySetDelta, BodySetSummary, BuildSpec, CachePolicy, CaptureDetails, CaptureId,
-    CaptureSummary, CleanSummary, CompareView, CompilerOutput, FindResult, GcSummary, InstanceId,
-    RemoveSummary, Result, ShowView, StoreStatus, VerifySummary,
+    BodySetDelta, BodySetSummary, BuildSpec, CachePolicy, CaptureDetails, CaptureDisposition,
+    CaptureId, CaptureSummary, CleanSummary, CompareView, CompilerOutput, FindResult, GcSummary,
+    InstanceId, RemoveSummary, Result, ShowView, StoreStatus, VerifySummary,
 };
 
 const EVIDENCE_VERSION: u32 = 4;
@@ -93,28 +94,35 @@ impl Application {
 
         let _writer = self.store.lock_writer()?;
         let toolchain = cargo_ir::inspect_workspace_toolchain(&self.workspace_root)?;
-        let capture_id = CaptureId::new();
-        let staging = self.store.staging_directory(&capture_id);
-        fs::create_dir_all(&staging)
-            .map_err(|source| crate::Error::filesystem("create", &staging, source))?;
+        let request_key = request_key(spec, &toolchain, &self.target_directory)?;
+        let pending_directory = self.store.pending_directory(&request_key)?;
 
-        let result = self.capture_to_staging(spec, cache_policy, &toolchain, &capture_id, &staging);
-        let cleanup = remove_staging(&staging);
-        match (result, cleanup) {
-            (Ok(summary), Ok(())) => Ok(summary),
-            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        if PendingCapture::exists(&pending_directory) {
+            let request_template = self.build_request(spec, PathBuf::new());
+            match PendingCapture::resume(
+                &pending_directory,
+                &request_key,
+                spec,
+                &request_template,
+                &toolchain,
+            ) {
+                Ok(pending) => {
+                    return self.resume_capture(
+                        spec,
+                        &request_key,
+                        &pending_directory,
+                        pending,
+                        CaptureDisposition::Resumed,
+                    );
+                }
+                Err(crate::Error::InputChanged { .. }) => {
+                    remove_pending(&pending_directory)?;
+                }
+                Err(error) => return Err(error),
+            }
         }
-    }
 
-    fn capture_to_staging(
-        &mut self,
-        spec: &BuildSpec,
-        cache_policy: CachePolicy,
-        toolchain: &cargo_ir::Toolchain,
-        capture_id: &CaptureId,
-        staging: &Path,
-    ) -> Result<CaptureSummary> {
-        let request_key = request_key(spec, toolchain, &self.target_directory)?;
+        remove_pending(&pending_directory)?;
         let cached = match cache_policy {
             CachePolicy::Reuse => self.store.cached_capture(&request_key)?,
             CachePolicy::Refresh => None,
@@ -122,38 +130,94 @@ impl Application {
         let analysis_key = cached
             .as_ref()
             .map_or_else(AnalysisKey::new, |cached| cached.analysis_key.clone());
-        let analysis_directory = self.store.analysis_directory(&analysis_key);
-        prepare_analysis_directory(&analysis_directory)?;
-        let sources = SourceBaseline::capture(&self.workspace_root, spec, staging)?;
+        let run_directory = pending_directory.join(analysis_key.as_str());
+        let staging = run_directory.join("staging");
+        let analysis_directory = run_directory.join("analysis");
+        fs::create_dir_all(&staging)
+            .map_err(|source| crate::Error::filesystem("create", &staging, source))?;
+        let sources = SourceBaseline::capture(&self.workspace_root, spec, &staging)?;
         let request = self.build_request(spec, analysis_directory.clone());
-        let outcome = cargo_ir::capture(&request);
-        let result = match outcome {
-            Ok(cargo_ir::CaptureOutcome::Captured { bundle }) => {
+        let outcome = cargo_ir::compile(&request);
+        match outcome {
+            Ok(cargo_ir::CompileOutcome::Compiled { compilation }) => {
                 sources.validate()?;
-                self.store.publish(
+                cargo_ir::require_compiled_evidence(&request)?;
+                let capture_id = CaptureId::new();
+                let marker = PendingCapture::new(
+                    &request_key,
                     capture_id,
-                    CaptureCacheKey::new(&request_key, &analysis_key),
+                    &analysis_key,
+                    spec.clone(),
+                    *compilation,
+                    sources.pending()?,
+                );
+                marker.write(&pending_directory)?;
+                let pending = PendingCapture::resume(
+                    &pending_directory,
+                    &request_key,
                     spec,
-                    &bundle,
-                    &sources,
-                    selected_target(spec, &bundle.toolchain.host),
+                    &self.build_request(spec, PathBuf::new()),
+                    &toolchain,
+                )?;
+
+                self.resume_capture(
+                    spec,
+                    &request_key,
+                    &pending_directory,
+                    pending,
+                    CaptureDisposition::Captured,
                 )
             }
-            Ok(cargo_ir::CaptureOutcome::Fresh { .. }) => {
+            Ok(cargo_ir::CompileOutcome::Fresh { .. }) => {
                 sources.validate()?;
+                remove_pending(&pending_directory)?;
+
                 cached.map(|cached| cached.summary).ok_or_else(|| {
                     crate::Error::EvidenceUnavailable {
                         message: "Cargo reused the selected target, but Optic has no verified capture for this build. Run the same command with --fresh".to_owned(),
                     }
                 })
             }
-            Err(error) => Err(error.into()),
-        };
-        let cleanup = remove_analysis_directory(&analysis_directory);
-        match (result, cleanup) {
-            (Ok(summary), Ok(())) => Ok(summary),
-            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+            Err(error) => {
+                remove_pending(&pending_directory)?;
+
+                Err(error.into())
+            }
         }
+    }
+
+    fn resume_capture(
+        &mut self,
+        spec: &BuildSpec,
+        request_key: &str,
+        pending_directory: &Path,
+        pending: ResumableCapture,
+        disposition: CaptureDisposition,
+    ) -> Result<CaptureSummary> {
+        if let Some(summary) = self.store.completed_capture(
+            &pending.capture_id,
+            request_key,
+            &pending.analysis_key,
+            CaptureDisposition::Resumed,
+        )? {
+            remove_pending(pending_directory)?;
+
+            return Ok(summary);
+        }
+
+        let bundle = cargo_ir::ingest(&pending.request, pending.compilation)?;
+        let mut summary = self.store.publish(
+            &pending.capture_id,
+            CaptureCacheKey::new(request_key, &pending.analysis_key),
+            spec,
+            &bundle,
+            &pending.sources,
+            selected_target(spec, &bundle.toolchain.host),
+        )?;
+        summary.disposition = disposition;
+        remove_pending(pending_directory)?;
+
+        Ok(summary)
     }
 
     /// Lists completed captures from newest to oldest.
@@ -408,23 +472,6 @@ fn request_key(
     Ok(blake3::hash(&encoded).to_hex().to_string())
 }
 
-fn prepare_analysis_directory(path: &Path) -> Result<()> {
-    if path.exists() {
-        fs::remove_dir_all(path)
-            .map_err(|source| crate::Error::filesystem("remove", path, source))?;
-    }
-    fs::create_dir_all(path).map_err(|source| crate::Error::filesystem("create", path, source))
-}
-
-fn remove_analysis_directory(path: &Path) -> Result<()> {
-    if path.exists() {
-        fs::remove_dir_all(path)
-            .map_err(|source| crate::Error::filesystem("remove", path, source))?;
-    }
-
-    Ok(())
-}
-
 fn compiler_environment() -> Vec<(String, String)> {
     let mut environment = env::vars_os()
         .filter(|(name, _)| compiler_environment_name(name))
@@ -451,6 +498,7 @@ fn compiler_environment_name(name: &OsStr) -> bool {
             | "CARGO_HOME"
             | "RUSTFLAGS"
             | "RUSTC"
+            | "RUSTC_BOOTSTRAP"
             | "RUSTC_WRAPPER"
             | "RUSTC_WORKSPACE_WRAPPER"
             | "RUSTUP_TOOLCHAIN"
@@ -463,7 +511,7 @@ fn selected_target<'a>(spec: &'a BuildSpec, host: &'a str) -> &'a str {
     spec.target_triple.as_deref().unwrap_or(host)
 }
 
-fn remove_staging(path: &Path) -> Result<()> {
+fn remove_pending(path: &Path) -> Result<()> {
     if path.exists() {
         fs::remove_dir_all(path)
             .map_err(|source| crate::Error::filesystem("remove", path, source))?;

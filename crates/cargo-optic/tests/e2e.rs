@@ -44,7 +44,10 @@ fn captures_finds_and_shows_concrete_generic_instances() {
     let second = json(&second);
     let first_capture = string(&first, "/result/id");
     assert_eq!(string(&second, "/result/id"), first_capture);
-    assert_ne!(first["result"]["reused"], second["result"]["reused"]);
+    assert_ne!(
+        first["result"]["disposition"],
+        second["result"]["disposition"]
+    );
 
     fixture.append_source_comment();
     let changed = fixture.run([
@@ -61,7 +64,7 @@ fn captures_finds_and_shows_concrete_generic_instances() {
     let changed = json(&changed);
     let changed_capture = string(&changed, "/result/id");
     assert_ne!(changed_capture, first_capture);
-    assert_eq!(changed["result"]["reused"], false);
+    assert_eq!(changed["result"]["disposition"], "captured");
 
     let refreshed = fixture.run([
         "capture",
@@ -78,13 +81,13 @@ fn captures_finds_and_shows_concrete_generic_instances() {
     let refreshed = json(&refreshed);
     let capture = string(&refreshed, "/result/id");
     assert_ne!(capture, changed_capture);
-    assert_eq!(refreshed["result"]["reused"], false);
+    assert_eq!(refreshed["result"]["disposition"], "captured");
 
     let reused_after_refresh = fixture.run(capture_arguments);
     assert_success(&reused_after_refresh);
     let reused_after_refresh = json(&reused_after_refresh);
     assert_eq!(string(&reused_after_refresh, "/result/id"), capture);
-    assert_eq!(reused_after_refresh["result"]["reused"], true);
+    assert_eq!(reused_after_refresh["result"]["disposition"], "reused");
 
     let capture_ids = [first_capture, changed_capture, capture];
     let capture_prefix = shortest_unique_prefix(capture, &capture_ids);
@@ -486,7 +489,7 @@ fn cargo_observed_reuse_tracks_non_rust_and_environment_inputs() {
     assert_success(&reused);
     let reused = json(&reused);
     assert_eq!(string(&reused, "/result/id"), first_id);
-    assert_eq!(reused["result"]["reused"], true);
+    assert_eq!(reused["result"]["disposition"], "reused");
 
     fs::write(fixture.root.join("kernel/src/build-data.txt"), "second\n")
         .expect("the test can change the included compiler input");
@@ -495,7 +498,7 @@ fn cargo_observed_reuse_tracks_non_rust_and_environment_inputs() {
     let included = json(&included);
     let included_id = string(&included, "/result/id");
     assert_ne!(included_id, first_id);
-    assert_eq!(included["result"]["reused"], false);
+    assert_eq!(included["result"]["disposition"], "captured");
 
     let environment = fixture
         .command(arguments)
@@ -505,7 +508,7 @@ fn cargo_observed_reuse_tracks_non_rust_and_environment_inputs() {
     assert_success(&environment);
     let environment = json(&environment);
     assert_ne!(string(&environment, "/result/id"), included_id);
-    assert_eq!(environment["result"]["reused"], false);
+    assert_eq!(environment["result"]["disposition"], "captured");
 }
 
 #[test]

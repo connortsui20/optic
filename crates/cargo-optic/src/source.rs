@@ -10,6 +10,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use proc_macro2::Span;
+use serde::{Deserialize, Serialize};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use walkdir::{DirEntry, WalkDir};
@@ -38,6 +39,28 @@ pub(crate) struct SourceEntry {
 struct CacheInput {
     path: PathBuf,
     digest: blake3::Hash,
+}
+
+/// Source identity retained with a completed compiler run.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct PendingSourceBaseline {
+    entries: Vec<PendingSourceEntry>,
+
+    cache_inputs: Vec<PendingCacheInput>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+struct PendingSourceEntry {
+    path: PathBuf,
+
+    digest: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+struct PendingCacheInput {
+    path: PathBuf,
+
+    digest: String,
 }
 
 #[derive(Debug)]
@@ -144,8 +167,15 @@ impl SourceBaseline {
 
     pub(crate) fn validate(&self) -> Result<()> {
         for entry in &self.cache_inputs {
-            let bytes = fs::read(&entry.path)
-                .map_err(|source| Error::filesystem("read", &entry.path, source))?;
+            let bytes = match fs::read(&entry.path) {
+                Ok(bytes) => bytes,
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(Error::InputChanged {
+                        path: entry.path.clone(),
+                    });
+                }
+                Err(source) => return Err(Error::filesystem("read", &entry.path, source)),
+            };
 
             if blake3::hash(&bytes) != entry.digest {
                 return Err(Error::InputChanged {
@@ -156,6 +186,88 @@ impl SourceBaseline {
 
         Ok(())
     }
+
+    pub(crate) fn pending(&self) -> Result<PendingSourceBaseline> {
+        let entries = self
+            .entries
+            .iter()
+            .map(|entry| {
+                let bytes = fs::read(&entry.snapshot)
+                    .map_err(|source| Error::filesystem("read", &entry.snapshot, source))?;
+
+                Ok(PendingSourceEntry {
+                    path: entry.path.clone(),
+                    digest: blake3::hash(&bytes).to_hex().to_string(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let cache_inputs = self
+            .cache_inputs
+            .iter()
+            .map(|input| PendingCacheInput {
+                path: input.path.clone(),
+                digest: input.digest.to_hex().to_string(),
+            })
+            .collect();
+
+        Ok(PendingSourceBaseline {
+            entries,
+            cache_inputs,
+        })
+    }
+
+    pub(crate) fn resume(
+        staging_directory: &Path,
+        pending: &PendingSourceBaseline,
+        marker_path: &Path,
+    ) -> Result<Self> {
+        let source_directory = staging_directory.join("sources");
+        let mut entries = Vec::with_capacity(pending.entries.len());
+
+        for (index, entry) in pending.entries.iter().enumerate() {
+            let digest = parse_digest(&entry.digest, marker_path)?;
+            let snapshot = source_directory.join(format!("{index:08}.rs"));
+            let bytes = fs::read(&snapshot)
+                .map_err(|source| Error::filesystem("read", &snapshot, source))?;
+            if blake3::hash(&bytes) != digest {
+                return Err(Error::InvalidPendingEvidence {
+                    path: marker_path.to_owned(),
+                    message: format!("source snapshot digest does not match for index {index}"),
+                });
+            }
+            entries.push(SourceEntry {
+                path: entry.path.clone(),
+                snapshot,
+            });
+        }
+
+        let cache_inputs = pending
+            .cache_inputs
+            .iter()
+            .map(|input| {
+                Ok(CacheInput {
+                    path: input.path.clone(),
+                    digest: parse_digest(&input.digest, marker_path)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let baseline = Self {
+            entries,
+            cache_inputs,
+        };
+        baseline.validate()?;
+
+        Ok(baseline)
+    }
+}
+
+fn parse_digest(digest: &str, marker_path: &Path) -> Result<blake3::Hash> {
+    digest.parse().map_err(|_| Error::InvalidPendingEvidence {
+        path: marker_path.to_owned(),
+        message: format!(
+            "BLAKE3 digest must contain 64 lowercase hexadecimal characters, got {digest}"
+        ),
+    })
 }
 
 fn selected_local_packages<'a>(
@@ -354,8 +466,30 @@ fn function_span(
 
 #[cfg(test)]
 mod tests {
-    use super::{StoredSource, find_item_at};
-    use crate::SourceLocation;
+    use std::fs;
+
+    use super::{CacheInput, SourceBaseline, StoredSource, find_item_at};
+    use crate::{Error, SourceLocation};
+
+    #[test]
+    fn retained_baseline_reports_a_changed_input_as_stale() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let input = temporary.path().join("Cargo.toml");
+        fs::write(&input, b"before").expect("the test can write the original input");
+        let baseline = SourceBaseline {
+            entries: Vec::new(),
+            cache_inputs: vec![CacheInput {
+                path: input.clone(),
+                digest: blake3::hash(b"before"),
+            }],
+        };
+        fs::write(&input, b"after").expect("the test can change the input");
+
+        assert!(matches!(
+            baseline.validate(),
+            Err(Error::InputChanged { path }) if path == input
+        ));
+    }
 
     #[test]
     fn expands_an_exact_nested_span_to_the_complete_function() {

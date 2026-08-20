@@ -334,7 +334,7 @@ pub fn compile(request: &BuildRequest) -> Result<CompileOutcome> {
         &manifest_path,
         &toolchain.commit_hash,
     );
-    let mut invocation = CaptureInvocation {
+    let invocation = CaptureInvocation {
         request: request.clone(),
         cargo: command_invocation(&command),
         rustc: None,

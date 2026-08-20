@@ -140,7 +140,21 @@ pub struct BuildSpec {
     pub rustc_arguments: Vec<String>,
 }
 
-/// A completed or reused compiler-evidence capture.
+/// How one capture request obtained its completed evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptureDisposition {
+    /// Cargo and evidence ingestion completed in this request.
+    Captured,
+
+    /// Cargo reported a fresh target and an existing capture was reused.
+    Reused,
+
+    /// Retained post-compilation evidence was ingested without another Cargo build.
+    Resumed,
+}
+
+/// A completed compiler-evidence capture.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CaptureSummary {
     /// The immutable capture identifier.
@@ -149,8 +163,8 @@ pub struct CaptureSummary {
     /// Unix time in milliseconds when the capture was published.
     pub created_at_ms: u64,
 
-    /// Whether this request reused an existing completed capture.
-    pub reused: bool,
+    /// How this request obtained the completed evidence.
+    pub disposition: CaptureDisposition,
 
     /// The exact rustc release.
     pub rustc_release: String,
@@ -271,6 +285,12 @@ pub struct StoreStatus {
 
     /// Total blob bytes on disk.
     pub blob_bytes: u64,
+
+    /// Recoverable compiler runs awaiting evidence ingestion.
+    pub pending: usize,
+
+    /// Total bytes retained below pending compiler runs.
+    pub pending_bytes: u64,
 }
 
 /// The result of removing one immutable capture.
