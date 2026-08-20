@@ -16,9 +16,9 @@ use walkdir::WalkDir;
 use crate::driver::RustcDriver;
 use crate::llvm;
 use crate::mono;
+use crate::toolchain::{CargoContext, inspect_rustc};
 use crate::{
     BuildRequest, CaptureProfile, CargoTarget, CompilerInstance, Error, Result, Toolchain,
-    inspect_toolchain,
 };
 
 /// The byte range of one LLVM function definition.
@@ -276,12 +276,13 @@ pub struct EvidenceBundle {
 /// Returns an error if the toolchain is unsupported, the analysis directory is not empty, Cargo
 /// fails, or emitted LLVM evidence cannot be read.
 pub fn capture(request: &BuildRequest) -> Result<CaptureOutcome> {
-    let toolchain = inspect_toolchain()?;
+    let cargo = CargoContext::discover(&request.workspace_root)?;
+    let toolchain = inspect_rustc(cargo.rustc())?;
     prepare_analysis_directory(&request.analysis_directory)?;
-    let driver = RustcDriver::prepare(&toolchain, &request.workspace_root)?;
+    let driver = RustcDriver::prepare(&toolchain, &cargo)?;
     let manifest_path = request.analysis_directory.join(mono::MANIFEST_NAME);
 
-    let mut command = cargo_command(request);
+    let mut command = cargo_command(request, &cargo);
     driver.configure(
         &mut command,
         &request.analysis_directory,
@@ -343,9 +344,8 @@ pub fn capture(request: &BuildRequest) -> Result<CaptureOutcome> {
     })
 }
 
-fn cargo_command(request: &BuildRequest) -> Command {
-    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let mut command = Command::new(cargo);
+fn cargo_command(request: &BuildRequest, cargo: &CargoContext) -> Command {
+    let mut command = Command::new(cargo.cargo());
     command.current_dir(&request.workspace_root);
     command.arg("rustc");
     command.arg("--message-format=json-render-diagnostics");

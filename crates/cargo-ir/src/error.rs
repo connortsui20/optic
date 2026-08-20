@@ -38,13 +38,6 @@ pub enum Error {
         diagnostics: String,
     },
 
-    /// The active compiler is not supported.
-    #[error("cargo-optic requires an active nightly rustc, got {release}")]
-    StableCompiler {
-        /// The unsupported compiler release.
-        release: String,
-    },
-
     /// A required value was absent from compiler version output.
     #[error("rustc -vV did not report {field}")]
     MissingToolchainField {
@@ -54,23 +47,28 @@ pub enum Error {
 
     /// The analyzed toolchain does not contain `llvm-dis`.
     #[error(
-        "the active toolchain does not contain llvm-dis at {path}; install its llvm-tools component"
+        "the selected compiler does not contain llvm-dis at {path}{}",
+        install_command.as_ref().map(|command| format!("; run `{command}`")).unwrap_or_else(|| "; install its matching llvm-tools component".to_owned())
     )]
     MissingLlvmDis {
         /// The expected executable path.
         path: PathBuf,
+
+        /// The exact rustup command, when the sysroot identifies its toolchain.
+        install_command: Option<String>,
     },
 
     /// The active toolchain does not contain compiler libraries for an external driver.
     #[error(
-        "the active toolchain does not contain rustc-dev libraries at {path}; run `rustup component add --toolchain {toolchain} rustc-dev`"
+        "the selected compiler does not contain rustc-dev libraries at {path}{}",
+        install_command.as_ref().map(|command| format!("; run `{command}`")).unwrap_or_else(|| "; install its matching rustc-dev component".to_owned())
     )]
     MissingRustcDev {
         /// The directory that must contain rustc compiler libraries.
         path: PathBuf,
 
-        /// The active rustup toolchain name, or the nightly default.
-        toolchain: String,
+        /// The exact rustup command, when the sysroot identifies its toolchain.
+        install_command: Option<String>,
     },
 
     /// A filesystem operation failed.

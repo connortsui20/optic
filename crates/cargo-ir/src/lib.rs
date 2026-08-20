@@ -1,6 +1,6 @@
 //! Captures compiler evidence for `cargo-optic`.
 //!
-//! This crate owns the nightly Cargo and LLVM boundary. [`capture`] runs one selected Cargo target
+//! This crate owns the Cargo, compiler, and LLVM boundary. [`capture`] runs one selected Cargo target
 //! and returns an [`EvidenceBundle`] whose paths belong to the caller-provided analysis directory.
 //! It does not assign Optic capture IDs or persist evidence.
 
@@ -25,4 +25,4 @@ mod request;
 pub use request::{BuildRequest, CaptureProfile, CargoTarget};
 
 mod toolchain;
-pub use toolchain::{Toolchain, inspect_toolchain};
+pub use toolchain::{Toolchain, inspect_toolchain, inspect_workspace_toolchain};

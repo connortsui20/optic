@@ -172,6 +172,19 @@ fn run_driver() -> ExitCode {
 
         return ExitCode::FAILURE;
     }
+    let rustc_commit = match env::var(RUSTC_COMMIT_ENV) {
+        Ok(commit) => commit,
+        Err(error) => {
+            eprintln!("failed to read {RUSTC_COMMIT_ENV}: {error}");
+
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(error) = validate_rustc_commit(&arguments[0], &rustc_commit) {
+        eprintln!("{error}");
+
+        return ExitCode::FAILURE;
+    }
 
     let mut callbacks = IdentityCallbacks::default();
     let exit_code = rustc_driver::catch_with_exit_code(|| {
@@ -189,15 +202,6 @@ fn run_driver() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let rustc_commit = match env::var(RUSTC_COMMIT_ENV) {
-        Ok(commit) => commit,
-        Err(error) => {
-            eprintln!("failed to read {RUSTC_COMMIT_ENV}: {error}");
-
-            return ExitCode::FAILURE;
-        }
-    };
-
     match write_manifest(
         &manifest_path,
         &rustc_commit,
@@ -261,7 +265,9 @@ fn run_wrapper() -> ExitCode {
         command
     };
     if selected_target {
-        command.env(DRIVER_INNER_ENV, "1");
+        command
+            .env(DRIVER_INNER_ENV, "1")
+            .env("RUSTC_BOOTSTRAP", "1");
     }
 
     execute(command)
@@ -272,6 +278,34 @@ fn temps_argument(path: &OsStr) -> OsString {
     argument.push(path);
 
     argument
+}
+
+fn validate_rustc_commit(rustc: &str, expected: &str) -> Result<(), String> {
+    let output = Command::new(rustc)
+        .arg("-vV")
+        .output()
+        .map_err(|error| format!("failed to inspect selected rustc {rustc}: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "selected rustc {rustc} failed with status {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let verbose = String::from_utf8_lossy(&output.stdout);
+    let actual = verbose
+        .lines()
+        .find_map(|line| line.strip_prefix("commit-hash:").map(str::trim))
+        .filter(|commit| !commit.is_empty())
+        .ok_or_else(|| format!("selected rustc {rustc} did not report commit-hash in -vV output"))?;
+    if actual != expected {
+        return Err(format!(
+            "selected rustc commit does not match the prepared Optic driver: expected {expected}, got {actual}"
+        ));
+    }
+
+    Ok(())
 }
 
 #[cfg(unix)]

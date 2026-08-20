@@ -1,7 +1,7 @@
 //! Provisions the exact-version rustc driver and preserves Cargo wrapper composition.
 //!
-//! The driver is a small, dependency-free program embedded in `cargo-ir`. The active nightly
-//! compiler builds it once for each rustc commit and source revision. Cargo then uses it as the
+//! The driver is a small, dependency-free program embedded in `cargo-ir`. Cargo's selected compiler
+//! builds it once for each rustc commit, sysroot, and source revision. Cargo then uses it as the
 //! outer global wrapper without changing workspace artifact hashes.
 
 use std::env;
@@ -10,10 +10,9 @@ use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use fs2::FileExt;
-use serde_json::Value;
-
+use crate::toolchain::CargoContext;
 use crate::{Error, Result, Toolchain};
+use fs2::FileExt;
 
 const DRIVER_SOURCE: &str = include_str!("../driver/main.rs");
 const PROTOCOL_VERSION: &str = "2";
@@ -33,7 +32,7 @@ pub(crate) struct RustcDriver {
 }
 
 impl RustcDriver {
-    pub(crate) fn prepare(toolchain: &Toolchain, workspace_root: &Path) -> Result<Self> {
+    pub(crate) fn prepare(toolchain: &Toolchain, cargo: &CargoContext) -> Result<Self> {
         if env::var_os(WRAPPER_ACTIVE_ENV).is_some() {
             return Err(Error::CompilerEnvironment {
                 message: "a Cargo Optic rustc wrapper is already active".to_owned(),
@@ -41,13 +40,12 @@ impl RustcDriver {
         }
 
         require_rustc_dev(toolchain)?;
-        let wrappers = effective_wrappers(workspace_root)?;
         let executable = cached_driver(toolchain)?;
 
         Ok(Self {
             executable,
-            original_global_wrapper: wrappers.global,
-            workspace_wrapper: wrappers.workspace,
+            original_global_wrapper: cargo.global_wrapper().map(OsStr::to_owned),
+            workspace_wrapper: cargo.workspace_wrapper().map(OsStr::to_owned),
         })
     }
 
@@ -96,73 +94,25 @@ impl RustcDriver {
     }
 }
 
-struct EffectiveWrappers {
-    global: Option<OsString>,
-    workspace: Option<OsString>,
-}
-
-fn effective_wrappers(workspace_root: &Path) -> Result<EffectiveWrappers> {
-    let needs_config =
-        env::var_os("RUSTC_WRAPPER").is_none() || env::var_os("RUSTC_WORKSPACE_WRAPPER").is_none();
-    let config = if needs_config {
-        cargo_config(workspace_root)?
-    } else {
-        Value::Null
-    };
-
-    let global = effective_wrapper("RUSTC_WRAPPER", &config, "/build/rustc-wrapper");
-    let workspace = effective_wrapper(
-        "RUSTC_WORKSPACE_WRAPPER",
-        &config,
-        "/build/rustc-workspace-wrapper",
-    );
-
-    Ok(EffectiveWrappers { global, workspace })
-}
-
-fn effective_wrapper(name: &str, config: &Value, pointer: &str) -> Option<OsString> {
-    match env::var_os(name) {
-        Some(value) if value.is_empty() => None,
-        Some(value) => Some(value),
-        None => config
-            .pointer(pointer)
-            .and_then(Value::as_str)
-            .map(OsString::from),
-    }
-}
-
-fn cargo_config(workspace_root: &Path) -> Result<Value> {
-    let program = "cargo".to_owned();
-    // `CARGO` can name the Cargo binary that built Optic instead of the Cargo binary selected by
-    // `RUSTUP_TOOLCHAIN`. The PATH proxy selects the matching nightly for this unstable command.
-    let output = Command::new(&program)
-        .current_dir(workspace_root)
-        .args(["-Z", "unstable-options", "config", "get", "--format=json"])
-        .output()
-        .map_err(|source| Error::StartProcess {
-            program: program.clone(),
-            source,
-        })?;
-    if !output.status.success() {
-        return Err(Error::ProcessFailed {
-            program,
-            status: output.status.to_string(),
-            diagnostics: String::from_utf8_lossy(&output.stderr).into_owned(),
-        });
-    }
-
-    serde_json::from_slice(&output.stdout).map_err(|source| Error::CompilerEnvironment {
-        message: format!("Cargo returned invalid configuration JSON: {source}"),
-    })
-}
-
 fn require_rustc_dev(toolchain: &Toolchain) -> Result<()> {
-    let entries =
-        fs::read_dir(&toolchain.rustc_private_lib).map_err(|source| Error::Filesystem {
-            operation: "read",
-            path: toolchain.rustc_private_lib.clone(),
-            source,
-        })?;
+    let missing = || Error::MissingRustcDev {
+        path: toolchain.rustc_private_lib.clone(),
+        install_command: toolchain
+            .rustup_toolchain
+            .as_ref()
+            .map(|toolchain| format!("rustup component add --toolchain {toolchain} rustc-dev")),
+    };
+    let entries = match fs::read_dir(&toolchain.rustc_private_lib) {
+        Ok(entries) => entries,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Err(missing()),
+        Err(source) => {
+            return Err(Error::Filesystem {
+                operation: "read",
+                path: toolchain.rustc_private_lib.clone(),
+                source,
+            });
+        }
+    };
     let mut has_rustc_middle = false;
 
     for entry in entries {
@@ -183,23 +133,14 @@ fn require_rustc_dev(toolchain: &Toolchain) -> Result<()> {
     }
 
     if !has_rustc_middle {
-        return Err(Error::MissingRustcDev {
-            path: toolchain.rustc_private_lib.clone(),
-            toolchain: env::var("RUSTUP_TOOLCHAIN").unwrap_or_else(|_| "nightly".to_owned()),
-        });
+        return Err(missing());
     }
 
     Ok(())
 }
 
 fn cached_driver(toolchain: &Toolchain) -> Result<PathBuf> {
-    let digest = blake3::hash(DRIVER_SOURCE.as_bytes());
-    let directory = cargo_home()?
-        .join("optic")
-        .join("drivers")
-        .join(&toolchain.host)
-        .join(&toolchain.commit_hash)
-        .join(digest.to_hex().as_str());
+    let directory = driver_cache_directory(&cargo_home()?, toolchain);
     create_private_directory(&directory)?;
     let lock_path = directory.join("build.lock");
     let lock = open_lock(&lock_path)?;
@@ -233,6 +174,20 @@ fn cached_driver(toolchain: &Toolchain) -> Result<PathBuf> {
     Ok(executable)
 }
 
+fn driver_cache_directory(cargo_home: &Path, toolchain: &Toolchain) -> PathBuf {
+    let source_digest = blake3::hash(DRIVER_SOURCE.as_bytes());
+    let sysroot_digest = blake3::hash(toolchain.sysroot.as_os_str().as_encoded_bytes());
+
+    cargo_home
+        .join("optic")
+        .join("drivers")
+        .join(&toolchain.host)
+        .join(&toolchain.commit_hash)
+        .join(sysroot_digest.to_hex().as_str())
+        .join(source_digest.to_hex().as_str())
+        .join(PROTOCOL_VERSION)
+}
+
 fn build_driver(toolchain: &Toolchain, directory: &Path, executable: &Path) -> Result<()> {
     let source = directory.join("driver.rs");
     fs::write(&source, DRIVER_SOURCE).map_err(|source_error| Error::Filesystem {
@@ -259,6 +214,7 @@ fn build_driver(toolchain: &Toolchain, directory: &Path, executable: &Path) -> R
         .args(["-C", "prefer-dynamic", "-C", "rpath"])
         .arg("-o")
         .arg(&temporary)
+        .env("RUSTC_BOOTSTRAP", "1")
         .output()
         .map_err(|source| Error::StartProcess {
             program: program.clone(),
@@ -347,4 +303,36 @@ fn open_lock(path: &Path) -> Result<File> {
             path: path.to_owned(),
             source,
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::driver_cache_directory;
+    use crate::Toolchain;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn separates_drivers_for_distinct_canonical_sysroots() {
+        let first = toolchain("/rustup/toolchains/first");
+        let second = toolchain("/rustup/toolchains/second");
+
+        assert_ne!(
+            driver_cache_directory(Path::new("/cargo-home"), &first),
+            driver_cache_directory(Path::new("/cargo-home"), &second)
+        );
+    }
+
+    fn toolchain(sysroot: &str) -> Toolchain {
+        Toolchain {
+            rustc: PathBuf::from("rustc"),
+            release: "1.97.1".to_owned(),
+            commit_hash: "abc123".to_owned(),
+            host: "test-host".to_owned(),
+            llvm_version: "22.1.6".to_owned(),
+            sysroot: PathBuf::from(sysroot),
+            rustc_private_lib: PathBuf::from(sysroot).join("lib"),
+            llvm_dis: PathBuf::from(sysroot).join("llvm-dis"),
+            rustup_toolchain: None,
+        }
+    }
 }
