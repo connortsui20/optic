@@ -177,6 +177,9 @@ pub struct BuildSpec {
 
     /// Additional rustc arguments for an experiment capture.
     pub rustc_arguments: Vec<String>,
+
+    /// Whether rustc emits LLVM optimization remarks for the selected target.
+    pub capture_remarks: bool,
 }
 
 /// How one capture request obtained its completed evidence.
@@ -222,6 +225,52 @@ pub struct CaptureSummary {
 
     /// The number of captured LLVM artifacts.
     pub module_count: usize,
+
+    /// The captured LLVM optimization-remark evidence.
+    pub remarks: RemarkCaptureSummary,
+}
+
+/// Whether one capture contains LLVM optimization remarks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RemarkEvidenceState {
+    /// The capture did not request optimization remarks.
+    NotCaptured,
+
+    /// The capture requested remarks but LLVM emitted no typed records.
+    CapturedEmpty,
+
+    /// The capture contains one or more typed remark records.
+    Captured,
+}
+
+/// Capture-wide LLVM optimization-remark counts.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RemarkCaptureSummary {
+    /// Whether remarks were captured and whether the capture contains records.
+    pub state: RemarkEvidenceState,
+
+    /// Raw LLVM optimization-remark files.
+    pub files: usize,
+
+    /// Typed records across all raw files.
+    pub records: usize,
+
+    /// Distinct records linked to at least one exact compiler instance.
+    pub linked_records: usize,
+
+    /// Records retained without an exact compiler-instance link.
+    pub unlinked_records: usize,
+}
+
+/// One raw optimization-remark file recorded by a capture.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RemarkFileSummary {
+    /// The compiler-owned path relative to the remark directory.
+    pub name: String,
+
+    /// Typed records parsed from this file.
+    pub records: usize,
 }
 
 /// One subprocess command recorded for a capture.
@@ -332,6 +381,9 @@ pub struct CaptureDetails {
 
     /// Every captured LLVM artifact and its exact stage provenance.
     pub artifacts: Vec<ArtifactSummary>,
+
+    /// Every raw LLVM optimization-remark file.
+    pub remark_files: Vec<RemarkFileSummary>,
 }
 
 /// The result of removing stored Optic evidence for one workspace.
@@ -594,6 +646,133 @@ pub struct SourceView {
 
     /// The captured item text.
     pub text: String,
+}
+
+/// One category accepted by an optimization-remark filter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum RemarkKindFilter {
+    /// An optimization was applied.
+    Passed,
+
+    /// An optimization was not applied.
+    Missed,
+
+    /// LLVM emitted general analysis information.
+    Analysis,
+
+    /// LLVM emitted floating-point reassociation analysis.
+    AnalysisFpCommute,
+
+    /// LLVM emitted alias analysis.
+    AnalysisAliasing,
+
+    /// An optimization failed after it started.
+    Failure,
+
+    /// LLVM emitted an unclassified remark tag.
+    Unknown,
+}
+
+impl RemarkKindFilter {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Missed => "missed",
+            Self::Analysis => "analysis",
+            Self::AnalysisFpCommute => "analysis-fp-commute",
+            Self::AnalysisAliasing => "analysis-aliasing",
+            Self::Failure => "failure",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Limits one optimization-remark query.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemarkOptions {
+    /// Restricts results to one remark category.
+    pub kind: Option<RemarkKindFilter>,
+
+    /// Restricts results to one exact, case-sensitive LLVM pass name.
+    pub pass: Option<String>,
+
+    /// The maximum number of returned records.
+    pub limit: usize,
+}
+
+impl Default for RemarkOptions {
+    fn default() -> Self {
+        Self {
+            kind: None,
+            pass: None,
+            limit: Self::DEFAULT_LIMIT,
+        }
+    }
+}
+
+impl RemarkOptions {
+    /// The default maximum number of returned records.
+    pub const DEFAULT_LIMIT: usize = 100;
+
+    /// The largest supported result limit.
+    pub const MAX_LIMIT: usize = 1_000;
+}
+
+/// One typed LLVM optimization remark linked to an exact compiler instance.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RemarkView {
+    /// The compiler-owned raw file that contains the record.
+    pub file: String,
+
+    /// The zero-based document position within the raw file.
+    pub ordinal: usize,
+
+    /// The LLVM remark category.
+    pub kind: cargo_ir::RemarkKind,
+
+    /// The optimization pass that emitted the record.
+    pub pass_name: String,
+
+    /// The stable remark name within the pass.
+    pub remark_name: String,
+
+    /// The exact LLVM function symbol.
+    pub function: String,
+
+    /// The optional source location for the complete remark.
+    pub source_location: Option<cargo_ir::RemarkSourceLocation>,
+
+    /// The optional profile hotness recorded by LLVM.
+    pub hotness: Option<u64>,
+
+    /// The ordered fragments that form the remark message.
+    pub arguments: Vec<cargo_ir::RemarkArgument>,
+
+    /// The printable message formed from the ordered fragments.
+    pub message: String,
+}
+
+/// Optimization remarks for one exact compiler instance.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RemarkShowView {
+    /// The queried capture.
+    pub capture_id: CaptureId,
+
+    /// The concrete compiler instance.
+    pub instance: InstanceSummary,
+
+    /// Capture-wide optimization-remark state and counts.
+    pub summary: RemarkCaptureSummary,
+
+    /// Matching exact-symbol records up to the requested limit.
+    pub remarks: Vec<RemarkView>,
+
+    /// Whether more matching records exist after the returned limit.
+    pub truncated: bool,
+
+    /// Captured source when the caller requested it and Optic found one item.
+    pub source: Option<SourceView>,
 }
 
 /// The complete inspection view for one concrete instance.

@@ -19,7 +19,8 @@ use crate::terminal::{CodeSyntax, Terminal};
 use crate::{
     Application, BuildSpec, BuildTarget, CachePolicy, CaptureDetails, CaptureId, CaptureProfile,
     CaptureSummary, CleanSummary, CompareView, CompilerOutput, FindOptions, FindResult, InstanceId,
-    InstanceSummary, ShowView, UnstableAccessMechanism, UnstableAccessScope,
+    InstanceSummary, RemarkEvidenceState, RemarkKindFilter, RemarkOptions, RemarkShowView,
+    ShowView, UnstableAccessMechanism, UnstableAccessScope,
 };
 
 const MINIMUM_DISPLAY_ID_HEX_DIGITS: usize = 12;
@@ -269,9 +270,21 @@ enum Command {
         #[arg(long)]
         instance: Option<InstanceId>,
 
-        /// Selects one compiler output.
+        /// Selects one compiler output or LLVM optimization remarks.
         #[arg(long, value_enum, default_value_t)]
-        output: CompilerOutput,
+        output: ShowOutput,
+
+        /// Restricts optimization remarks to one category.
+        #[arg(long, value_enum)]
+        kind: Option<RemarkKindFilter>,
+
+        /// Restricts optimization remarks to one exact LLVM pass name.
+        #[arg(long = "pass")]
+        pass_name: Option<String>,
+
+        /// Limits returned optimization remarks.
+        #[arg(long, value_parser = parse_remark_limit)]
+        limit: Option<usize>,
 
         /// Includes the captured Rust source item.
         #[arg(long)]
@@ -377,6 +390,12 @@ struct BuildOptions {
     /// Passes one compiler argument to an experiment capture.
     #[arg(long = "rustc-arg")]
     rustc_arguments: Vec<String>,
+
+    /// Captures LLVM optimization remarks for the selected target.
+    ///
+    /// Use `--evidence-profile enriched` when source locations are needed.
+    #[arg(long)]
+    remarks: bool,
 }
 
 impl BuildOptions {
@@ -420,6 +439,7 @@ impl BuildOptions {
             frozen: self.frozen,
             capture_profile: self.evidence_profile,
             rustc_arguments: self.rustc_arguments.clone(),
+            capture_remarks: self.remarks,
         }
     }
 
@@ -441,6 +461,39 @@ impl BuildOptions {
             || self.frozen
             || self.evidence_profile != CaptureProfile::Faithful
             || !self.rustc_arguments.is_empty()
+            || self.remarks
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+enum ShowOutput {
+    #[default]
+    #[value(name = "llvm")]
+    Llvm,
+
+    #[value(name = "llvm-pre-opt")]
+    LlvmPreOpt,
+
+    Remarks,
+}
+
+impl ShowOutput {
+    const fn compiler_output(self) -> Option<CompilerOutput> {
+        match self {
+            Self::Llvm => Some(CompilerOutput::Llvm),
+            Self::LlvmPreOpt => Some(CompilerOutput::LlvmPreOpt),
+            Self::Remarks => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ShowOutput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Llvm => "llvm",
+            Self::LlvmPreOpt => "llvm-pre-opt",
+            Self::Remarks => "remarks",
+        })
     }
 }
 
@@ -597,7 +650,11 @@ struct ShowRequest {
 
     instance: Option<InstanceId>,
 
-    output: CompilerOutput,
+    output: ShowOutput,
+
+    remark_options: RemarkOptions,
+
+    remark_filters_supplied: bool,
 
     include_source: bool,
 
@@ -813,23 +870,35 @@ fn execute(application: &mut Application, cli: Cli) -> Result<Execution, Failure
             capture,
             instance,
             output,
+            kind,
+            pass_name,
+            limit,
             source,
             build,
             format,
-        } => execute_show(
-            application,
-            ShowRequest {
-                manifest_path,
-                query,
-                capture,
-                instance,
-                output,
-                include_source: source,
-                build,
-                format,
-                color,
-            },
-        ),
+        } => {
+            let remark_filters_supplied = kind.is_some() || pass_name.is_some() || limit.is_some();
+            execute_show(
+                application,
+                ShowRequest {
+                    manifest_path,
+                    query,
+                    capture,
+                    instance,
+                    output,
+                    remark_options: RemarkOptions {
+                        kind,
+                        pass: pass_name,
+                        limit: limit.unwrap_or(RemarkOptions::DEFAULT_LIMIT),
+                    },
+                    remark_filters_supplied,
+                    include_source: source,
+                    build,
+                    format,
+                    color,
+                },
+            )
+        }
     }
 }
 
@@ -840,12 +909,20 @@ fn execute_show(application: &mut Application, request: ShowRequest) -> Result<E
         capture,
         instance,
         output,
+        remark_options,
+        remark_filters_supplied,
         include_source,
         build,
         format,
         color,
     } = request;
     let terminal = Terminal::new(color.enabled(format));
+    if output != ShowOutput::Remarks && remark_filters_supplied {
+        return Err(Failure {
+            format,
+            message: "--kind, --pass, and --limit require --output remarks".to_owned(),
+        });
+    }
 
     if let Some(instance) = instance {
         if capture.is_some() {
@@ -871,27 +948,14 @@ fn execute_show(application: &mut Application, request: ShowRequest) -> Result<E
             });
         }
 
-        let view = application
-            .show(&instance, output, include_source)
-            .map_err(|error| Failure {
-                format,
-                message: error.to_string(),
-            })?;
-        let display_capture =
-            display_capture_id(application, &view.capture_id, format).map_err(|error| Failure {
-                format,
-                message: error.to_string(),
-            })?;
-        let display_instance = display_instance_id(application, &view.instance.id, format)
-            .map_err(|error| Failure {
-                format,
-                message: error.to_string(),
-            })?;
-
-        return success(
+        return show_selected(
+            application,
+            &instance,
+            output,
+            &remark_options,
+            include_source,
             format,
-            &view,
-            show_text(&view, &display_capture, &display_instance, &terminal),
+            &terminal,
         );
     }
 
@@ -921,8 +985,12 @@ fn execute_show(application: &mut Application, request: ShowRequest) -> Result<E
         capture
     } else {
         write_progress("Resolving compiler evidence...");
+        let mut spec = build.to_spec(manifest_path);
+        if output == ShowOutput::Remarks {
+            spec.capture_remarks = true;
+        }
         application
-            .capture(&build.to_spec(manifest_path), build.cache_policy())
+            .capture(&spec, build.cache_policy())
             .map_err(|error| Failure {
                 format,
                 message: error.to_string(),
@@ -940,6 +1008,7 @@ fn execute_show(application: &mut Application, request: ShowRequest) -> Result<E
         application,
         &result,
         output,
+        &remark_options,
         include_source,
         format,
         &terminal,
@@ -949,7 +1018,8 @@ fn execute_show(application: &mut Application, request: ShowRequest) -> Result<E
 fn select_and_show(
     application: &Application,
     result: &FindResult,
-    output: CompilerOutput,
+    output: ShowOutput,
+    remark_options: &RemarkOptions,
     include_source: bool,
     format: Format,
     terminal: &Terminal,
@@ -978,6 +1048,7 @@ fn select_and_show(
             &display_capture,
             &display_instances,
             output,
+            remark_options,
             include_source,
             terminal,
         );
@@ -985,8 +1056,53 @@ fn select_and_show(
         return selection(format, result, failure, text);
     };
 
+    show_selected(
+        application,
+        &instance.id,
+        output,
+        remark_options,
+        include_source,
+        format,
+        terminal,
+    )
+}
+
+fn show_selected(
+    application: &Application,
+    instance: &InstanceId,
+    output: ShowOutput,
+    remark_options: &RemarkOptions,
+    include_source: bool,
+    format: Format,
+    terminal: &Terminal,
+) -> Result<Execution, Failure> {
+    if let Some(compiler_output) = output.compiler_output() {
+        let view = application
+            .show(instance, compiler_output, include_source)
+            .map_err(|error| Failure {
+                format,
+                message: error.to_string(),
+            })?;
+        let display_capture =
+            display_capture_id(application, &view.capture_id, format).map_err(|error| Failure {
+                format,
+                message: error.to_string(),
+            })?;
+        let display_instance = display_instance_id(application, &view.instance.id, format)
+            .map_err(|error| Failure {
+                format,
+                message: error.to_string(),
+            })?;
+
+        return success(
+            format,
+            &view,
+            show_text(&view, &display_capture, &display_instance, terminal),
+        );
+    }
+
     let view = application
-        .show(&instance.id, output, include_source)
+        .show_remarks(instance, remark_options, include_source)
         .map_err(|error| Failure {
             format,
             message: error.to_string(),
@@ -1005,7 +1121,7 @@ fn select_and_show(
     success(
         format,
         &view,
-        show_text(&view, &display_capture, &display_instance, terminal),
+        remark_show_text(&view, &display_capture, &display_instance, terminal),
     )
 }
 
@@ -1158,6 +1274,20 @@ fn parse_find_limit(value: &str) -> std::result::Result<usize, String> {
     Ok(limit)
 }
 
+fn parse_remark_limit(value: &str) -> std::result::Result<usize, String> {
+    let limit = value
+        .parse::<usize>()
+        .map_err(|_| format!("remark limit must be an integer, got {value}"))?;
+    if !(1..=RemarkOptions::MAX_LIMIT).contains(&limit) {
+        return Err(format!(
+            "remark limit must be from 1 through {}, got {limit}",
+            RemarkOptions::MAX_LIMIT
+        ));
+    }
+
+    Ok(limit)
+}
+
 fn write_progress(message: &str) {
     let _ = write_stderr(&format!("{message}\n"));
 }
@@ -1194,7 +1324,7 @@ fn capture_text(
     );
 
     format!(
-        "{} {}\n{}{}\n{}{}\n{}{}\n{}{}\n\n{}\n  {}\n  {}\n",
+        "{} {}\n{}{}\n{}{}\n{}{}\n{}{}\n{}{}\n\n{}\n  {}\n  {}\n",
         terminal.heading("Capture"),
         terminal.identifier(&display_id.text, display_id.unique_prefix_length),
         terminal.label("  Status     "),
@@ -1208,6 +1338,8 @@ fn capture_text(
         summary.target,
         terminal.label("  Instances  "),
         summary.instance_count,
+        terminal.label("  Remarks    "),
+        remark_capture_text(summary),
         terminal.heading("Next commands"),
         find,
         show,
@@ -1243,13 +1375,14 @@ fn captures_text(
     for (capture, display_id) in captures.iter().zip(display_ids) {
         writeln!(
             output,
-            "{}  {}  {}  {:?}  {} instances, {} artifacts",
+            "{}  {}  {}  {:?}  {} instances, {} artifacts, {}",
             terminal.identifier(&display_id.text, display_id.unique_prefix_length),
             capture.rustc_release,
             capture.target,
             capture.capture_profile,
             capture.instance_count,
             capture.module_count,
+            remark_capture_text(capture),
         )
         .expect("writing capture text to a String cannot fail");
     }
@@ -1333,8 +1466,36 @@ fn capture_details_text(
         )
         .expect("writing capture details to a String cannot fail");
     }
+    writeln!(
+        output,
+        "  Remarks  {}",
+        remark_capture_text(&details.summary)
+    )
+    .expect("writing capture details to a String cannot fail");
+    for file in &details.remark_files {
+        writeln!(output, "    {}  {} records", file.name, file.records)
+            .expect("writing capture details to a String cannot fail");
+    }
 
     output
+}
+
+fn remark_capture_text(summary: &CaptureSummary) -> String {
+    match summary.remarks.state {
+        RemarkEvidenceState::NotCaptured => "remarks not captured".to_owned(),
+        RemarkEvidenceState::CapturedEmpty => {
+            format!(
+                "remarks captured, {} files, no records",
+                summary.remarks.files
+            )
+        }
+        RemarkEvidenceState::Captured => format!(
+            "{} remark records ({} linked, {} unlinked)",
+            summary.remarks.records,
+            summary.remarks.linked_records,
+            summary.remarks.unlinked_records,
+        ),
+    }
 }
 
 fn unstable_access_mechanism_name(mechanism: UnstableAccessMechanism) -> &'static str {
@@ -1439,7 +1600,7 @@ fn find_text(
         writeln!(
             output,
             "  {}",
-            show_command(terminal, display_id, CompilerOutput::default(), false)
+            show_command(terminal, display_id, ShowOutput::default(), None, false)
         )
         .expect("writing instance text to a String cannot fail");
     }
@@ -1521,7 +1682,8 @@ fn selection_text(
     failure: SelectionFailure,
     display_capture: &DisplayIdentifier,
     display_instances: &[DisplayIdentifier],
-    compiler_output: CompilerOutput,
+    selected_output: ShowOutput,
+    remark_options: &RemarkOptions,
     include_source: bool,
     terminal: &Terminal,
 ) -> String {
@@ -1548,7 +1710,13 @@ fn selection_text(
         writeln!(
             output,
             "  {}",
-            show_command(terminal, display_id, compiler_output, include_source)
+            show_command(
+                terminal,
+                display_id,
+                selected_output,
+                (selected_output == ShowOutput::Remarks).then_some(remark_options),
+                include_source,
+            )
         )
         .expect("writing selection text to a String cannot fail");
     }
@@ -1569,14 +1737,27 @@ fn selection_text(
 fn show_command(
     terminal: &Terminal,
     instance_id: &DisplayIdentifier,
-    compiler_output: CompilerOutput,
+    output: ShowOutput,
+    remark_options: Option<&RemarkOptions>,
     include_source: bool,
 ) -> String {
     let mut after = String::new();
 
-    if compiler_output != CompilerOutput::default() {
-        write!(after, " --output {compiler_output}")
-            .expect("writing command text to a String cannot fail");
+    if output != ShowOutput::default() {
+        write!(after, " --output {output}").expect("writing command text to a String cannot fail");
+    }
+    if let Some(options) = remark_options {
+        if let Some(kind) = options.kind {
+            write!(after, " --kind {}", kind.name())
+                .expect("writing command text to a String cannot fail");
+        }
+        if let Some(pass) = &options.pass {
+            write!(after, " --pass {pass}").expect("writing command text to a String cannot fail");
+        }
+        if options.limit != RemarkOptions::DEFAULT_LIMIT {
+            write!(after, " --limit {}", options.limit)
+                .expect("writing command text to a String cannot fail");
+        }
     }
     if include_source {
         after.push_str(" --source");
@@ -1640,6 +1821,101 @@ fn show_text(
     }
 
     output
+}
+
+fn remark_show_text(
+    view: &RemarkShowView,
+    display_capture: &DisplayIdentifier,
+    display_instance: &DisplayIdentifier,
+    terminal: &Terminal,
+) -> String {
+    let state = match view.summary.state {
+        RemarkEvidenceState::NotCaptured => terminal.warning("not captured"),
+        RemarkEvidenceState::CapturedEmpty => terminal.warning("captured, no records"),
+        RemarkEvidenceState::Captured if view.remarks.is_empty() => {
+            terminal.warning("captured; no matching remarks")
+        }
+        RemarkEvidenceState::Captured => terminal.positive("captured"),
+    };
+    let mut output = format!(
+        "{} {}\n{}{}\n{}{}\n{}{}\n{}{}\n",
+        terminal.heading("Function"),
+        terminal.function(&view.instance.display_name),
+        terminal.label("  Instance  "),
+        terminal.identifier(
+            &display_instance.text,
+            display_instance.unique_prefix_length,
+        ),
+        terminal.label("  Capture   "),
+        terminal.identifier(&display_capture.text, display_capture.unique_prefix_length),
+        terminal.label("  Output    "),
+        "Optimization remarks",
+        terminal.label("  State     "),
+        state,
+    );
+
+    if let Some(source) = &view.source {
+        let heading = format!("Source  {}:{}", source.path, source.start_line);
+        push_code_section(
+            &mut output,
+            terminal,
+            &heading,
+            &source.text,
+            CodeSyntax::Rust,
+        );
+    }
+    if view.summary.state == RemarkEvidenceState::NotCaptured {
+        output.push_str(
+            "\nCapture remarks with a build-based `cargo optic show QUERY --output remarks` \
+             or `cargo optic capture --remarks`.\n",
+        );
+        return output;
+    }
+
+    for remark in &view.remarks {
+        let location = remark
+            .source_location
+            .as_ref()
+            .map_or_else(String::new, |location| {
+                format!("  {}:{}:{}", location.file, location.line, location.column)
+            });
+        let hotness = remark
+            .hotness
+            .map_or_else(String::new, |hotness| format!("  hotness {hotness}"));
+        writeln!(
+            output,
+            "\n{}  {}/{}{}{}\n  {}",
+            remark_kind_text(&remark.kind),
+            remark.pass_name,
+            remark.remark_name,
+            location,
+            hotness,
+            remark.message,
+        )
+        .expect("writing remark text to a String cannot fail");
+    }
+    if view.truncated {
+        writeln!(
+            output,
+            "{}",
+            terminal.warning("More remarks match. Increase --limit (maximum 1000).")
+        )
+        .expect("writing remark text to a String cannot fail");
+    }
+
+    output
+}
+
+fn remark_kind_text(kind: &crate::RemarkKind) -> &str {
+    match kind {
+        crate::RemarkKind::Passed => "passed",
+        crate::RemarkKind::Missed => "missed",
+        crate::RemarkKind::Analysis => "analysis",
+        crate::RemarkKind::AnalysisFpCommute => "analysis-fp-commute",
+        crate::RemarkKind::AnalysisAliasing => "analysis-aliasing",
+        crate::RemarkKind::Failure => "failure",
+        crate::RemarkKind::Unknown { .. } => "unknown",
+    }
 }
 
 fn push_code_section(

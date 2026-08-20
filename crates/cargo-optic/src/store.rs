@@ -21,8 +21,9 @@ use crate::{
     ArtifactSummary, BodyView, BuildSpec, CaptureDetails, CaptureDisposition, CaptureId,
     CaptureProfile, CaptureSummary, CommandView, CompilerOutput, CompilerProvenance,
     EnvironmentView, Error, FindMatchKind, FindOptions, FindResult, GcSummary, InstanceId,
-    InstanceSummary, OutputAvailability, RemoveSummary, Result, ShowView, SourceLocation,
-    StoreStatus, VerifySummary,
+    InstanceSummary, OutputAvailability, RemarkCaptureSummary, RemarkEvidenceState,
+    RemarkFileSummary, RemarkKindFilter, RemarkOptions, RemarkShowView, RemarkView, RemoveSummary,
+    Result, ShowView, SourceLocation, StoreStatus, VerifySummary,
 };
 
 const STORE_VERSION: u32 = 7;
@@ -230,6 +231,11 @@ impl Store {
         let created_at_ms = now_ms()?;
         let request_json = serde_json::to_string(spec)?;
         let invocation_json = serde_json::to_string(&bundle.invocation)?;
+        if spec.capture_remarks != bundle.remarks.is_some() {
+            return Err(Error::InvalidStoredData {
+                message: "remark evidence must match the capture request".to_owned(),
+            });
+        }
         let final_codegen_units = bundle
             .modules
             .iter()
@@ -255,6 +261,39 @@ impl Store {
             });
         }
 
+        let instance_symbols = bundle
+            .instances
+            .iter()
+            .map(|instance| instance.raw_symbol.as_str())
+            .collect::<HashSet<_>>();
+        let mut published_remarks = Vec::new();
+        let mut remark_records = 0_usize;
+        let mut linked_remark_records = 0_usize;
+        if let Some(remarks) = &bundle.remarks {
+            published_remarks.reserve(remarks.len());
+            for file in remarks {
+                let blob = self.publish_blob(&file.raw_path)?;
+                remark_records = remark_records.saturating_add(file.records.len());
+                linked_remark_records = linked_remark_records.saturating_add(
+                    file.records
+                        .iter()
+                        .filter(|record| instance_symbols.contains(record.function.as_str()))
+                        .count(),
+                );
+                published_remarks.push(PublishedRemarkFile {
+                    name: file.name.clone(),
+                    blob,
+                    records: file.records.clone(),
+                });
+            }
+        }
+        let remark_summary = remark_summary(
+            bundle.remarks.is_some(),
+            published_remarks.len(),
+            remark_records,
+            linked_remark_records,
+        );
+
         let mut published_sources = Vec::with_capacity(sources.entries.len());
         for source in &sources.entries {
             let blob = self.publish_blob(&source.snapshot)?;
@@ -276,10 +315,18 @@ impl Store {
                 toolchain: &bundle.toolchain,
                 target,
                 created_at_ms,
+                remarks: remark_summary,
             },
         )?;
         let evidence_index = insert_modules(&transaction, capture_id, &modules)?;
-        insert_instances(&transaction, capture_id, &bundle.instances, &evidence_index)?;
+        let instance_index =
+            insert_instances(&transaction, capture_id, &bundle.instances, &evidence_index)?;
+        insert_remarks(
+            &transaction,
+            capture_id,
+            &published_remarks,
+            &instance_index,
+        )?;
         insert_sources(&transaction, capture_id, &published_sources)?;
         transaction.execute(
             "INSERT INTO capture_cache(request_key, capture_id, analysis_key) VALUES (?1, ?2, ?3)
@@ -301,7 +348,9 @@ impl Store {
         let mut statement = self.connection.prepare(
             "SELECT id, created_at_ms, rustc_release, llvm_version, target, profile,
                     (SELECT COUNT(*) FROM instances WHERE capture_id = captures.id),
-                    (SELECT COUNT(*) FROM modules WHERE capture_id = captures.id)
+                    (SELECT COUNT(*) FROM modules WHERE capture_id = captures.id),
+                    remarks_captured, remark_file_count, remark_record_count,
+                    remark_linked_record_count
              FROM captures ORDER BY created_at_ms DESC",
         )?;
         let captures = statement
@@ -436,6 +485,18 @@ impl Store {
         let artifacts = statement
             .query_map([capture_id.as_str()], artifact_summary_from_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut statement = self.connection.prepare(
+            "SELECT name, record_count FROM remark_files
+             WHERE capture_id = ?1 ORDER BY name",
+        )?;
+        let remark_files = statement
+            .query_map([capture_id.as_str()], |row| {
+                Ok(RemarkFileSummary {
+                    name: row.get(0)?,
+                    records: integer_from_row(row, 1)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(CaptureDetails {
             summary,
@@ -461,6 +522,7 @@ impl Store {
                 .map(|argument| sanitize_store_path(argument, &self.root))
                 .collect(),
             artifacts,
+            remark_files,
         })
     }
 
@@ -573,6 +635,60 @@ impl Store {
         })
     }
 
+    pub(crate) fn show_remarks(
+        &self,
+        instance_prefix: &InstanceId,
+        options: &RemarkOptions,
+    ) -> Result<RemarkShowView> {
+        let resolved = self.resolve_instance(instance_prefix)?;
+        let instance = self.connection.query_row(
+            &format!("{} WHERE instances.id = ?1", instance_select()),
+            [resolved.instance_id.as_str()],
+            instance_from_row,
+        )?;
+        let summary = self
+            .capture_summary(&resolved.capture_id, CaptureDisposition::Captured)?
+            .remarks;
+        let mut statement = self.connection.prepare(
+            "SELECT remark_files.name, remarks.ordinal, remarks.kind, remarks.unknown_kind,
+                    remarks.pass_name, remarks.remark_name, remarks.function_symbol,
+                    remarks.source_file, remarks.source_line, remarks.source_column,
+                    remarks.hotness, remarks.arguments_json, remarks.message
+             FROM remark_instances
+             JOIN remarks ON remarks.id = remark_instances.remark_id
+             JOIN remark_files ON remark_files.id = remarks.file_id
+             WHERE remark_instances.instance_id = ?1
+               AND (?2 IS NULL OR remarks.kind = ?2)
+               AND (?3 IS NULL OR remarks.pass_name = ?3)
+             ORDER BY remark_files.name, remarks.ordinal
+             LIMIT ?4",
+        )?;
+        let kind = options.kind.map(RemarkKindFilter::name);
+        let fetch_limit = sqlite_usize("remark result limit", options.limit.saturating_add(1))?;
+        let mut remarks = statement
+            .query_map(
+                params![
+                    resolved.instance_id.as_str(),
+                    kind,
+                    options.pass,
+                    fetch_limit
+                ],
+                remark_from_row,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let truncated = remarks.len() > options.limit;
+        remarks.truncate(options.limit);
+
+        Ok(RemarkShowView {
+            capture_id: resolved.capture_id,
+            instance,
+            summary,
+            remarks,
+            truncated,
+            source: None,
+        })
+    }
+
     pub(crate) fn source_file(
         &self,
         capture_id: &CaptureId,
@@ -658,7 +774,9 @@ impl Store {
              UNION
              SELECT text_blob FROM modules WHERE capture_id = ?1
              UNION
-             SELECT blob FROM sources WHERE capture_id = ?1",
+             SELECT blob FROM sources WHERE capture_id = ?1
+             UNION
+             SELECT blob FROM remark_files WHERE capture_id = ?1",
         )?;
         let digests = statement
             .query_map([capture_id.as_str()], |row| row.get::<_, String>(0))?
@@ -676,7 +794,8 @@ impl Store {
         let mut statement = self.connection.prepare(
             "SELECT bitcode_blob FROM modules
              UNION SELECT text_blob FROM modules
-             UNION SELECT blob FROM sources",
+             UNION SELECT blob FROM sources
+             UNION SELECT blob FROM remark_files",
         )?;
         let digests = statement
             .query_map([], |row| row.get::<_, String>(0))?
@@ -743,7 +862,9 @@ impl Store {
             .query_row(
                 "SELECT id, created_at_ms, rustc_release, llvm_version, target, profile,
                         (SELECT COUNT(*) FROM instances WHERE capture_id = captures.id),
-                        (SELECT COUNT(*) FROM modules WHERE capture_id = captures.id)
+                        (SELECT COUNT(*) FROM modules WHERE capture_id = captures.id),
+                        remarks_captured, remark_file_count, remark_record_count,
+                        remark_linked_record_count
                  FROM captures WHERE id = ?1",
                 [capture_id.as_str()],
                 |row| summary_from_row(row, disposition),
@@ -782,7 +903,9 @@ impl Store {
             .query_row(
                 "SELECT id, created_at_ms, rustc_release, llvm_version, target, profile,
                         (SELECT COUNT(*) FROM instances WHERE capture_id = captures.id),
-                        (SELECT COUNT(*) FROM modules WHERE capture_id = captures.id)
+                        (SELECT COUNT(*) FROM modules WHERE capture_id = captures.id),
+                        remarks_captured, remark_file_count, remark_record_count,
+                        remark_linked_record_count
                  FROM captures WHERE id = ?1",
                 [capture_id.as_str()],
                 |row| summary_from_row(row, disposition),
@@ -1236,6 +1359,13 @@ struct PublishedCapture<'a> {
     toolchain: &'a Toolchain,
     target: &'a str,
     created_at_ms: u64,
+    remarks: RemarkCaptureSummary,
+}
+
+struct PublishedRemarkFile {
+    name: String,
+    blob: String,
+    records: Vec<cargo_ir::OptimizationRemark>,
 }
 
 struct PublishedSource {
@@ -1347,7 +1477,19 @@ fn create_schema(connection: &mut Connection) -> Result<()> {
              llvm_dis_path TEXT NOT NULL,
              target TEXT NOT NULL,
              profile TEXT NOT NULL,
-             invocation_json TEXT NOT NULL
+             invocation_json TEXT NOT NULL,
+             remarks_captured INTEGER NOT NULL DEFAULT 0 CHECK(remarks_captured IN (0, 1)),
+             remark_file_count INTEGER NOT NULL DEFAULT 0 CHECK(remark_file_count >= 0),
+             remark_record_count INTEGER NOT NULL DEFAULT 0 CHECK(remark_record_count >= 0),
+             remark_linked_record_count INTEGER NOT NULL DEFAULT 0 CHECK(
+                 remark_linked_record_count >= 0
+                 AND remark_linked_record_count <= remark_record_count
+             ),
+             CHECK(remarks_captured = 1 OR (
+                 remark_file_count = 0
+                 AND remark_record_count = 0
+                 AND remark_linked_record_count = 0
+             ))
          );
          CREATE TABLE modules(
              id TEXT PRIMARY KEY,
@@ -1455,6 +1597,49 @@ fn create_schema(connection: &mut Connection) -> Result<()> {
              size_estimate INTEGER,
              PRIMARY KEY(instance_id, codegen_unit)
          );
+         CREATE TABLE remark_files(
+             id TEXT PRIMARY KEY,
+             capture_id TEXT NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+             name TEXT NOT NULL,
+             blob TEXT NOT NULL,
+             record_count INTEGER NOT NULL CHECK(record_count >= 0),
+             UNIQUE(capture_id, name)
+         );
+         CREATE TABLE remarks(
+             id TEXT PRIMARY KEY,
+             file_id TEXT NOT NULL REFERENCES remark_files(id) ON DELETE CASCADE,
+             ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+             kind TEXT NOT NULL CHECK(kind IN (
+                 'passed', 'missed', 'analysis', 'analysis-fp-commute',
+                 'analysis-aliasing', 'failure', 'unknown'
+             )),
+             unknown_kind TEXT,
+             pass_name TEXT NOT NULL,
+             remark_name TEXT NOT NULL,
+             function_symbol TEXT NOT NULL,
+             source_file TEXT,
+             source_line INTEGER,
+             source_column INTEGER,
+             hotness INTEGER,
+             arguments_json TEXT NOT NULL,
+             message TEXT NOT NULL,
+             UNIQUE(file_id, ordinal),
+             CHECK((kind = 'unknown') = (unknown_kind IS NOT NULL)),
+             CHECK(
+                 (source_file IS NULL AND source_line IS NULL AND source_column IS NULL)
+                 OR (source_file IS NOT NULL AND source_line IS NOT NULL
+                     AND source_column IS NOT NULL)
+             )
+         );
+         CREATE INDEX remarks_function ON remarks(function_symbol);
+         CREATE INDEX remarks_filter ON remarks(kind, pass_name);
+         CREATE TABLE remark_instances(
+             remark_id TEXT NOT NULL REFERENCES remarks(id) ON DELETE CASCADE,
+             instance_id TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+             PRIMARY KEY(remark_id, instance_id)
+         );
+         CREATE INDEX remark_instances_instance
+             ON remark_instances(instance_id, remark_id);
          CREATE TABLE sources(
              capture_id TEXT NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
              path TEXT NOT NULL,
@@ -1480,8 +1665,12 @@ fn insert_capture(transaction: &Transaction<'_>, capture: PublishedCapture<'_>) 
         "INSERT INTO captures(
              id, created_at_ms, request_key, request_json, rustc_path, rustc_release,
              rustc_commit, rustc_host, llvm_version, rustc_sysroot, llvm_dis_path, target,
-             profile, invocation_json
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             profile, invocation_json, remarks_captured, remark_file_count,
+             remark_record_count, remark_linked_record_count
+         ) VALUES (
+             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+             ?15, ?16, ?17, ?18
+         )",
         params![
             capture.capture_id.as_str(),
             created_at_ms,
@@ -1497,6 +1686,10 @@ fn insert_capture(transaction: &Transaction<'_>, capture: PublishedCapture<'_>) 
             capture.target,
             capture_profile_name(capture.spec.capture_profile),
             capture.invocation_json,
+            capture.remarks.state != RemarkEvidenceState::NotCaptured,
+            sqlite_usize("remark file count", capture.remarks.files)?,
+            sqlite_usize("remark record count", capture.remarks.records)?,
+            sqlite_usize("linked remark record count", capture.remarks.linked_records)?,
         ],
     )?;
 
@@ -1620,8 +1813,9 @@ fn insert_instances(
     capture_id: &CaptureId,
     instances: &[cargo_ir::CompilerInstance],
     evidence_index: &IndexedEvidence,
-) -> Result<()> {
+) -> Result<HashMap<String, Vec<InstanceId>>> {
     let mut definitions: HashMap<String, String> = HashMap::new();
+    let mut instances_by_symbol: HashMap<String, Vec<InstanceId>> = HashMap::new();
 
     for instance in instances {
         let instance_id = InstanceId::new();
@@ -1674,6 +1868,10 @@ fn insert_instances(
                 )?,
             ],
         )?;
+        instances_by_symbol
+            .entry(instance.raw_symbol.clone())
+            .or_default()
+            .push(instance_id.clone());
         let instance_rowid = transaction.last_insert_rowid();
         transaction.execute(
             "INSERT INTO instance_search(
@@ -1713,7 +1911,7 @@ fn insert_instances(
         }
     }
 
-    Ok(())
+    Ok(instances_by_symbol)
 }
 
 fn insert_definition(
@@ -1758,6 +1956,87 @@ fn bodies_for_instance<'a>(
         .map_or(&[], Vec::as_slice)
 }
 
+fn insert_remarks(
+    transaction: &Transaction<'_>,
+    capture_id: &CaptureId,
+    files: &[PublishedRemarkFile],
+    instances_by_symbol: &HashMap<String, Vec<InstanceId>>,
+) -> Result<()> {
+    for file in files {
+        let file_id = format!("remfile_{}", uuid::Uuid::now_v7().simple());
+        transaction.execute(
+            "INSERT INTO remark_files(id, capture_id, name, blob, record_count)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                file_id,
+                capture_id.as_str(),
+                file.name,
+                file.blob,
+                sqlite_usize("remark file record count", file.records.len())?,
+            ],
+        )?;
+
+        for (ordinal, remark) in file.records.iter().enumerate() {
+            let remark_id = format!("rem_{}", uuid::Uuid::now_v7().simple());
+            let (kind, unknown_kind) = remark_kind_name(&remark.kind);
+            let source = remark.source_location.as_ref();
+            let arguments_json = serde_json::to_string(&remark.arguments)?;
+            transaction.execute(
+                "INSERT INTO remarks(
+                     id, file_id, ordinal, kind, unknown_kind, pass_name, remark_name,
+                     function_symbol, source_file, source_line, source_column, hotness,
+                     arguments_json, message
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![
+                    remark_id,
+                    file_id,
+                    sqlite_usize("remark ordinal", ordinal)?,
+                    kind,
+                    unknown_kind,
+                    remark.pass_name,
+                    remark.remark_name,
+                    remark.function,
+                    source.map(|source| source.file.as_str()),
+                    optional_sqlite_integer(
+                        "remark source line",
+                        source.map(|source| source.line)
+                    )?,
+                    optional_sqlite_integer(
+                        "remark source column",
+                        source.map(|source| source.column)
+                    )?,
+                    optional_sqlite_integer("remark hotness", remark.hotness)?,
+                    arguments_json,
+                    remark.message,
+                ],
+            )?;
+
+            if let Some(instances) = instances_by_symbol.get(&remark.function) {
+                for instance_id in instances {
+                    transaction.execute(
+                        "INSERT INTO remark_instances(remark_id, instance_id) VALUES (?1, ?2)",
+                        params![remark_id, instance_id.as_str()],
+                    )?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn remark_kind_name(kind: &cargo_ir::RemarkKind) -> (&'static str, Option<&str>) {
+    match kind {
+        cargo_ir::RemarkKind::Passed => ("passed", None),
+        cargo_ir::RemarkKind::Missed => ("missed", None),
+        cargo_ir::RemarkKind::Analysis => ("analysis", None),
+        cargo_ir::RemarkKind::AnalysisFpCommute => ("analysis-fp-commute", None),
+        cargo_ir::RemarkKind::AnalysisAliasing => ("analysis-aliasing", None),
+        cargo_ir::RemarkKind::Failure => ("failure", None),
+        cargo_ir::RemarkKind::Unknown { tag } => ("unknown", Some(tag)),
+    }
+}
+
 fn insert_sources(
     transaction: &Transaction<'_>,
     capture_id: &CaptureId,
@@ -1778,6 +2057,10 @@ fn summary_from_row(
     disposition: CaptureDisposition,
 ) -> rusqlite::Result<CaptureSummary> {
     let profile = capture_profile_from_name(row.get::<_, String>(5)?.as_str(), 5)?;
+    let remarks_captured = row.get::<_, bool>(8)?;
+    let remark_files = integer_from_row(row, 9)?;
+    let remark_records = integer_from_row(row, 10)?;
+    let linked_remark_records = integer_from_row(row, 11)?;
 
     Ok(CaptureSummary {
         id: row.get(0)?,
@@ -1789,7 +2072,36 @@ fn summary_from_row(
         capture_profile: profile,
         instance_count: integer_from_row(row, 6)?,
         module_count: integer_from_row(row, 7)?,
+        remarks: remark_summary(
+            remarks_captured,
+            remark_files,
+            remark_records,
+            linked_remark_records,
+        ),
     })
+}
+
+fn remark_summary(
+    captured: bool,
+    files: usize,
+    records: usize,
+    linked_records: usize,
+) -> RemarkCaptureSummary {
+    let state = if !captured {
+        RemarkEvidenceState::NotCaptured
+    } else if records == 0 {
+        RemarkEvidenceState::CapturedEmpty
+    } else {
+        RemarkEvidenceState::Captured
+    };
+
+    RemarkCaptureSummary {
+        state,
+        files,
+        records,
+        linked_records,
+        unlinked_records: records.saturating_sub(linked_records),
+    }
 }
 
 fn validate_request_key(value: &str) -> Result<()> {
@@ -1850,6 +2162,55 @@ fn artifact_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Artifa
         declarations: integer_from_row(row, 7)?,
         aliases: integer_from_row(row, 8)?,
     })
+}
+
+fn remark_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RemarkView> {
+    let kind_name = row.get::<_, String>(2)?;
+    let unknown_kind = row.get::<_, Option<String>>(3)?;
+    let kind = remark_kind_from_name(&kind_name, unknown_kind, 2)?;
+    let source_file = row.get::<_, Option<String>>(7)?;
+    let source_location = match source_file {
+        Some(file) => Some(cargo_ir::RemarkSourceLocation {
+            file,
+            line: integer_from_row(row, 8)?,
+            column: integer_from_row(row, 9)?,
+        }),
+        None => None,
+    };
+    let arguments_json = row.get::<_, String>(11)?;
+    let arguments = serde_json::from_str(&arguments_json).map_err(|source| {
+        rusqlite::Error::FromSqlConversionFailure(11, Type::Text, Box::new(source))
+    })?;
+
+    Ok(RemarkView {
+        file: row.get(0)?,
+        ordinal: integer_from_row(row, 1)?,
+        kind,
+        pass_name: row.get(4)?,
+        remark_name: row.get(5)?,
+        function: row.get(6)?,
+        source_location,
+        hotness: optional_integer_from_row(row, 10)?,
+        arguments,
+        message: row.get(12)?,
+    })
+}
+
+fn remark_kind_from_name(
+    value: &str,
+    unknown: Option<String>,
+    index: usize,
+) -> rusqlite::Result<cargo_ir::RemarkKind> {
+    match (value, unknown) {
+        ("passed", None) => Ok(cargo_ir::RemarkKind::Passed),
+        ("missed", None) => Ok(cargo_ir::RemarkKind::Missed),
+        ("analysis", None) => Ok(cargo_ir::RemarkKind::Analysis),
+        ("analysis-fp-commute", None) => Ok(cargo_ir::RemarkKind::AnalysisFpCommute),
+        ("analysis-aliasing", None) => Ok(cargo_ir::RemarkKind::AnalysisAliasing),
+        ("failure", None) => Ok(cargo_ir::RemarkKind::Failure),
+        ("unknown", Some(tag)) => Ok(cargo_ir::RemarkKind::Unknown { tag }),
+        _ => Err(invalid_stored_text(index, "remark kind", value)),
+    }
 }
 
 fn command_view(command: cargo_ir::CommandInvocation, store_root: &Path) -> CommandView {
@@ -1918,6 +2279,23 @@ where
     T::try_from(value).map_err(|source| {
         rusqlite::Error::FromSqlConversionFailure(index, Type::Integer, Box::new(source))
     })
+}
+
+fn optional_integer_from_row<T>(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<Option<T>>
+where
+    T: TryFrom<i64>,
+    T::Error: std::error::Error + Send + Sync + 'static,
+{
+    row.get::<_, Option<i64>>(index)?
+        .map(|value| {
+            T::try_from(value).map_err(|source| {
+                rusqlite::Error::FromSqlConversionFailure(index, Type::Integer, Box::new(source))
+            })
+        })
+        .transpose()
 }
 
 fn instance_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstanceSummary> {
@@ -2109,7 +2487,7 @@ mod tests {
     };
     use crate::{
         CaptureDisposition, CaptureId, CompilerOutput, Error, FindMatchKind, FindOptions,
-        InstanceId,
+        InstanceId, RemarkEvidenceState, RemarkKindFilter, RemarkOptions,
     };
 
     #[test]
@@ -2345,6 +2723,115 @@ mod tests {
         let optimized = &result.instances[0].availability[0];
 
         assert_eq!(optimized.definitions, 1);
+    }
+
+    #[test]
+    fn stores_filters_and_reclaims_exact_symbol_remarks() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let mut store = lookup_store(temporary.path());
+        insert_search_instance(
+            &store,
+            1,
+            "remark-definition",
+            "remark_crate",
+            "remark_crate::kernel",
+            "remark_crate::kernel",
+            "_Rremark_kernel",
+            [1, 0, 0, 0, 0, 0],
+        );
+        let instance_id = "ins_00000000000000000000000000000001"
+            .parse::<InstanceId>()
+            .expect("the test instance ID is valid");
+
+        let missing = store
+            .show_remarks(&instance_id, &RemarkOptions::default())
+            .expect("the non-remark capture can be inspected");
+        assert_eq!(missing.summary.state, RemarkEvidenceState::NotCaptured);
+
+        let raw_path = temporary.path().join("remarks.opt.opt.yaml");
+        fs::write(&raw_path, b"raw remark evidence")
+            .expect("the test can create raw remark evidence");
+        let raw_blob = store
+            .publish_blob(&raw_path)
+            .expect("the raw remark can be published");
+        store
+            .connection
+            .execute_batch(&format!(
+                "UPDATE captures SET
+                     remarks_captured = 1, remark_file_count = 1, remark_record_count = 3,
+                     remark_linked_record_count = 2
+                 WHERE id = 'cap_11111111111111111111111111111111';
+                 INSERT INTO remark_files(id, capture_id, name, blob, record_count) VALUES (
+                     'remfile_1', 'cap_11111111111111111111111111111111',
+                     'crate.opt.opt.yaml', '{raw_blob}', 3
+                 );
+                 INSERT INTO remarks(
+                     id, file_id, ordinal, kind, unknown_kind, pass_name, remark_name,
+                     function_symbol, arguments_json, message
+                 ) VALUES
+                     ('rem_1', 'remfile_1', 0, 'passed', NULL, 'inline', 'Inlined',
+                      '_Rremark_kernel', '[]', 'inlined'),
+                     ('rem_2', 'remfile_1', 1, 'missed', NULL, 'loop-vectorize', 'NotVectorized',
+                      '_Rremark_kernel', '[]', 'not vectorized'),
+                     ('rem_3', 'remfile_1', 2, 'analysis', NULL, 'inline', 'Unlinked',
+                      '_Runlinked', '[]', 'unlinked');
+                 INSERT INTO remark_instances(remark_id, instance_id) VALUES
+                     ('rem_1', 'ins_00000000000000000000000000000001'),
+                     ('rem_2', 'ins_00000000000000000000000000000001');"
+            ))
+            .expect("the test can insert optimization remarks");
+
+        let remarks = store
+            .show_remarks(&instance_id, &RemarkOptions::default())
+            .expect("the exact-symbol remarks can be shown");
+        assert_eq!(remarks.summary.state, RemarkEvidenceState::Captured);
+        assert_eq!(remarks.summary.records, 3);
+        assert_eq!(remarks.summary.linked_records, 2);
+        assert_eq!(remarks.summary.unlinked_records, 1);
+        assert_eq!(remarks.remarks.len(), 2);
+        assert!(!remarks.truncated);
+
+        let filtered = store
+            .show_remarks(
+                &instance_id,
+                &RemarkOptions {
+                    kind: Some(RemarkKindFilter::Passed),
+                    pass: Some("inline".to_owned()),
+                    limit: 1,
+                },
+            )
+            .expect("remark filters can be applied");
+        assert_eq!(filtered.remarks.len(), 1);
+        assert_eq!(filtered.remarks[0].message, "inlined");
+
+        let limited = store
+            .show_remarks(
+                &instance_id,
+                &RemarkOptions {
+                    limit: 1,
+                    ..RemarkOptions::default()
+                },
+            )
+            .expect("remark limits can be applied");
+        assert!(limited.truncated);
+
+        assert!(
+            store
+                .verify()
+                .expect("raw remark verification succeeds")
+                .verified_blobs
+                > 0
+        );
+        store
+            .remove_capture(&lookup_capture_id())
+            .expect("the remark capture can be removed");
+        assert!(
+            store
+                .gc()
+                .expect("the raw remark blob can be reclaimed")
+                .removed_blobs
+                > 0
+        );
     }
 
     #[test]

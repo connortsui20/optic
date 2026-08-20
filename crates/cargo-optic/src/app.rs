@@ -20,7 +20,8 @@ use crate::store::{
 use crate::{
     BodySetDelta, BodySetSummary, BuildSpec, CachePolicy, CaptureDetails, CaptureDisposition,
     CaptureId, CaptureSummary, CleanSummary, CompareView, CompilerOutput, FindOptions, FindResult,
-    GcSummary, InstanceId, RemoveSummary, Result, ShowView, StoreStatus, VerifySummary,
+    GcSummary, InstanceId, RemarkOptions, RemarkShowView, RemoveSummary, Result, ShowView,
+    StoreStatus, VerifySummary,
 };
 
 const EVIDENCE_VERSION: u32 = 4;
@@ -331,6 +332,34 @@ impl Application {
         Ok(view)
     }
 
+    /// Loads optimization remarks and optional captured source for one instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the options, instance, stored records, or source evidence are invalid.
+    pub fn show_remarks(
+        &self,
+        instance_id: &InstanceId,
+        options: &RemarkOptions,
+        include_source: bool,
+    ) -> Result<RemarkShowView> {
+        validate_remark_options(options)?;
+        let _reader = self.store.lock_evidence_reader()?;
+        let mut view = self.store.show_remarks(instance_id, options)?;
+
+        if include_source {
+            view.source = if let Some(location) = &view.instance.source {
+                self.store
+                    .source_file(&view.capture_id, location)?
+                    .and_then(|source| find_item_at(location, &source))
+            } else {
+                None
+            };
+        }
+
+        Ok(view)
+    }
+
     /// Compares compact LLVM structure for two exact instances.
     ///
     /// # Errors
@@ -407,10 +436,29 @@ impl Application {
                     rustc_arguments: spec.rustc_arguments.clone(),
                 },
             },
-            capture_remarks: false,
+            capture_remarks: spec.capture_remarks,
             analysis_directory,
         }
     }
+}
+
+fn validate_remark_options(options: &RemarkOptions) -> Result<()> {
+    if options.pass.as_ref().is_some_and(String::is_empty) {
+        return Err(crate::Error::InvalidRequest {
+            message: "remark pass must not be empty, got an empty pass".to_owned(),
+        });
+    }
+    if !(1..=RemarkOptions::MAX_LIMIT).contains(&options.limit) {
+        return Err(crate::Error::InvalidRequest {
+            message: format!(
+                "remark limit must be from 1 through {}, got {}",
+                RemarkOptions::MAX_LIMIT,
+                options.limit
+            ),
+        });
+    }
+
+    Ok(())
 }
 
 fn validate_find_options(options: &FindOptions) -> Result<()> {

@@ -20,13 +20,18 @@ mod ids;
 pub use ids::{CaptureId, InstanceId};
 
 mod model;
-pub use cargo_ir::{LlvmStage, UnstableAccess, UnstableAccessMechanism, UnstableAccessScope};
+pub use cargo_ir::{
+    LlvmStage, RemarkArgument, RemarkKind, RemarkSourceLocation, UnstableAccess,
+    UnstableAccessMechanism, UnstableAccessScope,
+};
 pub use model::{
     ArtifactSummary, BodySetDelta, BodySetSummary, BodyView, BuildSpec, BuildTarget, CachePolicy,
     CaptureDetails, CaptureDisposition, CaptureProfile, CaptureSummary, CleanSummary, CommandView,
     CompareView, CompilerOutput, CompilerProvenance, EnvironmentView, FindMatchKind, FindOptions,
-    FindResult, GcSummary, InstanceSummary, LlvmBodySummary, OutputAvailability, RemoveSummary,
-    ShowView, SourceLocation, SourceView, StoreStatus, VerifySummary,
+    FindResult, GcSummary, InstanceSummary, LlvmBodySummary, OutputAvailability,
+    RemarkCaptureSummary, RemarkEvidenceState, RemarkFileSummary, RemarkKindFilter, RemarkOptions,
+    RemarkShowView, RemarkView, RemoveSummary, ShowView, SourceLocation, SourceView, StoreStatus,
+    VerifySummary,
 };
 
 mod pending;

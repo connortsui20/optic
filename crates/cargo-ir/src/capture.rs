@@ -7,7 +7,7 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use serde::{Deserialize, Serialize};
@@ -24,7 +24,8 @@ use crate::{
 
 const REMARKS_DIRECTORY_NAME: &str = "remarks";
 const MAX_REMARK_FILES: usize = 4_096;
-const MAX_REMARK_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_REMARK_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_REMARK_RECORDS: usize = 1_000_000;
 
 /// The byte range of one LLVM function definition.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -160,6 +161,9 @@ pub struct ModuleEvidence {
 /// One raw LLVM optimization-remark file and its parsed records.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RemarkEvidence {
+    /// The normalized compiler-owned path relative to the remark directory.
+    pub name: String,
+
     /// The compiler-owned YAML file.
     pub raw_path: PathBuf,
 
@@ -766,6 +770,7 @@ struct BitcodeArtifact {
 struct RemarkCollectionLimits {
     max_files: usize,
     max_bytes: u64,
+    max_records: usize,
     parse: RemarkParseLimits,
 }
 
@@ -774,6 +779,7 @@ impl Default for RemarkCollectionLimits {
         Self {
             max_files: MAX_REMARK_FILES,
             max_bytes: MAX_REMARK_BYTES,
+            max_records: MAX_REMARK_RECORDS,
             parse: RemarkParseLimits::default(),
         }
     }
@@ -841,14 +847,62 @@ fn collect_remarks_with_limits(
     }
 
     paths.sort();
-    paths
-        .into_iter()
-        .map(|raw_path| {
-            let records = parse_optimization_remarks(&raw_path, limits.parse)?;
+    let mut evidence = Vec::with_capacity(paths.len());
+    let mut total_records = 0_usize;
 
-            Ok(RemarkEvidence { raw_path, records })
-        })
-        .collect()
+    for raw_path in paths {
+        let name = normalized_remark_name(directory, &raw_path)?;
+        let records = parse_optimization_remarks(&raw_path, limits.parse)?;
+        total_records = total_records.saturating_add(records.len());
+        if total_records > limits.max_records {
+            return Err(invalid_remark_collection(
+                directory,
+                format!(
+                    "aggregate record count exceeds {}, got {total_records}",
+                    limits.max_records
+                ),
+            ));
+        }
+
+        evidence.push(RemarkEvidence {
+            name,
+            raw_path,
+            records,
+        });
+    }
+
+    Ok(evidence)
+}
+
+fn normalized_remark_name(directory: &Path, path: &Path) -> Result<String> {
+    let relative = path.strip_prefix(directory).map_err(|_| {
+        invalid_remark_collection(
+            path,
+            "remark path must be below the remark directory".to_owned(),
+        )
+    })?;
+    let mut components = Vec::new();
+
+    for component in relative.components() {
+        let Component::Normal(component) = component else {
+            return Err(invalid_remark_collection(
+                path,
+                "remark path must contain only normal relative components".to_owned(),
+            ));
+        };
+        let component = component.to_str().ok_or_else(|| {
+            invalid_remark_collection(path, "remark path must be valid UTF-8".to_owned())
+        })?;
+        components.push(component);
+    }
+    if components.is_empty() {
+        return Err(invalid_remark_collection(
+            path,
+            "remark path must contain a file name".to_owned(),
+        ));
+    }
+
+    Ok(components.join("/"))
 }
 
 fn is_optimization_remark(name: &OsStr) -> bool {
