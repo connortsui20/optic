@@ -88,6 +88,9 @@ pub struct BuildRequest {
     /// The permitted compiler changes for this capture.
     pub capture_profile: CaptureProfile,
 
+    /// Whether rustc emits structured LLVM optimization remarks for the selected target.
+    pub capture_remarks: bool,
+
     /// The directory in which rustc writes mutable analysis artifacts.
     ///
     /// This directory **must** be empty when the capture starts.

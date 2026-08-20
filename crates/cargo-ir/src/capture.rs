@@ -5,7 +5,7 @@
 //! Cargo's fingerprint. [`ingest`] reads the retained artifacts without invoking Cargo again.
 
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -18,8 +18,13 @@ use crate::llvm;
 use crate::mono;
 use crate::toolchain::{CargoContext, inspect_rustc};
 use crate::{
-    BuildRequest, CaptureProfile, CargoTarget, CompilerInstance, Error, Result, Toolchain,
+    BuildRequest, CaptureProfile, CargoTarget, CompilerInstance, Error, OptimizationRemark,
+    RemarkParseLimits, Result, Toolchain, parse_optimization_remarks,
 };
+
+const REMARKS_DIRECTORY_NAME: &str = "remarks";
+const MAX_REMARK_FILES: usize = 4_096;
+const MAX_REMARK_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// The byte range of one LLVM function definition.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -150,6 +155,16 @@ pub struct ModuleEvidence {
 
     /// Indexed aliases and their exact direct relationships.
     pub aliases: Vec<LlvmAlias>,
+}
+
+/// One raw LLVM optimization-remark file and its parsed records.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RemarkEvidence {
+    /// The compiler-owned YAML file.
+    pub raw_path: PathBuf,
+
+    /// The typed records parsed from the raw YAML document stream.
+    pub records: Vec<OptimizationRemark>,
 }
 
 /// A supported stage of the LLVM compilation pipeline.
@@ -312,6 +327,9 @@ pub struct EvidenceBundle {
 
     /// Supported saved LLVM modules.
     pub modules: Vec<ModuleEvidence>,
+
+    /// Structured LLVM optimization remarks, or `None` when they were not requested.
+    pub remarks: Option<Vec<RemarkEvidence>>,
 }
 
 /// Runs one analysis for the selected Cargo target.
@@ -324,6 +342,9 @@ pub fn compile(request: &BuildRequest) -> Result<CompileOutcome> {
     let cargo = CargoContext::discover(&request.workspace_root)?;
     let toolchain = inspect_rustc(cargo.rustc())?;
     prepare_analysis_directory(&request.analysis_directory)?;
+    if request.capture_remarks {
+        prepare_remarks_directory(&request.analysis_directory)?;
+    }
     let driver = RustcDriver::prepare(&toolchain, &cargo)?;
     let manifest_path = request.analysis_directory.join(mono::MANIFEST_NAME);
 
@@ -468,12 +489,14 @@ pub fn ingest(request: &BuildRequest, mut compilation: CompiledCapture) -> Resul
             )
         })
         .collect::<Result<Vec<_>>>()?;
+    let remarks = requested_remarks(request)?;
 
     Ok(EvidenceBundle {
         invocation: compilation.invocation,
         toolchain: compilation.toolchain,
         instances: compiler_manifest.instances,
         modules,
+        remarks,
     })
 }
 
@@ -546,6 +569,17 @@ fn injected_rustc_arguments(request: &BuildRequest) -> Vec<String> {
             .into_owned(),
     ];
 
+    if request.capture_remarks {
+        arguments.extend([
+            "-C".to_owned(),
+            "remark=all".to_owned(),
+            "-Z".to_owned(),
+            remarks_argument(&remarks_directory(&request.analysis_directory))
+                .to_string_lossy()
+                .into_owned(),
+        ]);
+    }
+
     match &request.capture_profile {
         CaptureProfile::Faithful => {}
         CaptureProfile::Enriched => {
@@ -567,6 +601,13 @@ fn injected_rustc_arguments(request: &BuildRequest) -> Vec<String> {
 fn temps_argument(path: &Path) -> OsString {
     let mut argument = OsString::from("temps-dir=");
     argument.push(path);
+    argument
+}
+
+fn remarks_argument(path: &Path) -> OsString {
+    let mut argument = OsString::from("remark-dir=");
+    argument.push(path);
+
     argument
 }
 
@@ -671,6 +712,20 @@ fn prepare_analysis_directory(path: &Path) -> Result<()> {
     }
 }
 
+fn prepare_remarks_directory(analysis_directory: &Path) -> Result<()> {
+    let path = remarks_directory(analysis_directory);
+
+    fs::create_dir(&path).map_err(|source| Error::Filesystem {
+        operation: "create",
+        path,
+        source,
+    })
+}
+
+fn remarks_directory(analysis_directory: &Path) -> PathBuf {
+    analysis_directory.join(REMARKS_DIRECTORY_NAME)
+}
+
 fn cargo_diagnostics(stdout: &[u8], stderr: &[u8]) -> String {
     let mut diagnostics = String::new();
 
@@ -701,6 +756,106 @@ fn cargo_diagnostics(stdout: &[u8], stderr: &[u8]) -> String {
 struct BitcodeArtifact {
     path: PathBuf,
     provenance: ArtifactProvenance,
+}
+
+#[derive(Clone, Copy)]
+struct RemarkCollectionLimits {
+    max_files: usize,
+    max_bytes: u64,
+    parse: RemarkParseLimits,
+}
+
+impl Default for RemarkCollectionLimits {
+    fn default() -> Self {
+        Self {
+            max_files: MAX_REMARK_FILES,
+            max_bytes: MAX_REMARK_BYTES,
+            parse: RemarkParseLimits::default(),
+        }
+    }
+}
+
+fn collect_remarks(directory: &Path) -> Result<Vec<RemarkEvidence>> {
+    collect_remarks_with_limits(directory, RemarkCollectionLimits::default())
+}
+
+fn requested_remarks(request: &BuildRequest) -> Result<Option<Vec<RemarkEvidence>>> {
+    request
+        .capture_remarks
+        .then(|| collect_remarks(&remarks_directory(&request.analysis_directory)))
+        .transpose()
+}
+
+fn collect_remarks_with_limits(
+    directory: &Path,
+    limits: RemarkCollectionLimits,
+) -> Result<Vec<RemarkEvidence>> {
+    let mut paths = Vec::new();
+    let mut total_bytes = 0_u64;
+
+    for entry in WalkDir::new(directory).min_depth(1) {
+        let entry = entry.map_err(|source| Error::Filesystem {
+            operation: "walk",
+            path: directory.to_owned(),
+            source: source.into(),
+        })?;
+        if !entry.file_type().is_file() || !is_optimization_remark(entry.file_name()) {
+            continue;
+        }
+
+        if paths.len() >= limits.max_files {
+            return Err(invalid_remark_collection(
+                directory,
+                format!(
+                    "file count exceeds {}, got {}",
+                    limits.max_files,
+                    paths.len() + 1
+                ),
+            ));
+        }
+
+        let path = entry.into_path();
+        let length = fs::metadata(&path)
+            .map_err(|source| Error::Filesystem {
+                operation: "read metadata for",
+                path: path.clone(),
+                source,
+            })?
+            .len();
+        total_bytes = total_bytes.saturating_add(length);
+        if total_bytes > limits.max_bytes {
+            return Err(invalid_remark_collection(
+                directory,
+                format!(
+                    "aggregate file length exceeds {} bytes, got {total_bytes}",
+                    limits.max_bytes
+                ),
+            ));
+        }
+
+        paths.push(path);
+    }
+
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|raw_path| {
+            let records = parse_optimization_remarks(&raw_path, limits.parse)?;
+
+            Ok(RemarkEvidence { raw_path, records })
+        })
+        .collect()
+}
+
+fn is_optimization_remark(name: &OsStr) -> bool {
+    name.to_string_lossy().ends_with(".opt.opt.yaml")
+}
+
+fn invalid_remark_collection(path: &Path, message: String) -> Error {
+    Error::InvalidOptimizationRemarks {
+        path: path.to_owned(),
+        message,
+    }
 }
 
 fn supported_bitcode(directory: &Path) -> Result<Vec<BitcodeArtifact>> {
@@ -841,14 +996,25 @@ fn disassemble(
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
     use std::fs;
     use std::path::PathBuf;
 
     use super::{
-        artifact_provenance, cargo_artifacts, cargo_diagnostics, injected_rustc_arguments,
-        prepare_analysis_directory,
+        RemarkCollectionLimits, artifact_provenance, cargo_artifacts, cargo_diagnostics,
+        collect_remarks_with_limits, injected_rustc_arguments, prepare_analysis_directory,
+        prepare_remarks_directory, requested_remarks,
     };
     use crate::{BuildRequest, CaptureProfile, Error, LlvmStage, LtoScope};
+
+    const REMARK: &str = r#"--- !Passed
+Pass: inline
+Name: Inlined
+Function: _Z8functionv
+Args:
+  - String: inlined
+...
+"#;
 
     #[test]
     fn renders_cargo_json_diagnostics_and_standard_error() {
@@ -894,6 +1060,12 @@ mod tests {
                 .iter()
                 .any(|argument| argument.starts_with("debuginfo="))
         );
+        assert!(!arguments.iter().any(|argument| argument == "remark=all"));
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument.starts_with("remark-dir="))
+        );
     }
 
     #[test]
@@ -917,6 +1089,146 @@ mod tests {
             experiment
                 .windows(2)
                 .any(|pair| pair == ["-C", "target-cpu=native"])
+        );
+    }
+
+    #[test]
+    fn remark_capture_records_arguments_without_forcing_debug_information() {
+        let mut request = request(CaptureProfile::Faithful);
+        request.capture_remarks = true;
+
+        let arguments = injected_rustc_arguments(&request);
+
+        assert!(
+            arguments
+                .windows(2)
+                .any(|pair| pair == ["-C", "remark=all"])
+        );
+        assert!(
+            arguments
+                .windows(2)
+                .any(|pair| { pair[0] == "-Z" && pair[1] == "remark-dir=/analysis/remarks" })
+        );
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument.starts_with("debuginfo="))
+        );
+    }
+
+    #[test]
+    fn remark_capture_creates_its_output_directory() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let analysis = temporary.path().join("analysis");
+        fs::create_dir(&analysis).expect("the test can create the analysis directory");
+
+        prepare_remarks_directory(&analysis).expect("the remarks directory is valid");
+
+        assert!(analysis.join("remarks").is_dir());
+    }
+
+    #[test]
+    fn collects_only_optimization_pipeline_remarks() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let nested = temporary.path().join("nested");
+        fs::create_dir(&nested).expect("the test can create a nested directory");
+        write_remark(&temporary.path().join("crate-b.opt.opt.yaml"), REMARK);
+        write_remark(&nested.join("crate-a.opt.opt.yaml"), REMARK);
+        write_remark(&temporary.path().join("crate.codegen.opt.yaml"), "not yaml");
+        write_remark(&temporary.path().join("unrelated.yaml"), "not yaml");
+
+        let remarks =
+            collect_remarks_with_limits(temporary.path(), RemarkCollectionLimits::default())
+                .expect("the selected optimization remarks are valid");
+
+        assert_eq!(remarks.len(), 2);
+        assert_eq!(
+            remarks[0].raw_path.file_name(),
+            Some(OsStr::new("crate-b.opt.opt.yaml"))
+        );
+        assert_eq!(
+            remarks[1].raw_path.file_name(),
+            Some(OsStr::new("crate-a.opt.opt.yaml"))
+        );
+        assert_eq!(remarks[0].records[0].pass_name, "inline");
+    }
+
+    #[test]
+    fn rejects_aggregate_remark_file_and_byte_limits() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        write_remark(&temporary.path().join("a.opt.opt.yaml"), REMARK);
+        write_remark(&temporary.path().join("b.opt.opt.yaml"), REMARK);
+
+        let file_error = collect_remarks_with_limits(
+            temporary.path(),
+            RemarkCollectionLimits {
+                max_files: 1,
+                ..RemarkCollectionLimits::default()
+            },
+        )
+        .expect_err("two files exceed a one-file collection limit");
+        let byte_error = collect_remarks_with_limits(
+            temporary.path(),
+            RemarkCollectionLimits {
+                max_bytes: (REMARK.len() * 2 - 1) as u64,
+                ..RemarkCollectionLimits::default()
+            },
+        )
+        .expect_err("the files exceed the aggregate byte limit");
+
+        assert!(
+            file_error
+                .to_string()
+                .contains("file count exceeds 1, got 2")
+        );
+        assert!(
+            byte_error
+                .to_string()
+                .contains("aggregate file length exceeds")
+        );
+    }
+
+    #[test]
+    fn rejects_a_malformed_selected_remark_file() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        write_remark(
+            &temporary.path().join("invalid.opt.opt.yaml"),
+            "--- !Passed\nPass: [invalid\n",
+        );
+
+        let error =
+            collect_remarks_with_limits(temporary.path(), RemarkCollectionLimits::default())
+                .expect_err("the selected remark file is malformed");
+
+        assert!(error.to_string().contains("invalid YAML"));
+    }
+
+    #[test]
+    fn reports_not_captured_without_reading_remark_files() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let remarks = temporary.path().join("remarks");
+        fs::create_dir(&remarks).expect("the test can create the remarks directory");
+        let mut request = request(CaptureProfile::Faithful);
+        request.analysis_directory = temporary.path().to_owned();
+
+        assert_eq!(requested_remarks(&request).unwrap(), None);
+
+        request.capture_remarks = true;
+        assert_eq!(requested_remarks(&request).unwrap(), Some(Vec::new()));
+
+        write_remark(&remarks.join("invalid.opt.opt.yaml"), "not yaml");
+        assert!(requested_remarks(&request).is_err());
+    }
+
+    #[test]
+    fn remark_policy_is_part_of_the_serialized_build_request() {
+        let without_remarks = request(CaptureProfile::Faithful);
+        let mut with_remarks = without_remarks.clone();
+        with_remarks.capture_remarks = true;
+
+        assert_ne!(
+            serde_json::to_vec(&without_remarks).unwrap(),
+            serde_json::to_vec(&with_remarks).unwrap()
         );
     }
 
@@ -966,7 +1278,12 @@ mod tests {
             offline: false,
             frozen: false,
             capture_profile,
+            capture_remarks: false,
             analysis_directory: PathBuf::from("/analysis"),
         }
+    }
+
+    fn write_remark(path: &std::path::Path, contents: &str) {
+        fs::write(path, contents).expect("the test can write an optimization-remark fixture");
     }
 }

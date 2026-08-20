@@ -8,8 +8,8 @@ mod capture;
 pub use capture::{
     AliasTarget, ArtifactProvenance, BodyRange, CaptureInvocation, CaptureMethod, CargoArtifact,
     CommandInvocation, CompileOutcome, CompiledCapture, EnvironmentVariable, EvidenceBundle,
-    LlvmAlias, LlvmDeclaration, LlvmStage, LtoScope, ModuleEvidence, UnstableAccess,
-    UnstableAccessMechanism, UnstableAccessScope, check_fresh, compile, ingest,
+    LlvmAlias, LlvmDeclaration, LlvmStage, LtoScope, ModuleEvidence, RemarkEvidence,
+    UnstableAccess, UnstableAccessMechanism, UnstableAccessScope, check_fresh, compile, ingest,
     require_compiled_evidence,
 };
 
