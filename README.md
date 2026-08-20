@@ -150,7 +150,8 @@ cargo optic inspect --capture CAPTURE_ID_PREFIX
 ```
 
 The result includes the Cargo and rustc paths. It also includes the rustc release, commit, host,
-LLVM version, and sysroot. The bootstrap scope identifies each internal use of unstable access.
+LLVM version, sysroot, and matching `llvm-dis`. The bootstrap policy lists the only scopes that are
+authorized to use unstable access. An authorized cached step does not necessarily run.
 
 Use `compare` to compare compact LLVM structure for two exact instances:
 
