@@ -36,7 +36,7 @@ Cargo Optic prints a complete `show` command for each instance. Copy one of thes
 the Rust source and optimized LLVM IR. You do not have to edit or combine IDs.
 
 Run the first command again. Cargo checks the target and Optic reuses the completed capture. Add
-`--fresh` to invoke rustc and create a new capture.
+`--fresh` to request a new capture. A matching pending ingestion resumes before a new compilation.
 
 ## Compare a source change
 
@@ -138,7 +138,7 @@ cargo optic remove --capture CAPTURE_ID
 cargo optic gc
 ```
 
-## Remove the Optic cache
+## Remove the Optic evidence store
 
 If you want to remove all stored Optic evidence for this fixture, run this command:
 

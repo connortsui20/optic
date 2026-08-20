@@ -109,21 +109,28 @@ Use `find --crate NAME` or `find --definition PATH` to restrict a large result s
 `--available llvm` or `--available llvm-pre-opt` to require a standalone body. The default result
 limit is 50 and the maximum is 500.
 
+Lookup first checks exact definition paths, display names, and compiler symbols. A fallback lookup
+matches a case-sensitive literal substring and requires at least three Unicode characters. Results
+report the match kind and truncation. JSON also includes the full compiler symbol and a stable
+identity fingerprint.
+
 Plain output shows at least 12 hexadecimal characters for each ID. Color highlights the shortest
 unique prefix and dims the remaining characters. JSON output keeps the full IDs.
 
 Each displayed ID is a valid prefix. Cargo Optic reports an error if a shorter prefix matches more
 than one stored ID.
 
-Use `--fresh` with `capture` or a build-based `show` command to create new evidence. This option
-uses a unique Cargo fingerprint and invokes rustc for the selected target.
+Use `--fresh` with `capture` or a build-based `show` command to request new evidence. Cargo Optic
+first tries to resume matching post-compilation evidence. Otherwise, `--fresh` uses a unique Cargo
+fingerprint and invokes rustc for the selected target.
 
 The JSON transport version is 3. Instance results report definitions, declarations, and aliases
 for each LLVM stage. A result does not use one combined `has_body` value.
 
-If compilation succeeds but ingestion fails, Cargo Optic retains the bounded staging evidence. The
-next matching request validates Cargo freshness and resumes ingestion without another compilation.
-`status` reports the retained file count and bytes. `clean` removes this pending evidence.
+If compilation succeeds but ingestion fails, Cargo Optic retains validated staging evidence. The
+next matching request runs Cargo's freshness check. If fresh, it resumes ingestion without another
+selected-target compilation. `status` reports the pending capture count and total retained bytes.
+`clean` removes this pending evidence.
 
 ## Capture optimization remarks
 
@@ -236,8 +243,9 @@ rustc and compiler wrappers from the same workspace configuration.
 The selected rustc requires matching `rustc-dev` and `llvm-tools` components. Cargo Optic reports a
 specific error when one of these components is absent. It does not install components.
 
-The driver is a small internal program. Cargo Optic builds it once for each rustc commit and source
-revision. It stores the driver below `$CARGO_HOME/optic/drivers`.
+The driver is a small internal program. Its cache identity includes the compiler release, commit,
+host, LLVM version, canonical sysroot digest, driver source revision, and protocol. Cargo Optic
+stores the driver below `$CARGO_HOME/optic/drivers`.
 
 The faithful profile permits the normal link step. Existing normal artifacts remain available.
 

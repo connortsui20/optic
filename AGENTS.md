@@ -36,7 +36,7 @@ Read [README.md](README.md) before you change the product behavior. Use the
 - New IDs contain random UUIDv4 suffixes.
 - Text output shows at least 12 hexadecimal characters and highlights the shortest unique prefix.
 - The schema version is 7. Older stores require `cargo optic clean`.
-- Failed post-compilation ingestion can leave bounded evidence below `.optic/store/pending`.
+- Failed post-compilation ingestion can leave validated evidence below `.optic/store/pending`.
 - A matching request validates Cargo freshness before it resumes retained ingestion.
 
 Capture writers use a file lock. Read commands can use completed captures in parallel. An operation
