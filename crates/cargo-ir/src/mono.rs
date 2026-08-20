@@ -4,8 +4,8 @@
 //! manifest stores source definition paths and raw symbols without exposing rustc types to this
 //! crate.
 
-use std::fs;
-use std::io::{Cursor, Read};
+use std::fs::File;
+use std::io::{BufReader, Read};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,7 @@ pub(crate) const MANIFEST_NAME: &str = "identity-v2.bin";
 
 const MANIFEST_MAGIC: &[u8; 16] = b"CARGO_OPTIC_ID\0\0";
 const PROTOCOL_VERSION: u32 = 2;
-const MAX_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_MANIFEST_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_INSTANCES: usize = 1_000_000;
 const MAX_STRING_BYTES: usize = 1024 * 1024;
 const MAX_CODEGEN_UNITS: usize = 65_536;
@@ -102,27 +102,35 @@ pub(crate) struct CompilerManifest {
 }
 
 pub(crate) fn read(path: &Path, expected_rustc_commit: &str) -> Result<CompilerManifest> {
-    let metadata = fs::metadata(path).map_err(|source| Error::Filesystem {
+    read_bounded(path, expected_rustc_commit, MAX_MANIFEST_BYTES)
+}
+
+fn read_bounded(
+    path: &Path,
+    expected_rustc_commit: &str,
+    maximum_manifest_bytes: u64,
+) -> Result<CompilerManifest> {
+    let file = File::open(path).map_err(|source| Error::Filesystem {
+        operation: "open",
+        path: path.to_owned(),
+        source,
+    })?;
+    let metadata = file.metadata().map_err(|source| Error::Filesystem {
         operation: "read metadata for",
         path: path.to_owned(),
         source,
     })?;
-    if metadata.len() > MAX_MANIFEST_BYTES {
+    if metadata.len() > maximum_manifest_bytes {
         return Err(invalid_manifest(
             path,
             format!(
-                "file length exceeds {MAX_MANIFEST_BYTES} bytes, got {}",
+                "file length exceeds {maximum_manifest_bytes} bytes, got {}",
                 metadata.len()
             ),
         ));
     }
 
-    let bytes = fs::read(path).map_err(|source| Error::Filesystem {
-        operation: "read",
-        path: path.to_owned(),
-        source,
-    })?;
-    let mut reader = Cursor::new(bytes.as_slice());
+    let mut reader = BufReader::new(file);
     let mut magic = [0_u8; MANIFEST_MAGIC.len()];
     read_exact(&mut reader, &mut magic, path, "manifest header")?;
     if &magic != MANIFEST_MAGIC {
@@ -189,7 +197,15 @@ pub(crate) fn read(path: &Path, expected_rustc_commit: &str) -> Result<CompilerM
         });
     }
 
-    if reader.position() != bytes.len() as u64 {
+    let mut trailing = [0_u8; 1];
+    let trailing_length = reader
+        .read(&mut trailing)
+        .map_err(|source| Error::Filesystem {
+            operation: "read",
+            path: path.to_owned(),
+            source,
+        })?;
+    if trailing_length != 0 {
         return Err(invalid_manifest(path, "manifest contains trailing bytes"));
     }
 
@@ -199,7 +215,7 @@ pub(crate) fn read(path: &Path, expected_rustc_commit: &str) -> Result<CompilerM
     })
 }
 
-fn read_bool_u32(reader: &mut Cursor<&[u8]>, path: &Path, field: &'static str) -> Result<bool> {
+fn read_bool_u32(reader: &mut impl Read, path: &Path, field: &'static str) -> Result<bool> {
     match read_u32(reader, path, field)? {
         0 => Ok(false),
         1 => Ok(true),
@@ -210,10 +226,7 @@ fn read_bool_u32(reader: &mut Cursor<&[u8]>, path: &Path, field: &'static str) -
     }
 }
 
-fn read_optional_source_span(
-    reader: &mut Cursor<&[u8]>,
-    path: &Path,
-) -> Result<Option<SourceSpan>> {
+fn read_optional_source_span(reader: &mut impl Read, path: &Path) -> Result<Option<SourceSpan>> {
     let present = read_u32(reader, path, "source span presence")?;
     if present == 0 {
         return Ok(None);
@@ -236,14 +249,14 @@ fn read_optional_source_span(
     }))
 }
 
-fn read_usize_u64(reader: &mut Cursor<&[u8]>, path: &Path, field: &'static str) -> Result<usize> {
+fn read_usize_u64(reader: &mut impl Read, path: &Path, field: &'static str) -> Result<usize> {
     let value = read_u64(reader, path, field)?;
 
     usize::try_from(value)
         .map_err(|_| invalid_manifest(path, format!("{field} exceeds usize, got {value}")))
 }
 
-fn read_string(reader: &mut Cursor<&[u8]>, path: &Path, field: &'static str) -> Result<String> {
+fn read_string(reader: &mut impl Read, path: &Path, field: &'static str) -> Result<String> {
     let length = read_length_u32(reader, path, field, MAX_STRING_BYTES)?;
     let mut bytes = vec![0_u8; length];
     read_exact(reader, &mut bytes, path, field)?;
@@ -253,7 +266,7 @@ fn read_string(reader: &mut Cursor<&[u8]>, path: &Path, field: &'static str) -> 
 }
 
 fn read_length_u32(
-    reader: &mut Cursor<&[u8]>,
+    reader: &mut impl Read,
     path: &Path,
     field: &'static str,
     maximum: usize,
@@ -272,7 +285,7 @@ fn read_length_u32(
 }
 
 fn read_length_u64(
-    reader: &mut Cursor<&[u8]>,
+    reader: &mut impl Read,
     path: &Path,
     field: &'static str,
     maximum: usize,
@@ -290,14 +303,14 @@ fn read_length_u64(
     Ok(value)
 }
 
-fn read_u32(reader: &mut Cursor<&[u8]>, path: &Path, field: &'static str) -> Result<u32> {
+fn read_u32(reader: &mut impl Read, path: &Path, field: &'static str) -> Result<u32> {
     let mut bytes = [0_u8; size_of::<u32>()];
     read_exact(reader, &mut bytes, path, field)?;
 
     Ok(u32::from_le_bytes(bytes))
 }
 
-fn read_u64(reader: &mut Cursor<&[u8]>, path: &Path, field: &'static str) -> Result<u64> {
+fn read_u64(reader: &mut impl Read, path: &Path, field: &'static str) -> Result<u64> {
     let mut bytes = [0_u8; size_of::<u64>()];
     read_exact(reader, &mut bytes, path, field)?;
 
@@ -305,7 +318,7 @@ fn read_u64(reader: &mut Cursor<&[u8]>, path: &Path, field: &'static str) -> Res
 }
 
 fn read_exact(
-    reader: &mut Cursor<&[u8]>,
+    reader: &mut impl Read,
     bytes: &mut [u8],
     path: &Path,
     field: &'static str,
@@ -326,7 +339,7 @@ fn invalid_manifest(path: &Path, message: impl Into<String>) -> Error {
 mod tests {
     use std::fs;
 
-    use super::{MANIFEST_MAGIC, PROTOCOL_VERSION, read};
+    use super::{MANIFEST_MAGIC, PROTOCOL_VERSION, read, read_bounded};
 
     #[test]
     fn reads_complete_compiler_identities() {
@@ -415,6 +428,40 @@ mod tests {
     }
 
     #[test]
+    fn accepts_a_manifest_at_the_aggregate_bound() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let path = temporary.path().join("identity.bin");
+        let manifest = empty_manifest("commit");
+        let manifest_length =
+            u64::try_from(manifest.len()).expect("the manifest length fits in u64");
+        fs::write(&path, manifest).expect("the test can write the manifest");
+
+        let manifest = read_bounded(&path, "commit", manifest_length)
+            .expect("a manifest can equal the aggregate bound");
+
+        assert!(manifest.rustc_arguments.is_empty());
+        assert!(manifest.instances.is_empty());
+    }
+
+    #[test]
+    fn rejects_a_manifest_over_the_aggregate_bound() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let path = temporary.path().join("identity.bin");
+        let manifest = empty_manifest("commit");
+        let maximum_length =
+            u64::try_from(manifest.len() - 1).expect("the manifest length fits in u64");
+        fs::write(&path, manifest).expect("the test can write the manifest");
+
+        let error = read_bounded(&path, "commit", maximum_length)
+            .expect_err("the aggregate bound must be enforced");
+
+        assert!(error.to_string().contains(&format!(
+            "file length exceeds {maximum_length} bytes, got {}",
+            maximum_length + 1
+        )));
+    }
+
+    #[test]
     fn rejects_a_truncated_string() {
         let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
         let path = temporary.path().join("identity.bin");
@@ -469,5 +516,16 @@ mod tests {
         let length = u32::try_from(value.len()).expect("the fixture string length fits u32");
         manifest.extend_from_slice(&length.to_le_bytes());
         manifest.extend_from_slice(value.as_bytes());
+    }
+
+    fn empty_manifest(rustc_commit: &str) -> Vec<u8> {
+        let mut manifest = Vec::new();
+        manifest.extend_from_slice(MANIFEST_MAGIC);
+        manifest.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
+        push_string(&mut manifest, rustc_commit);
+        manifest.extend_from_slice(&0_u32.to_le_bytes());
+        manifest.extend_from_slice(&0_u64.to_le_bytes());
+
+        manifest
     }
 }
