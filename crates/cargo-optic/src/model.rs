@@ -97,6 +97,45 @@ impl fmt::Display for CompilerOutput {
     }
 }
 
+/// Limits one concrete-instance lookup.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FindOptions {
+    /// The exact name or literal substring to find.
+    pub query: String,
+
+    /// Restricts results to one compiler crate.
+    pub crate_name: Option<String>,
+
+    /// Restricts results to one qualified definition path.
+    pub definition: Option<String>,
+
+    /// Restricts results to instances with a definition at this compiler output.
+    pub available: Option<CompilerOutput>,
+
+    /// The maximum number of results to return.
+    pub limit: usize,
+}
+
+impl FindOptions {
+    /// The default maximum number of returned instances.
+    pub const DEFAULT_LIMIT: usize = 50;
+
+    /// The largest supported result limit.
+    pub const MAX_LIMIT: usize = 500;
+
+    /// Creates an unfiltered lookup with the default result limit.
+    #[must_use]
+    pub fn new(query: impl Into<String>) -> Self {
+        Self {
+            query: query.into(),
+            crate_name: None,
+            definition: None,
+            available: None,
+            limit: Self::DEFAULT_LIMIT,
+        }
+    }
+}
+
 /// A normalized Cargo target selection for an enriched capture.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BuildSpec {
@@ -335,11 +374,28 @@ pub struct InstanceSummary {
     /// The concrete Rust display name, including generic arguments.
     pub display_name: String,
 
+    /// The exact symbol that rustc gave to LLVM.
+    pub compiler_symbol: String,
+
+    /// The first 12 lowercase hexadecimal characters of the symbol's BLAKE3 digest.
+    pub symbol_fingerprint: String,
+
     /// The exact source range reported by rustc, when available.
     pub source: Option<SourceLocation>,
 
     /// Standalone evidence available at each supported compiler output.
     pub availability: Vec<OutputAvailability>,
+}
+
+/// How a lookup matched its returned instances.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FindMatchKind {
+    /// At least one searchable identity exactly matched the query.
+    Exact,
+
+    /// The query matched indexed literal substrings after no exact match existed.
+    Substring,
 }
 
 /// A compiler-owned source range for one definition.
@@ -397,7 +453,13 @@ pub struct FindResult {
     /// The queried capture.
     pub capture_id: CaptureId,
 
-    /// Every exact or fallback substring candidate.
+    /// Whether the result used exact or literal substring matching.
+    pub match_kind: FindMatchKind,
+
+    /// Whether more matching instances exist after the returned result limit.
+    pub truncated: bool,
+
+    /// The exact or literal substring candidates up to the requested limit.
     pub instances: Vec<InstanceSummary>,
 }
 

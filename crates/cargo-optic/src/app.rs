@@ -19,8 +19,8 @@ use crate::store::{
 };
 use crate::{
     BodySetDelta, BodySetSummary, BuildSpec, CachePolicy, CaptureDetails, CaptureDisposition,
-    CaptureId, CaptureSummary, CleanSummary, CompareView, CompilerOutput, FindResult, GcSummary,
-    InstanceId, RemoveSummary, Result, ShowView, StoreStatus, VerifySummary,
+    CaptureId, CaptureSummary, CleanSummary, CompareView, CompilerOutput, FindOptions, FindResult,
+    GcSummary, InstanceId, RemoveSummary, Result, ShowView, StoreStatus, VerifySummary,
 };
 
 const EVIDENCE_VERSION: u32 = 4;
@@ -288,9 +288,25 @@ impl Application {
     ///
     /// # Errors
     ///
-    /// Returns an error if the capture selector is not unique or the catalog cannot be read.
-    pub fn find(&self, capture_id: &CaptureId, query: &str) -> Result<FindResult> {
-        self.store.find(capture_id, query)
+    /// Returns an error if the options are invalid, the capture selector is not unique, or the
+    /// catalog cannot be read.
+    pub fn find(&self, capture_id: &CaptureId, options: &FindOptions) -> Result<FindResult> {
+        if options.query.is_empty() {
+            return Err(crate::Error::InvalidRequest {
+                message: "find requires a non-empty query, got an empty query".to_owned(),
+            });
+        }
+        if !(1..=FindOptions::MAX_LIMIT).contains(&options.limit) {
+            return Err(crate::Error::InvalidRequest {
+                message: format!(
+                    "find limit must be from 1 through {}, got {}",
+                    FindOptions::MAX_LIMIT,
+                    options.limit
+                ),
+            });
+        }
+
+        self.store.find(capture_id, options)
     }
 
     pub(crate) fn unique_capture_prefix(&self, capture_id: &CaptureId) -> Result<CaptureId> {

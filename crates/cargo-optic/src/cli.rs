@@ -18,12 +18,12 @@ use serde::Serialize;
 use crate::terminal::{CodeSyntax, Terminal};
 use crate::{
     Application, BuildSpec, BuildTarget, CachePolicy, CaptureDetails, CaptureId, CaptureProfile,
-    CaptureSummary, CleanSummary, CompareView, CompilerOutput, FindResult, InstanceId,
+    CaptureSummary, CleanSummary, CompareView, CompilerOutput, FindOptions, FindResult, InstanceId,
     InstanceSummary, ShowView,
 };
 
 const MINIMUM_DISPLAY_ID_HEX_DIGITS: usize = 12;
-const TRANSPORT_VERSION: u8 = 2;
+const TRANSPORT_VERSION: u8 = 3;
 
 /// Runs the Cargo Optic CLI and returns its process exit code.
 #[must_use]
@@ -214,6 +214,26 @@ enum Command {
 
         /// Matches a definition or concrete compiler instance.
         query: String,
+
+        /// Restricts results to one compiler crate.
+        #[arg(long = "crate")]
+        crate_name: Option<String>,
+
+        /// Restricts results to one qualified definition path.
+        #[arg(long)]
+        definition: Option<String>,
+
+        /// Requires a standalone definition in one compiler output.
+        #[arg(long, value_enum)]
+        available: Option<CompilerOutput>,
+
+        /// Limits the number of returned instances.
+        #[arg(
+            long,
+            default_value_t = FindOptions::DEFAULT_LIMIT,
+            value_parser = parse_find_limit
+        )]
+        limit: usize,
 
         /// Selects plain text or versioned JSON output.
         #[arg(long, value_enum, default_value_t)]
@@ -751,11 +771,22 @@ fn execute(application: &mut Application, cli: Cli) -> Result<Execution, Failure
         Command::Find {
             capture,
             query,
+            crate_name,
+            definition,
+            available,
+            limit,
             format,
         } => {
             let terminal = Terminal::new(color.enabled(format));
+            let options = FindOptions {
+                query,
+                crate_name,
+                definition,
+                available,
+                limit,
+            };
             let result = application
-                .find(&capture, &query)
+                .find(&capture, &options)
                 .map_err(|error| Failure {
                     format,
                     message: error.to_string(),
@@ -899,7 +930,7 @@ fn execute_show(application: &mut Application, request: ShowRequest) -> Result<E
             .id
     };
     let result = application
-        .find(&capture, &query)
+        .find(&capture, &FindOptions::new(query))
         .map_err(|error| Failure {
             format,
             message: error.to_string(),
@@ -1111,6 +1142,20 @@ fn print_json_error(code: &'static str, message: &str) -> ExitCode {
     let _ = write_stdout(&format!("{output}\n"));
 
     ExitCode::from(2)
+}
+
+fn parse_find_limit(value: &str) -> std::result::Result<usize, String> {
+    let limit = value
+        .parse::<usize>()
+        .map_err(|_| format!("find limit must be an integer, got {value}"))?;
+    if !(1..=FindOptions::MAX_LIMIT).contains(&limit) {
+        return Err(format!(
+            "find limit must be from 1 through {}, got {limit}",
+            FindOptions::MAX_LIMIT
+        ));
+    }
+
+    Ok(limit)
 }
 
 fn write_progress(message: &str) {
@@ -1337,13 +1382,26 @@ fn find_text(
         terminal.identifier(&display_capture.text, display_capture.unique_prefix_length),
     );
     for (instance, display_id) in result.instances.iter().zip(display_instances) {
-        output.push_str(&instance_text(instance, display_id, terminal));
+        output.push_str(&instance_text(
+            instance,
+            display_id,
+            duplicate_display_name(result, instance),
+            terminal,
+        ));
         writeln!(
             output,
             "  {}",
             show_command(terminal, display_id, CompilerOutput::default(), false)
         )
         .expect("writing instance text to a String cannot fail");
+    }
+    if result.truncated {
+        writeln!(
+            output,
+            "{}",
+            terminal.warning("More matching instances exist. Increase --limit to show them.")
+        )
+        .expect("writing find text to a String cannot fail");
     }
 
     output
@@ -1352,6 +1410,7 @@ fn find_text(
 fn instance_text(
     instance: &InstanceSummary,
     display_id: &DisplayIdentifier,
+    disambiguate: bool,
     terminal: &Terminal,
 ) -> String {
     let optimized = instance
@@ -1372,12 +1431,36 @@ fn instance_text(
         terminal.warning("no body")
     };
 
-    format!(
+    let mut output = format!(
         "{}  {}  {}\n",
         terminal.identifier(&display_id.text, display_id.unique_prefix_length),
         state,
         terminal.function(&instance.display_name),
-    )
+    );
+    if disambiguate {
+        let origin = instance.source.as_ref().map_or_else(
+            || instance.definition.clone(),
+            |source| format!("{} at {}:{}", instance.definition, source.path, source.line_start),
+        );
+        writeln!(
+            output,
+            "  {}  symbol {}",
+            terminal.label(&origin),
+            terminal.label(&instance.symbol_fingerprint),
+        )
+        .expect("writing instance text to a String cannot fail");
+    }
+
+    output
+}
+
+fn duplicate_display_name(result: &FindResult, instance: &InstanceSummary) -> bool {
+    result
+        .instances
+        .iter()
+        .filter(|candidate| candidate.display_name == instance.display_name)
+        .count()
+        > 1
 }
 
 fn selection_text(
@@ -1403,11 +1486,26 @@ fn selection_text(
         ),
     };
     for (instance, display_id) in result.instances.iter().zip(display_instances) {
-        output.push_str(&instance_text(instance, display_id, terminal));
+        output.push_str(&instance_text(
+            instance,
+            display_id,
+            duplicate_display_name(result, instance),
+            terminal,
+        ));
         writeln!(
             output,
             "  {}",
             show_command(terminal, display_id, compiler_output, include_source)
+        )
+        .expect("writing selection text to a String cannot fail");
+    }
+    if result.truncated {
+        writeln!(
+            output,
+            "{}",
+            terminal.warning(
+                "More matching instances exist. Use `cargo optic find` with a larger --limit."
+            )
         )
         .expect("writing selection text to a String cannot fail");
     }

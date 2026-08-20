@@ -20,11 +20,11 @@ use crate::source::{SourceBaseline, StoredSource};
 use crate::{
     ArtifactSummary, BodyView, BuildSpec, CaptureDetails, CaptureDisposition, CaptureId,
     CaptureProfile, CaptureSummary, CommandView, CompilerOutput, EnvironmentView, Error,
-    FindResult, GcSummary, InstanceId, InstanceSummary, OutputAvailability, RemoveSummary, Result,
-    ShowView, SourceLocation, StoreStatus, VerifySummary,
+    FindMatchKind, FindOptions, FindResult, GcSummary, InstanceId, InstanceSummary,
+    OutputAvailability, RemoveSummary, Result, ShowView, SourceLocation, StoreStatus, VerifySummary,
 };
 
-const STORE_VERSION: u32 = 6;
+const STORE_VERSION: u32 = 7;
 
 #[derive(Clone, Debug)]
 pub(crate) struct AnalysisKey(String);
@@ -229,6 +229,12 @@ impl Store {
         let created_at_ms = now_ms()?;
         let request_json = serde_json::to_string(spec)?;
         let invocation_json = serde_json::to_string(&bundle.invocation)?;
+        let final_codegen_units = bundle
+            .modules
+            .iter()
+            .filter(|module| module.provenance.compiler_stage == "thin-lto-after-pm")
+            .map(|module| module.provenance.codegen_unit.clone())
+            .collect::<HashSet<_>>();
         let mut modules = Vec::with_capacity(bundle.modules.len());
 
         for module in &bundle.modules {
@@ -242,6 +248,9 @@ impl Store {
                 bodies: module.bodies.clone(),
                 declarations: module.declarations.clone(),
                 aliases: module.aliases.clone(),
+                selected: module.provenance.stage != Some(LlvmStage::Optimized)
+                    || module.provenance.compiler_stage == "thin-lto-after-pm"
+                    || !final_codegen_units.contains(&module.provenance.codegen_unit),
             });
         }
 
@@ -268,8 +277,13 @@ impl Store {
                 created_at_ms,
             },
         )?;
-        let body_index = insert_modules(&transaction, capture_id, &modules)?;
-        insert_instances(&transaction, capture_id, &bundle.instances, &body_index)?;
+        let evidence_index = insert_modules(&transaction, capture_id, &modules)?;
+        insert_instances(
+            &transaction,
+            capture_id,
+            &bundle.instances,
+            &evidence_index,
+        )?;
         insert_sources(&transaction, capture_id, &published_sources)?;
         transaction.execute(
             "INSERT INTO capture_cache(request_key, capture_id, analysis_key) VALUES (?1, ?2, ?3)
@@ -326,6 +340,10 @@ impl Store {
         let _evidence = self.lock_evidence_writer()?;
         let capture_id = self.resolve_capture(capture_prefix)?;
         let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM instance_search WHERE capture_id = ?1",
+            [capture_id.as_str()],
+        )?;
         transaction.execute("DELETE FROM captures WHERE id = ?1", [capture_id.as_str()])?;
         transaction.commit()?;
 
@@ -365,6 +383,7 @@ impl Store {
     }
 
     pub(crate) fn verify(&self) -> Result<VerifySummary> {
+        self.verify_search_index()?;
         let referenced = self.referenced_blob_digests()?;
         let mut verified_bytes = 0_u64;
 
@@ -457,17 +476,38 @@ impl Store {
             .expect("the instance prefix comes from a validated stored instance ID"))
     }
 
-    pub(crate) fn find(&self, capture_prefix: &CaptureId, query: &str) -> Result<FindResult> {
+    pub(crate) fn find(
+        &self,
+        capture_prefix: &CaptureId,
+        options: &FindOptions,
+    ) -> Result<FindResult> {
         let capture_id = self.resolve_capture(capture_prefix)?;
-        let exact = self.query_instances(&capture_id, InstanceMatch::Exact, query)?;
-        let instances = if exact.is_empty() {
-            self.query_instances(&capture_id, InstanceMatch::Substring, query)?
+        let exact = self.query_instance_ids(&capture_id, InstanceMatch::Exact, options)?;
+        let (match_kind, mut instance_ids) = if exact.is_empty() {
+            if options.query.chars().count() < 3 {
+                return Err(Error::InvalidRequest {
+                    message: format!(
+                        "substring queries must contain at least 3 Unicode characters after no exact match, got {}",
+                        options.query.chars().count()
+                    ),
+                });
+            }
+
+            (
+                FindMatchKind::Substring,
+                self.query_instance_ids(&capture_id, InstanceMatch::Substring, options)?,
+            )
         } else {
-            exact
+            (FindMatchKind::Exact, exact)
         };
+        let truncated = instance_ids.len() > options.limit;
+        instance_ids.truncate(options.limit);
+        let instances = self.hydrate_instances(&instance_ids)?;
 
         Ok(FindResult {
             capture_id,
+            match_kind,
+            truncated,
             instances,
         })
     }
@@ -822,32 +862,112 @@ impl Store {
         Ok(identifier[..length].to_owned())
     }
 
-    fn query_instances(
+    fn query_instance_ids(
         &self,
         capture_id: &CaptureId,
         match_kind: InstanceMatch,
-        query: &str,
-    ) -> Result<Vec<InstanceSummary>> {
-        let predicate = match match_kind {
-            InstanceMatch::Exact => {
-                "definitions.path = ?2 OR display_name = ?2 OR \
-                 definitions.crate_name || '::' || definitions.path = ?2"
-            }
-            InstanceMatch::Substring => {
-                "instr(definitions.path, ?2) > 0 OR instr(display_name, ?2) > 0 OR \
-                 instr(definitions.crate_name || '::' || definitions.path, ?2) > 0"
-            }
+        options: &FindOptions,
+    ) -> Result<Vec<InstanceId>> {
+        let selection = match match_kind {
+            InstanceMatch::Exact => "instances.id IN (
+                SELECT exact_definition.id
+                FROM definitions AS exact_origin
+                JOIN instances AS exact_definition
+                  ON exact_definition.definition_id = exact_origin.id
+                WHERE exact_origin.capture_id = ?1 AND exact_origin.path = ?2
+                UNION
+                SELECT exact_display.id FROM instances AS exact_display
+                WHERE exact_display.capture_id = ?1 AND exact_display.display_name = ?2
+                UNION
+                SELECT exact_symbol.id FROM instances AS exact_symbol
+                WHERE exact_symbol.capture_id = ?1 AND exact_symbol.compiler_symbol = ?2
+            )",
+            InstanceMatch::Substring => "instances.rowid IN (
+                SELECT instance_search.rowid FROM instance_search
+                WHERE instance_search MATCH ?2 AND instance_search.capture_id = ?1
+            )",
         };
         let sql = format!(
-            "{} WHERE instances.capture_id = ?1 AND ({predicate}) ORDER BY display_name",
-            instance_select()
+            "SELECT instances.id
+             FROM instances JOIN definitions ON definitions.id = instances.definition_id
+             WHERE instances.capture_id = ?1
+               AND {selection}
+               AND (?3 IS NULL OR definitions.crate_name = ?3)
+               AND (?4 IS NULL OR definitions.path = ?4)
+               AND (
+                   ?5 IS NULL
+                   OR (?5 = 'llvm-optimized' AND instances.llvm_definitions > 0)
+                   OR (?5 = 'llvm-pre-optimization' AND instances.pre_opt_definitions > 0)
+               )
+             ORDER BY instances.display_name, instances.id
+             LIMIT ?6"
         );
         let mut statement = self.connection.prepare(&sql)?;
+        let query = match match_kind {
+            InstanceMatch::Exact => options.query.clone(),
+            InstanceMatch::Substring => fts_literal_query(&options.query),
+        };
+        let available = options.available.map(|output| output.stage().as_str());
+        let fetch_limit = sqlite_usize("find result limit", options.limit.saturating_add(1))?;
         let instances = statement
-            .query_map(params![capture_id.as_str(), query], instance_from_row)?
+            .query_map(
+                params![
+                    capture_id.as_str(),
+                    query,
+                    options.crate_name,
+                    options.definition,
+                    available,
+                    fetch_limit,
+                ],
+                |row| row.get::<_, InstanceId>(0),
+            )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(instances)
+    }
+
+    fn hydrate_instances(&self, instance_ids: &[InstanceId]) -> Result<Vec<InstanceSummary>> {
+        let mut statement = self
+            .connection
+            .prepare(&format!("{} WHERE instances.id = ?1", instance_select()))?;
+        let mut instances = Vec::with_capacity(instance_ids.len());
+
+        for instance_id in instance_ids {
+            instances.push(statement.query_row([instance_id.as_str()], instance_from_row)?);
+        }
+
+        Ok(instances)
+    }
+
+    fn verify_search_index(&self) -> Result<()> {
+        let missing = self.connection.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM instances
+                 LEFT JOIN instance_search ON instance_search.rowid = instances.rowid
+                 WHERE instance_search.rowid IS NULL
+                    OR instance_search.instance_id != instances.id
+                    OR instance_search.capture_id != instances.capture_id
+             )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        let extra = self.connection.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM instance_search
+                 LEFT JOIN instances ON instances.rowid = instance_search.rowid
+                 WHERE instances.rowid IS NULL
+             )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if missing || extra {
+            return Err(Error::InvalidStoredData {
+                message: "instance search index must correspond to every stored instance"
+                    .to_owned(),
+            });
+        }
+
+        Ok(())
     }
 
     fn read_blob(&self, digest: &str) -> Result<Vec<u8>> {
@@ -1066,6 +1186,7 @@ struct PublishedModule {
     bodies: Vec<cargo_ir::BodyRange>,
     declarations: Vec<cargo_ir::LlvmDeclaration>,
     aliases: Vec<cargo_ir::LlvmAlias>,
+    selected: bool,
 }
 
 struct PublishedCapture<'a> {
@@ -1087,6 +1208,49 @@ struct PublishedSource {
 #[derive(Clone)]
 struct IndexedBody {
     body_id: String,
+    stage: Option<LlvmStage>,
+    selected: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct AvailabilityCounts {
+    llvm_definitions: usize,
+    llvm_declarations: usize,
+    llvm_aliases: usize,
+    pre_opt_definitions: usize,
+    pre_opt_declarations: usize,
+    pre_opt_aliases: usize,
+}
+
+impl AvailabilityCounts {
+    fn add_definition(&mut self, stage: Option<LlvmStage>) {
+        match stage {
+            Some(LlvmStage::Optimized) => self.llvm_definitions += 1,
+            Some(LlvmStage::PreOptimization) => self.pre_opt_definitions += 1,
+            None => {}
+        }
+    }
+
+    fn add_declaration(&mut self, stage: Option<LlvmStage>) {
+        match stage {
+            Some(LlvmStage::Optimized) => self.llvm_declarations += 1,
+            Some(LlvmStage::PreOptimization) => self.pre_opt_declarations += 1,
+            None => {}
+        }
+    }
+
+    fn add_alias(&mut self, stage: Option<LlvmStage>) {
+        match stage {
+            Some(LlvmStage::Optimized) => self.llvm_aliases += 1,
+            Some(LlvmStage::PreOptimization) => self.pre_opt_aliases += 1,
+            None => {}
+        }
+    }
+}
+
+struct IndexedEvidence {
+    bodies: HashMap<String, Vec<IndexedBody>>,
+    availability: HashMap<String, AvailabilityCounts>,
 }
 
 struct StoredBody {
@@ -1179,14 +1343,30 @@ fn create_schema(connection: &mut Connection) -> Result<()> {
              source_column_end INTEGER
          );
          CREATE INDEX definitions_path ON definitions(capture_id, path);
+         CREATE INDEX definitions_crate_name ON definitions(capture_id, crate_name);
          CREATE TABLE instances(
              id TEXT PRIMARY KEY,
              capture_id TEXT NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
              definition_id TEXT NOT NULL REFERENCES definitions(id) ON DELETE CASCADE,
              display_name TEXT NOT NULL,
-             compiler_symbol TEXT NOT NULL
+             compiler_symbol TEXT NOT NULL,
+             llvm_definitions INTEGER NOT NULL DEFAULT 0,
+             llvm_declarations INTEGER NOT NULL DEFAULT 0,
+             llvm_aliases INTEGER NOT NULL DEFAULT 0,
+             pre_opt_definitions INTEGER NOT NULL DEFAULT 0,
+             pre_opt_declarations INTEGER NOT NULL DEFAULT 0,
+             pre_opt_aliases INTEGER NOT NULL DEFAULT 0
          );
          CREATE INDEX instances_display_name ON instances(capture_id, display_name);
+         CREATE INDEX instances_compiler_symbol ON instances(capture_id, compiler_symbol);
+         CREATE VIRTUAL TABLE instance_search USING fts5(
+             instance_id UNINDEXED,
+             capture_id UNINDEXED,
+             definition_path,
+             display_name,
+             compiler_symbol,
+             tokenize = 'trigram case_sensitive 1'
+         );
          CREATE TABLE bodies(
              id TEXT PRIMARY KEY,
              module_id TEXT NOT NULL REFERENCES modules(id) ON DELETE CASCADE,
@@ -1275,8 +1455,9 @@ fn insert_modules(
     transaction: &Transaction<'_>,
     capture_id: &CaptureId,
     modules: &[PublishedModule],
-) -> Result<HashMap<String, Vec<IndexedBody>>> {
+) -> Result<IndexedEvidence> {
     let mut body_index: HashMap<String, Vec<IndexedBody>> = HashMap::new();
+    let mut availability: HashMap<String, AvailabilityCounts> = HashMap::new();
     let mut direct_aliases = Vec::new();
 
     for module in modules {
@@ -1312,7 +1493,11 @@ fn insert_modules(
             body_index
                 .entry(body.raw_symbol.clone())
                 .or_default()
-                .push(IndexedBody { body_id });
+                .push(IndexedBody {
+                    body_id,
+                    stage: module.provenance.stage,
+                    selected: module.selected,
+                });
         }
 
         for declaration in &module.declarations {
@@ -1327,6 +1512,12 @@ fn insert_modules(
                     sqlite_integer("LLVM declaration end offset", declaration.end)?,
                 ],
             )?;
+            if module.selected {
+                availability
+                    .entry(declaration.raw_symbol.clone())
+                    .or_default()
+                    .add_declaration(module.provenance.stage);
+            }
         }
 
         for alias in &module.aliases {
@@ -1351,6 +1542,12 @@ fn insert_modules(
                     sqlite_integer("LLVM alias end offset", alias.end)?,
                 ],
             )?;
+            if module.selected {
+                availability
+                    .entry(alias.raw_symbol.clone())
+                    .or_default()
+                    .add_alias(module.provenance.stage);
+            }
         }
     }
 
@@ -1360,20 +1557,31 @@ fn insert_modules(
         }
     }
 
-    Ok(body_index)
+    Ok(IndexedEvidence {
+        bodies: body_index,
+        availability,
+    })
 }
 
 fn insert_instances(
     transaction: &Transaction<'_>,
     capture_id: &CaptureId,
     instances: &[cargo_ir::CompilerInstance],
-    body_index: &HashMap<String, Vec<IndexedBody>>,
+    evidence_index: &IndexedEvidence,
 ) -> Result<()> {
     let mut definitions: HashMap<String, String> = HashMap::new();
 
     for instance in instances {
         let instance_id = InstanceId::new();
-        let bodies = bodies_for_instance(instance, body_index);
+        let bodies = bodies_for_instance(instance, &evidence_index.bodies);
+        let mut availability = evidence_index
+            .availability
+            .get(&instance.raw_symbol)
+            .copied()
+            .unwrap_or_default();
+        for body in bodies.iter().filter(|body| body.selected) {
+            availability.add_definition(body.stage);
+        }
         let definition_key = serde_json::to_string(&instance.origin)?;
         let definition_id = if let Some(definition_id) = definitions.get(&definition_key) {
             definition_id.clone()
@@ -1384,12 +1592,43 @@ fn insert_instances(
         };
         transaction.execute(
             "INSERT INTO instances(
-                 id, capture_id, definition_id, display_name, compiler_symbol
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                 id, capture_id, definition_id, display_name, compiler_symbol,
+                 llvm_definitions, llvm_declarations, llvm_aliases,
+                 pre_opt_definitions, pre_opt_declarations, pre_opt_aliases
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 instance_id.as_str(),
                 capture_id.as_str(),
                 definition_id,
+                instance.display_name,
+                instance.raw_symbol,
+                sqlite_usize("optimized LLVM definitions", availability.llvm_definitions)?,
+                sqlite_usize("optimized LLVM declarations", availability.llvm_declarations)?,
+                sqlite_usize("optimized LLVM aliases", availability.llvm_aliases)?,
+                sqlite_usize(
+                    "pre-optimization LLVM definitions",
+                    availability.pre_opt_definitions
+                )?,
+                sqlite_usize(
+                    "pre-optimization LLVM declarations",
+                    availability.pre_opt_declarations
+                )?,
+                sqlite_usize(
+                    "pre-optimization LLVM aliases",
+                    availability.pre_opt_aliases
+                )?,
+            ],
+        )?;
+        let instance_rowid = transaction.last_insert_rowid();
+        transaction.execute(
+            "INSERT INTO instance_search(
+                 rowid, instance_id, capture_id, definition_path, display_name, compiler_symbol
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                instance_rowid,
+                instance_id.as_str(),
+                capture_id.as_str(),
+                instance.origin.definition_path,
                 instance.display_name,
                 instance.raw_symbol,
             ],
@@ -1604,39 +1843,13 @@ fn invalid_stored_text(index: usize, name: &str, value: &str) -> rusqlite::Error
 
 fn instance_select() -> &'static str {
     "SELECT instances.id, definitions.crate_name, definitions.path, instances.display_name,
+            instances.compiler_symbol,
             definitions.source_path, definitions.source_byte_start, definitions.source_byte_end,
             definitions.source_line_start, definitions.source_column_start,
             definitions.source_line_end, definitions.source_column_end,
-            (SELECT COUNT(*) FROM instance_bodies
-             JOIN bodies ON bodies.id = instance_bodies.body_id
-             JOIN selected_modules AS modules ON modules.id = bodies.module_id
-             WHERE instance_bodies.instance_id = instances.id
-               AND modules.stage = 'llvm-optimized'),
-            (SELECT COUNT(*) FROM declarations
-             JOIN selected_modules AS modules ON modules.id = declarations.module_id
-             WHERE modules.capture_id = instances.capture_id
-               AND declarations.symbol = instances.compiler_symbol
-               AND modules.stage = 'llvm-optimized'),
-            (SELECT COUNT(*) FROM aliases
-             JOIN selected_modules AS modules ON modules.id = aliases.module_id
-             WHERE modules.capture_id = instances.capture_id
-               AND aliases.symbol = instances.compiler_symbol
-               AND modules.stage = 'llvm-optimized'),
-            (SELECT COUNT(*) FROM instance_bodies
-             JOIN bodies ON bodies.id = instance_bodies.body_id
-             JOIN selected_modules AS modules ON modules.id = bodies.module_id
-             WHERE instance_bodies.instance_id = instances.id
-               AND modules.stage = 'llvm-pre-optimization'),
-            (SELECT COUNT(*) FROM declarations
-             JOIN selected_modules AS modules ON modules.id = declarations.module_id
-             WHERE modules.capture_id = instances.capture_id
-               AND declarations.symbol = instances.compiler_symbol
-               AND modules.stage = 'llvm-pre-optimization'),
-            (SELECT COUNT(*) FROM aliases
-             JOIN selected_modules AS modules ON modules.id = aliases.module_id
-             WHERE modules.capture_id = instances.capture_id
-               AND aliases.symbol = instances.compiler_symbol
-               AND modules.stage = 'llvm-pre-optimization')
+            instances.llvm_definitions, instances.llvm_declarations, instances.llvm_aliases,
+            instances.pre_opt_definitions, instances.pre_opt_declarations,
+            instances.pre_opt_aliases
      FROM instances JOIN definitions ON definitions.id = instances.definition_id"
 }
 
@@ -1653,41 +1866,49 @@ where
 }
 
 fn instance_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstanceSummary> {
-    let source_path = row.get::<_, Option<String>>(4)?;
+    let compiler_symbol = row.get::<_, String>(4)?;
+    let source_path = row.get::<_, Option<String>>(5)?;
     let source = match source_path {
         Some(path) => Some(SourceLocation {
             path,
-            byte_start: integer_from_row(row, 5)?,
-            byte_end: integer_from_row(row, 6)?,
-            line_start: integer_from_row(row, 7)?,
-            column_start: integer_from_row(row, 8)?,
-            line_end: integer_from_row(row, 9)?,
-            column_end: integer_from_row(row, 10)?,
+            byte_start: integer_from_row(row, 6)?,
+            byte_end: integer_from_row(row, 7)?,
+            line_start: integer_from_row(row, 8)?,
+            column_start: integer_from_row(row, 9)?,
+            line_end: integer_from_row(row, 10)?,
+            column_end: integer_from_row(row, 11)?,
         }),
         None => None,
     };
+    let symbol_fingerprint = blake3::hash(compiler_symbol.as_bytes()).to_hex()[..12].to_owned();
 
     Ok(InstanceSummary {
         id: row.get(0)?,
         crate_name: row.get(1)?,
         definition: row.get(2)?,
         display_name: row.get(3)?,
+        compiler_symbol,
+        symbol_fingerprint,
         source,
         availability: vec![
             OutputAvailability {
                 output: CompilerOutput::Llvm,
-                definitions: integer_from_row(row, 11)?,
-                declarations: integer_from_row(row, 12)?,
-                aliases: integer_from_row(row, 13)?,
+                definitions: integer_from_row(row, 12)?,
+                declarations: integer_from_row(row, 13)?,
+                aliases: integer_from_row(row, 14)?,
             },
             OutputAvailability {
                 output: CompilerOutput::LlvmPreOpt,
-                definitions: integer_from_row(row, 14)?,
-                declarations: integer_from_row(row, 15)?,
-                aliases: integer_from_row(row, 16)?,
+                definitions: integer_from_row(row, 15)?,
+                declarations: integer_from_row(row, 16)?,
+                aliases: integer_from_row(row, 17)?,
             },
         ],
     })
+}
+
+fn fts_literal_query(query: &str) -> String {
+    format!("\"{}\"", query.replace('"', "\"\""))
 }
 
 fn stored_body_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredBody> {
@@ -1939,6 +2160,8 @@ mod tests {
             "_Rmask_iteration".to_owned(),
             vec![IndexedBody {
                 body_id: "body".to_owned(),
+                stage: Some(crate::LlvmStage::Optimized),
+                selected: true,
             }],
         );
 
@@ -1964,6 +2187,8 @@ mod tests {
             "_Rmake.llvm.123".to_owned(),
             vec![IndexedBody {
                 body_id: "clone".to_owned(),
+                stage: Some(crate::LlvmStage::Optimized),
+                selected: true,
             }],
         )]);
 

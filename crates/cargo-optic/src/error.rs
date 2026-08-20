@@ -105,6 +105,13 @@ pub enum Error {
         message: String,
     },
 
+    /// Stored catalog data violates an Optic invariant.
+    #[error("invalid stored evidence: {message}")]
+    InvalidStoredData {
+        /// The violated catalog requirement.
+        message: String,
+    },
+
     /// The system clock is before the Unix epoch.
     #[error("system clock must be after the Unix epoch, got {source}")]
     SystemClock {
