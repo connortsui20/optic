@@ -76,9 +76,13 @@ impl<'a> CaptureCacheKey<'a> {
 
 pub(crate) struct Store {
     root: PathBuf,
+
+    locks: PathBuf,
+
     blobs: PathBuf,
-    staging: PathBuf,
+
     work: PathBuf,
+
     connection: Connection,
 }
 
@@ -87,9 +91,13 @@ pub(crate) struct FileLock {
     _file: File,
 }
 
-/// Prevents cache removal while a command uses the workspace store.
+/// Prevents evidence removal while a command uses the workspace store.
 pub(crate) fn lock_workspace_shared(workspace_root: &Path) -> Result<FileLock> {
-    let path = workspace_root.join(".optic.lock");
+    let optic = workspace_root.join(".optic");
+    create_private_directory(&optic)?;
+    let locks = optic.join("locks");
+    create_private_directory(&locks)?;
+    let path = locks.join("operation.lock");
     let file = open_lock_file(&path)?;
     FileExt::lock_shared(&file).map_err(|source| Error::filesystem("lock", &path, source))?;
 
@@ -98,7 +106,11 @@ pub(crate) fn lock_workspace_shared(workspace_root: &Path) -> Result<FileLock> {
 
 /// Waits for active commands and prevents new commands from opening the workspace store.
 pub(crate) fn lock_workspace_exclusive(workspace_root: &Path) -> Result<FileLock> {
-    let path = workspace_root.join(".optic.lock");
+    let optic = workspace_root.join(".optic");
+    create_private_directory(&optic)?;
+    let locks = optic.join("locks");
+    create_private_directory(&locks)?;
+    let path = locks.join("operation.lock");
     let file = open_lock_file(&path)?;
     FileExt::lock_exclusive(&file).map_err(|source| Error::filesystem("lock", &path, source))?;
 
@@ -107,14 +119,21 @@ pub(crate) fn lock_workspace_exclusive(workspace_root: &Path) -> Result<FileLock
 
 impl Store {
     pub(crate) fn open(workspace_root: &Path) -> Result<Self> {
-        let root = workspace_root.join(".optic");
-        let blobs = root.join("blobs");
-        let staging = root.join("staging");
-        let work = root.join("work");
-        let locks = root.join("locks");
+        let optic = workspace_root.join(".optic");
+        reject_legacy_store(&optic)?;
 
-        for directory in [&root, &blobs, &staging, &work, &locks] {
+        let root = optic.join("store");
+        let blobs = root.join("blobs");
+        let pending = root.join("pending");
+        let work = root.join("work");
+        let locks = optic.join("locks");
+
+        for directory in [&optic, &locks, &root, &blobs, &pending, &work] {
             create_private_directory(directory)?;
+        }
+
+        for name in ["operation.lock", "writer.lock", "evidence.lock"] {
+            drop(open_lock_file(&locks.join(name))?);
         }
 
         let _schema_lock = lock_file(&locks.join("schema.lock"))?;
@@ -126,15 +145,15 @@ impl Store {
 
         Ok(Self {
             root,
+            locks,
             blobs,
-            staging,
             work,
             connection,
         })
     }
 
     pub(crate) fn staging_directory(&self, capture_id: &CaptureId) -> PathBuf {
-        self.staging.join(capture_id.as_str())
+        self.work.join(capture_id.as_str())
     }
 
     pub(crate) fn analysis_directory(&self, analysis_key: &AnalysisKey) -> PathBuf {
@@ -142,13 +161,13 @@ impl Store {
     }
 
     pub(crate) fn lock_writer(&self) -> Result<FileLock> {
-        let path = self.root.join("locks").join("writer.lock");
+        let path = self.locks.join("writer.lock");
 
         lock_file(&path)
     }
 
     pub(crate) fn lock_evidence_reader(&self) -> Result<FileLock> {
-        let path = self.root.join("locks").join("evidence.lock");
+        let path = self.locks.join("evidence.lock");
         let file = open_lock_file(&path)?;
         FileExt::lock_shared(&file).map_err(|source| Error::filesystem("lock", &path, source))?;
 
@@ -156,7 +175,7 @@ impl Store {
     }
 
     fn lock_evidence_writer(&self) -> Result<FileLock> {
-        let path = self.root.join("locks").join("evidence.lock");
+        let path = self.locks.join("evidence.lock");
 
         lock_file(&path)
     }
@@ -1631,8 +1650,46 @@ const fn capture_method_name(method: cargo_ir::CaptureMethod) -> &'static str {
     }
 }
 
+pub(crate) const LEGACY_STORE_ENTRIES: &[&str] = &[
+    "catalog.sqlite",
+    "catalog.sqlite-shm",
+    "catalog.sqlite-wal",
+    "blobs",
+    "pending",
+    "staging",
+    "work",
+];
+
+fn reject_legacy_store(optic: &Path) -> Result<()> {
+    for entry in LEGACY_STORE_ENTRIES {
+        let path = optic.join(entry);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => return Err(Error::LegacyStore { path }),
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(Error::filesystem("read metadata for", path, source));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn create_private_directory(path: &Path) -> Result<()> {
-    fs::create_dir_all(path).map_err(|source| Error::filesystem("create", path, source))?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Err(Error::filesystem(
+                "create directory at",
+                path,
+                io::Error::new(io::ErrorKind::AlreadyExists, "path is not a directory"),
+            ));
+        }
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir_all(path).map_err(|source| Error::filesystem("create", path, source))?;
+        }
+        Err(source) => return Err(Error::filesystem("read metadata for", path, source)),
+    }
 
     #[cfg(unix)]
     {
@@ -1649,14 +1706,92 @@ fn create_private_directory(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::fs;
+    use std::fs::{self, OpenOptions};
     use std::io;
 
     use cargo_ir::{CompilerInstance, DefinitionOrigin};
+    use fs2::FileExt as _;
     use rusqlite::Connection;
 
-    use super::{IndexedBody, STORE_VERSION, Store, bodies_for_instance, unique_prefix_length};
+    use super::{
+        IndexedBody, STORE_VERSION, Store, bodies_for_instance, lock_workspace_exclusive,
+        lock_workspace_shared, unique_prefix_length,
+    };
     use crate::{CaptureId, Error, InstanceId};
+
+    #[test]
+    fn creates_the_store_below_the_retained_optic_root() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let _store = Store::open(temporary.path()).expect("the test can open a store");
+
+        for path in [
+            ".optic/locks/operation.lock",
+            ".optic/locks/schema.lock",
+            ".optic/locks/writer.lock",
+            ".optic/locks/evidence.lock",
+            ".optic/store/catalog.sqlite",
+            ".optic/store/blobs",
+            ".optic/store/pending",
+            ".optic/store/work",
+        ] {
+            assert!(temporary.path().join(path).exists(), "missing {path}");
+        }
+        assert!(!temporary.path().join(".optic.lock").exists());
+    }
+
+    #[test]
+    fn shared_operation_lock_blocks_an_exclusive_lock() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let shared = lock_workspace_shared(temporary.path()).expect("the shared lock succeeds");
+        let path = temporary.path().join(".optic/locks/operation.lock");
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("the test can open the operation lock");
+
+        let error = contender
+            .try_lock_exclusive()
+            .expect_err("the shared lock blocks an exclusive lock");
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+
+        drop(shared);
+        let _exclusive =
+            lock_workspace_exclusive(temporary.path()).expect("the exclusive lock now succeeds");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn operation_lock_rejects_a_symbolic_linked_optic_root() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let linked = temporary.path().join("linked");
+        fs::create_dir(&linked).expect("the test can create the linked directory");
+        symlink(&linked, temporary.path().join(".optic"))
+            .expect("the test can create the symbolic link");
+
+        assert!(matches!(
+            lock_workspace_shared(temporary.path()),
+            Err(Error::Filesystem { .. })
+        ));
+        assert!(!linked.join("locks").exists());
+    }
+
+    #[test]
+    fn rejects_evidence_in_the_legacy_root_layout() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let legacy_catalog = temporary.path().join(".optic/catalog.sqlite");
+        fs::create_dir_all(legacy_catalog.parent().expect("the catalog has a parent"))
+            .expect("the test can create the legacy store");
+        fs::write(&legacy_catalog, b"legacy").expect("the test can create a legacy catalog");
+
+        assert!(matches!(
+            Store::open(temporary.path()),
+            Err(Error::LegacyStore { path }) if path == legacy_catalog
+        ));
+        assert!(!temporary.path().join(".optic/store").exists());
+    }
 
     #[test]
     fn associates_an_instance_only_with_its_exact_compiler_symbol() {
@@ -1833,10 +1968,10 @@ mod tests {
             .expect("the test can create a schema-five catalog");
         drop(connection);
 
-        let optic = temporary.path().join(".optic");
-        fs::create_dir(&optic).expect("the test can create the store directory");
-        fs::rename(catalog, optic.join("catalog.sqlite"))
-            .expect("the test can install the schema-four catalog");
+        let store = temporary.path().join(".optic/store");
+        fs::create_dir_all(&store).expect("the test can create the store directory");
+        fs::rename(catalog, store.join("catalog.sqlite"))
+            .expect("the test can install the schema-five catalog");
 
         assert!(matches!(
             Store::open(temporary.path()),

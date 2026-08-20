@@ -423,9 +423,17 @@ fn captures_finds_and_shows_concrete_generic_instances() {
     let status = fixture.run(["status", "--format", "json"]);
     assert_success(&status);
     assert_eq!(json(&status)["result"]["captures"], 2);
-    assert!(fixture.staging_is_empty());
+    assert!(fixture.work_is_empty());
 
-    let catalog = fixture.root.join(".optic/catalog.sqlite");
+    let config = fixture.root.join(".optic/config.toml");
+    let unknown = fixture.root.join(".optic/future-data");
+    fs::write(&config, b"future configuration").expect("the test can create configuration");
+    fs::write(&unknown, b"future data").expect("the test can create an unknown root entry");
+    let store = fixture.root.join(".optic/store");
+    let expected_store = store
+        .canonicalize()
+        .expect("the evidence-store path is canonical");
+    let catalog = store.join("catalog.sqlite");
     let connection = Connection::open(catalog).expect("the test can open the evidence catalog");
     connection
         .pragma_update(None, "user_version", 999)
@@ -435,7 +443,20 @@ fn captures_finds_and_shows_concrete_generic_instances() {
     let clean = fixture.run(["clean", "--format", "json"]);
     assert_success(&clean);
     assert_eq!(json(&clean)["result"]["removed"], true);
-    assert!(!fixture.root.join(".optic").exists());
+    assert_eq!(
+        json(&clean)["result"]["path"],
+        expected_store.to_string_lossy().as_ref()
+    );
+    assert!(!fixture.root.join(".optic/store").exists());
+    assert!(fixture.root.join(".optic/locks/operation.lock").is_file());
+    assert_eq!(
+        fs::read(&config).expect("configuration remains"),
+        b"future configuration"
+    );
+    assert_eq!(
+        fs::read(&unknown).expect("the unknown root entry remains"),
+        b"future data"
+    );
     assert!(fixture.root.join("target").is_dir());
 
     let clean_again = fixture.run(["clean", "--format", "json"]);
@@ -651,9 +672,9 @@ impl Fixture {
         fs::write(&path, source).expect("the test can change the fixture source");
     }
 
-    fn staging_is_empty(&self) -> bool {
-        fs::read_dir(self.root.join(".optic/staging"))
-            .expect("the store contains a staging directory")
+    fn work_is_empty(&self) -> bool {
+        fs::read_dir(self.root.join(".optic/store/work"))
+            .expect("the store contains a work directory")
             .next()
             .is_none()
     }

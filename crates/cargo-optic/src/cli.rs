@@ -196,7 +196,8 @@ enum Command {
     /// Removes all stored Optic evidence for this workspace.
     #[command(after_long_help = concat!(
         "Example:\n  cargo optic clean\n\n",
-        "This command does not remove the Cargo target directory."
+        "This command keeps `.optic` configuration and locks. ",
+        "It does not remove the Cargo target directory."
     ))]
     Clean {
         /// Selects plain text or versioned JSON output.
@@ -1164,13 +1165,13 @@ fn clean_text(summary: &CleanSummary, terminal: &Terminal) -> String {
     if summary.removed {
         format!(
             "{} at {}.\n",
-            terminal.positive("Removed the Optic cache"),
+            terminal.positive("Removed stored Optic evidence"),
             summary.path.display(),
         )
     } else {
         format!(
             "{} at {}.\n",
-            terminal.warning("No Optic cache exists"),
+            terminal.warning("No stored Optic evidence exists"),
             summary.path.display(),
         )
     }

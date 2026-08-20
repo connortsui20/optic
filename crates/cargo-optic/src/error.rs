@@ -111,6 +111,16 @@ pub enum Error {
         actual: u32,
     },
 
+    /// Evidence from the previous store layout exists at the `.optic` root.
+    #[error(
+        "legacy Optic evidence exists at {path}\n\
+         Run `cargo optic clean` to recreate the store"
+    )]
+    LegacyStore {
+        /// One legacy evidence path that was found.
+        path: PathBuf,
+    },
+
     /// A stored byte range is invalid.
     #[error("stored byte range must be valid for {path}, got {start}..{end}")]
     InvalidRange {

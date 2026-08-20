@@ -13,7 +13,8 @@ use serde::Serialize;
 
 use crate::source::{SourceBaseline, find_item_at};
 use crate::store::{
-    AnalysisKey, CaptureCacheKey, FileLock, Store, lock_workspace_exclusive, lock_workspace_shared,
+    AnalysisKey, CaptureCacheKey, FileLock, LEGACY_STORE_ENTRIES, Store, lock_workspace_exclusive,
+    lock_workspace_shared,
 };
 use crate::{
     BodySetDelta, BodySetSummary, BuildSpec, CachePolicy, CaptureDetails, CaptureId,
@@ -57,17 +58,17 @@ impl Application {
         })
     }
 
-    /// Removes the `.optic` cache for the Cargo workspace that contains `directory`.
+    /// Removes stored evidence for the Cargo workspace that contains `directory`.
     ///
     /// # Errors
     ///
-    /// Returns an error if Cargo metadata, the workspace lock, or the cache path is not available.
+    /// Returns an error if Cargo metadata, the workspace lock, or an evidence path is not available.
     pub fn clean(directory: &Path, manifest_path: Option<&Path>) -> Result<CleanSummary> {
         let metadata = metadata(directory, manifest_path)?;
         let workspace_root = metadata.workspace_root.into_std_path_buf();
-        let path = workspace_root.join(".optic");
+        let path = workspace_root.join(".optic").join("store");
         let _operation_lock = lock_workspace_exclusive(&workspace_root)?;
-        let removed = remove_cache(&path)?;
+        let removed = remove_stored_evidence(&workspace_root)?;
 
         Ok(CleanSummary { path, removed })
     }
@@ -352,7 +353,7 @@ fn metadata(directory: &Path, manifest_path: Option<&Path>) -> Result<cargo_meta
     Ok(command.exec()?)
 }
 
-fn remove_cache(path: &Path) -> Result<bool> {
+fn remove_path(path: &Path) -> Result<bool> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -366,6 +367,19 @@ fn remove_cache(path: &Path) -> Result<bool> {
     result.map_err(|source| crate::Error::filesystem("remove", path, source))?;
 
     Ok(true)
+}
+
+fn remove_stored_evidence(workspace_root: &Path) -> Result<bool> {
+    let optic = workspace_root.join(".optic");
+    let mut removed = remove_path(&optic.join("store"))?;
+
+    for entry in LEGACY_STORE_ENTRIES {
+        removed |= remove_path(&optic.join(entry))?;
+    }
+
+    removed |= remove_path(&workspace_root.join(".optic.lock"))?;
+
+    Ok(removed)
 }
 
 fn request_key(
@@ -460,22 +474,95 @@ fn remove_staging(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clean_removes_only_current_and_legacy_evidence() {
+        use std::fs;
+
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let optic = temporary.path().join(".optic");
+        let operation_lock = optic.join("locks/operation.lock");
+        let config = optic.join("config.toml");
+        let unknown = optic.join("future-data");
+        fs::create_dir_all(optic.join("store/blobs"))
+            .expect("the test can create the current store");
+        fs::create_dir_all(optic.join("blobs")).expect("the test can create legacy evidence");
+        fs::create_dir_all(operation_lock.parent().expect("the lock has a parent"))
+            .expect("the test can create the lock directory");
+        fs::write(&operation_lock, b"lock").expect("the test can create the operation lock");
+        fs::write(&config, b"config").expect("the test can create future configuration");
+        fs::write(&unknown, b"unknown").expect("the test can create an unknown root entry");
+        fs::write(temporary.path().join(".optic.lock"), b"legacy lock")
+            .expect("the test can create the legacy lock");
+
+        assert!(
+            super::remove_stored_evidence(temporary.path()).expect("evidence removal succeeds")
+        );
+        assert!(!optic.join("store").exists());
+        assert!(!optic.join("blobs").exists());
+        assert!(!temporary.path().join(".optic.lock").exists());
+        assert_eq!(
+            fs::read(&operation_lock).expect("the lock remains"),
+            b"lock"
+        );
+        assert_eq!(fs::read(&config).expect("configuration remains"), b"config");
+        assert_eq!(
+            fs::read(&unknown).expect("the unknown entry remains"),
+            b"unknown"
+        );
+        assert!(optic.is_dir());
+
+        assert!(
+            !super::remove_stored_evidence(temporary.path())
+                .expect("repeated evidence removal succeeds")
+        );
+    }
+
     #[cfg(unix)]
     #[test]
-    fn cache_removal_does_not_follow_a_symbolic_link() {
+    fn clean_retains_the_operation_lock_inode() {
+        use std::fs;
+        use std::os::unix::fs::MetadataExt;
+
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let lock = temporary.path().join(".optic/locks/operation.lock");
+        fs::create_dir_all(lock.parent().expect("the lock has a parent"))
+            .expect("the test can create the lock directory");
+        fs::write(&lock, []).expect("the test can create the operation lock");
+        fs::create_dir_all(temporary.path().join(".optic/store"))
+            .expect("the test can create the store");
+        let inode = fs::metadata(&lock)
+            .expect("the operation lock has metadata")
+            .ino();
+
+        assert!(
+            super::remove_stored_evidence(temporary.path()).expect("evidence removal succeeds")
+        );
+        assert_eq!(
+            fs::metadata(&lock)
+                .expect("the operation lock remains")
+                .ino(),
+            inode
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn store_removal_does_not_follow_a_symbolic_link() {
         use std::fs;
         use std::os::unix::fs::symlink;
 
         let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
         let retained = temporary.path().join("retained");
-        let cache = temporary.path().join(".optic");
+        let optic = temporary.path().join(".optic");
+        let store = optic.join("store");
+        fs::create_dir(&optic).expect("the test can create the Optic directory");
         fs::create_dir(&retained).expect("the test can create the retained directory");
         fs::write(retained.join("evidence"), b"retained")
             .expect("the test can create retained evidence");
-        symlink(&retained, &cache).expect("the test can create the cache symbolic link");
+        symlink(&retained, &store).expect("the test can create the store symbolic link");
 
-        assert!(super::remove_cache(&cache).expect("cache removal succeeds"));
-        assert!(!cache.exists());
+        assert!(super::remove_stored_evidence(temporary.path()).expect("store removal succeeds"));
+        assert!(!store.exists());
         assert_eq!(
             fs::read(retained.join("evidence")).expect("the linked directory remains readable"),
             b"retained"

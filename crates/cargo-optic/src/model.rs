@@ -250,13 +250,13 @@ pub struct CaptureDetails {
     pub artifacts: Vec<ArtifactSummary>,
 }
 
-/// The result of removing the Optic cache for one workspace.
+/// The result of removing stored Optic evidence for one workspace.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CleanSummary {
-    /// The cache path selected from Cargo metadata.
+    /// The evidence-store path selected from Cargo metadata.
     pub path: PathBuf,
 
-    /// Whether the cache existed and was removed.
+    /// Whether current or legacy evidence existed and was removed.
     pub removed: bool,
 }
 
