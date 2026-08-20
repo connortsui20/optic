@@ -195,6 +195,38 @@ pub struct EnvironmentVariable {
     pub value: String,
 }
 
+/// The unstable-access mechanism used by Optic for one compiler subprocess.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UnstableAccessMechanism {
+    /// Optic set `RUSTC_BOOTSTRAP=1` for a bounded child process.
+    RustcBootstrap,
+}
+
+/// One child-process scope in which Optic enables unstable compiler access.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UnstableAccessScope {
+    /// Reading Cargo's merged configuration.
+    CargoConfigDiscovery,
+
+    /// Building the exact-version rustc-private driver.
+    DriverBuild,
+
+    /// Running rustc for the selected Cargo target.
+    SelectedTarget,
+}
+
+/// Unstable compiler access that Optic injected for a capture.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UnstableAccess {
+    /// The mechanism used for each recorded scope.
+    pub mechanism: UnstableAccessMechanism,
+
+    /// The only child-process scopes that receive the mechanism.
+    pub scopes: Vec<UnstableAccessScope>,
+}
+
 /// The request and effective process metadata for one Cargo analysis.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CaptureInvocation {
@@ -215,6 +247,9 @@ pub struct CaptureInvocation {
 
     /// Compiler arguments injected to collect evidence or implement the capture profile.
     pub injected_rustc_arguments: Vec<String>,
+
+    /// Unstable compiler access injected by Optic.
+    pub unstable_access: UnstableAccess,
 }
 
 /// One compiler-artifact event emitted by Cargo.
@@ -296,6 +331,14 @@ pub fn capture(request: &BuildRequest) -> Result<CaptureOutcome> {
         wrapper_chain: driver.wrapper_chain(),
         environment: compiler_environment(),
         injected_rustc_arguments: injected_rustc_arguments(request),
+        unstable_access: UnstableAccess {
+            mechanism: UnstableAccessMechanism::RustcBootstrap,
+            scopes: vec![
+                UnstableAccessScope::CargoConfigDiscovery,
+                UnstableAccessScope::DriverBuild,
+                UnstableAccessScope::SelectedTarget,
+            ],
+        },
     };
     let output = command.output().map_err(|source| Error::StartProcess {
         program: "cargo rustc".to_owned(),

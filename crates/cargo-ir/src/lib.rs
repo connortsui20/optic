@@ -8,7 +8,8 @@ mod capture;
 pub use capture::{
     AliasTarget, ArtifactProvenance, BodyRange, CaptureInvocation, CaptureMethod, CaptureOutcome,
     CargoArtifact, CommandInvocation, EnvironmentVariable, EvidenceBundle, LlvmAlias,
-    LlvmDeclaration, LlvmStage, LtoScope, ModuleEvidence, capture,
+    LlvmDeclaration, LlvmStage, LtoScope, ModuleEvidence, UnstableAccess, UnstableAccessMechanism,
+    UnstableAccessScope, capture,
 };
 
 mod error;
