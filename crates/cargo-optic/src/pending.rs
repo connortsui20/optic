@@ -285,6 +285,7 @@ mod tests {
             offline: false,
             frozen: false,
             capture_profile: cargo_ir::CaptureProfile::Faithful,
+            capture_remarks: false,
             analysis_directory: PathBuf::new(),
         };
         let toolchain = cargo_ir::Toolchain {
@@ -333,6 +334,7 @@ mod tests {
             offline: false,
             frozen: false,
             capture_profile: cargo_ir::CaptureProfile::Faithful,
+            capture_remarks: false,
             analysis_directory: PathBuf::new(),
         };
         let toolchain = cargo_ir::Toolchain {

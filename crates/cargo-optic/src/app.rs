@@ -404,6 +404,7 @@ impl Application {
                     rustc_arguments: spec.rustc_arguments.clone(),
                 },
             },
+            capture_remarks: false,
             analysis_directory,
         }
     }
