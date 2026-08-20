@@ -15,6 +15,7 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
+use crate::app::validate_remark_options;
 use crate::terminal::{CodeSyntax, Terminal};
 use crate::{
     Application, BuildSpec, BuildTarget, CachePolicy, CaptureDetails, CaptureId, CaptureProfile,
@@ -917,7 +918,12 @@ fn execute_show(application: &mut Application, request: ShowRequest) -> Result<E
         color,
     } = request;
     let terminal = Terminal::new(color.enabled(format));
-    if output != ShowOutput::Remarks && remark_filters_supplied {
+    if output == ShowOutput::Remarks {
+        validate_remark_options(&remark_options).map_err(|error| Failure {
+            format,
+            message: error.to_string(),
+        })?;
+    } else if remark_filters_supplied {
         return Err(Failure {
             format,
             message: "--kind, --pass, and --limit require --output remarks".to_owned(),
@@ -1755,7 +1761,8 @@ fn show_command(
                 .expect("writing command text to a String cannot fail");
         }
         if let Some(pass) = &options.pass {
-            write!(after, " --pass {pass}").expect("writing command text to a String cannot fail");
+            write!(after, " --pass={}", shell_quoted(pass))
+                .expect("writing command text to a String cannot fail");
         }
         if options.limit != RemarkOptions::DEFAULT_LIMIT {
             write!(after, " --limit {}", options.limit)
@@ -1772,6 +1779,11 @@ fn show_command(
         instance_id.unique_prefix_length,
         &after,
     )
+}
+
+/// Quotes one argument for Bash, Zsh, and Fish without shell evaluation.
+fn shell_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn show_text(
@@ -1952,10 +1964,10 @@ fn normalized_arguments() -> Vec<OsString> {
 mod tests {
     use clap::Parser as _;
 
-    use super::{Cli, Command, DisplayIdentifier, ShowOutput, find_text};
+    use super::{Cli, Command, DisplayIdentifier, ShowOutput, find_text, show_command};
     use crate::{
         CaptureId, FindMatchKind, FindResult, InstanceId, InstanceSummary, RemarkKindFilter,
-        SourceLocation,
+        RemarkOptions, SourceLocation,
     };
 
     #[test]
@@ -2022,6 +2034,32 @@ mod tests {
                 "remarks",
             ])
             .is_err()
+        );
+    }
+
+    #[test]
+    fn quotes_pass_names_in_generated_show_commands() {
+        let instance = DisplayIdentifier::full("ins_0123456789abcdef0123456789abcdef");
+        let options = RemarkOptions {
+            pass: Some("foo bar; $(echo unsafe) 'quoted'".to_owned()),
+            ..RemarkOptions::default()
+        };
+
+        let command = show_command(
+            &crate::terminal::Terminal::new(false),
+            &instance,
+            ShowOutput::Remarks,
+            Some(&options),
+            false,
+        );
+
+        assert_eq!(
+            command,
+            concat!(
+                "cargo optic show --instance ins_0123456789abcdef0123456789abcdef ",
+                "--output remarks --pass='foo bar; $(echo unsafe) '",
+                "\"'\"'quoted'\"'\"''",
+            )
         );
     }
 

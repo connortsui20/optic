@@ -442,7 +442,7 @@ impl Application {
     }
 }
 
-fn validate_remark_options(options: &RemarkOptions) -> Result<()> {
+pub(crate) fn validate_remark_options(options: &RemarkOptions) -> Result<()> {
     if options.pass.as_ref().is_some_and(String::is_empty) {
         return Err(crate::Error::InvalidRequest {
             message: "remark pass must not be empty, got an empty pass".to_owned(),

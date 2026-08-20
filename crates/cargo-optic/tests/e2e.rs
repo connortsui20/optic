@@ -653,6 +653,42 @@ fn captures_and_reports_optimization_remark_state() {
 }
 
 #[test]
+fn invalid_remark_filters_do_not_capture() {
+    let fixture = Fixture::new();
+    let rejected = fixture.run([
+        "show",
+        "optic_mvp_kernel::outlined_sum",
+        "-p",
+        "optic-mvp-app",
+        "--bin",
+        "optic-mvp-app",
+        "--release",
+        "--output",
+        "remarks",
+        "--pass",
+        "",
+        "--format",
+        "json",
+    ]);
+
+    assert!(!rejected.status.success());
+    assert!(
+        string(&json(&rejected), "/error/message")
+            .contains("remark pass must not be empty, got an empty pass")
+    );
+    let catalog = Connection::open(fixture.root.join(".optic/store/catalog.sqlite"))
+        .expect("the test can open the evidence catalog");
+    let captures = catalog
+        .query_row("SELECT COUNT(*) FROM captures", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("the test can count captures");
+
+    assert_eq!(captures, 0);
+    assert!(!fixture.root.join("target/release").exists());
+}
+
+#[test]
 fn resumes_retained_ingestion_before_cargo_even_with_fresh() {
     let fixture = Fixture::new();
     let catalog = fixture.install_failing_capture_trigger();
