@@ -587,7 +587,7 @@ fn preserves_compiler_wrappers_and_reuses_dependency_artifacts() {
         .arg("build")
         .args(["-p", "optic-mvp-app", "--bin", "optic-mvp-app", "--release"])
         .current_dir(&fixture.root)
-        .env("RUSTUP_TOOLCHAIN", "nightly")
+        .env_remove("RUSTC_BOOTSTRAP")
         .env("RUSTC_WRAPPER", &global_wrapper)
         .env("RUSTC_WORKSPACE_WRAPPER", &workspace_wrapper)
         .env("OPTIC_TEST_WRAPPER_LOG", &log)
@@ -630,6 +630,76 @@ fn preserves_compiler_wrappers_and_reuses_dependency_artifacts() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn scopes_unstable_access_to_the_selected_target() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new();
+    let wrapper = fixture.root.join("bootstrap-wrapper.sh");
+    let log = fixture.root.join("bootstrap-wrapper.log");
+    fs::write(
+        &wrapper,
+        concat!(
+            "#!/bin/sh\n",
+            "crate=\n",
+            "previous=\n",
+            "for argument do\n",
+            "  if [ \"$previous\" = --crate-name ]; then crate=$argument; break; fi\n",
+            "  previous=$argument\n",
+            "done\n",
+            "if [ -n \"$crate\" ]; then printf '%s:%s\\n' \"$crate\" ",
+            "\"${RUSTC_BOOTSTRAP-unset}\" >> \"$OPTIC_TEST_WRAPPER_LOG\"; fi\n",
+            "exec \"$@\"\n",
+        ),
+    )
+    .expect("the test can write the compiler wrapper");
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))
+        .expect("the test can make the compiler wrapper executable");
+
+    let capture = fixture
+        .command([
+            "capture",
+            "-p",
+            "optic-mvp-app",
+            "--bin",
+            "optic-mvp-app",
+            "--release",
+            "--fresh",
+            "--format",
+            "json",
+        ])
+        .env("RUSTC_WRAPPER", &wrapper)
+        .env("OPTIC_TEST_WRAPPER_LOG", &log)
+        .output()
+        .expect("the Cargo Optic capture starts");
+    assert_success(&capture);
+    let invocations = fs::read_to_string(&log).expect("the compiler wrapper log is readable");
+    let mut saw_dependency = false;
+    let mut saw_selected_target = false;
+
+    for invocation in invocations.lines() {
+        if invocation.starts_with("optic_mvp_app:") {
+            saw_selected_target = true;
+            assert_eq!(invocation, "optic_mvp_app:1");
+        } else {
+            saw_dependency = true;
+            assert!(
+                invocation.ends_with(":unset"),
+                "dependency received Optic bootstrap: {invocation}"
+            );
+        }
+    }
+    assert!(
+        saw_dependency,
+        "the fresh target compiled at least one dependency"
+    );
+    assert!(
+        saw_selected_target,
+        "the selected target passed through the wrapper"
+    );
+}
+
 struct Fixture {
     _temporary: TempDir,
     root: PathBuf,
@@ -660,7 +730,7 @@ impl Fixture {
             .arg("optic")
             .args(arguments)
             .current_dir(&self.root)
-            .env("RUSTUP_TOOLCHAIN", "nightly")
+            .env_remove("RUSTC_BOOTSTRAP")
             .env("OPTIC_TEST_VALUE", "first")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
