@@ -1,8 +1,8 @@
 //! Runs one Cargo analysis and collects supported LLVM modules.
 //!
-//! [`capture`] uses `cargo rustc` so normal and analysis builds share dependency artifacts. The
+//! [`compile`] uses `cargo rustc` so normal and analysis builds share dependency artifacts. The
 //! selected target has a separate Cargo identity because saving compiler temporaries is part of
-//! Cargo's fingerprint. A faithful capture otherwise preserves the selected codegen settings.
+//! Cargo's fingerprint. [`ingest`] reads the retained artifacts without invoking Cargo again.
 
 use std::env;
 use std::ffi::OsString;
@@ -271,11 +271,11 @@ pub struct CargoArtifact {
 /// The result of asking Cargo for evidence.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", tag = "kind")]
-pub enum CaptureOutcome {
+pub enum CompileOutcome {
     /// Cargo invoked rustc and cargo-ir collected new evidence.
-    Captured {
-        /// The collected compiler evidence.
-        bundle: Box<EvidenceBundle>,
+    Compiled {
+        /// Metadata needed to ingest the retained compiler artifacts.
+        compilation: Box<CompiledCapture>,
     },
 
     /// Cargo completed without invoking the selected rustc driver and reported fresh artifacts.
@@ -286,6 +286,16 @@ pub enum CaptureOutcome {
         /// The fresh compiler-artifact events reported by Cargo.
         artifacts: Vec<CargoArtifact>,
     },
+}
+
+/// Metadata retained between compiler execution and evidence ingestion.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CompiledCapture {
+    /// The request and effective compiler invocation.
+    pub invocation: CaptureInvocation,
+
+    /// The exact analyzed compiler.
+    pub toolchain: Toolchain,
 }
 
 /// All evidence produced by one compiler invocation.
@@ -310,7 +320,7 @@ pub struct EvidenceBundle {
 ///
 /// Returns an error if the toolchain is unsupported, the analysis directory is not empty, Cargo
 /// fails, or emitted LLVM evidence cannot be read.
-pub fn capture(request: &BuildRequest) -> Result<CaptureOutcome> {
+pub fn compile(request: &BuildRequest) -> Result<CompileOutcome> {
     let cargo = CargoContext::discover(&request.workspace_root)?;
     let toolchain = inspect_rustc(cargo.rustc())?;
     prepare_analysis_directory(&request.analysis_directory)?;
@@ -355,7 +365,7 @@ pub fn capture(request: &BuildRequest) -> Result<CaptureOutcome> {
     let cargo_artifacts = cargo_artifacts(&output.stdout);
     if !manifest_path.is_file() {
         if !cargo_artifacts.is_empty() && cargo_artifacts.iter().all(|artifact| artifact.fresh) {
-            return Ok(CaptureOutcome::Fresh {
+            return Ok(CompileOutcome::Fresh {
                 invocation: Box::new(invocation),
                 artifacts: cargo_artifacts,
             });
@@ -364,26 +374,57 @@ pub fn capture(request: &BuildRequest) -> Result<CaptureOutcome> {
         return Err(Error::MissingEvidence);
     }
 
-    let artifacts = supported_bitcode(&request.analysis_directory)?;
+    require_compiled_evidence(request)?;
 
-    if artifacts.is_empty() {
+    Ok(CompileOutcome::Compiled {
+        compilation: Box::new(CompiledCapture {
+            invocation,
+            toolchain,
+        }),
+    })
+}
+
+/// Confirms that a successful compiler run left the identity manifest and supported bitcode.
+///
+/// # Errors
+///
+/// Returns an error if either required artifact class is absent or cannot be inspected.
+pub fn require_compiled_evidence(request: &BuildRequest) -> Result<()> {
+    let manifest_path = request.analysis_directory.join(mono::MANIFEST_NAME);
+    if !manifest_path.is_file() || supported_bitcode(&request.analysis_directory)?.is_empty() {
         return Err(Error::MissingEvidence);
     }
 
-    let compiler_manifest = mono::read(&manifest_path, &toolchain.commit_hash)?;
-    invocation.rustc = Some(compiler_invocation(&compiler_manifest.rustc_arguments)?);
-    let modules = artifacts
+    Ok(())
+}
+
+/// Reads retained compiler artifacts without invoking Cargo.
+///
+/// # Errors
+///
+/// Returns an error if the manifest, LLVM bitcode, or textual LLVM output is invalid.
+pub fn ingest(request: &BuildRequest, mut compilation: CompiledCapture) -> Result<EvidenceBundle> {
+    require_compiled_evidence(request)?;
+    compilation.invocation.request = request.clone();
+    let manifest_path = request.analysis_directory.join(mono::MANIFEST_NAME);
+    let compiler_manifest = mono::read(&manifest_path, &compilation.toolchain.commit_hash)?;
+    compilation.invocation.rustc = Some(compiler_invocation(&compiler_manifest.rustc_arguments)?);
+    let modules = supported_bitcode(&request.analysis_directory)?
         .into_iter()
-        .map(|artifact| disassemble(&toolchain, artifact, &request.analysis_directory))
+        .map(|artifact| {
+            disassemble(
+                &compilation.toolchain,
+                artifact,
+                &request.analysis_directory,
+            )
+        })
         .collect::<Result<Vec<_>>>()?;
 
-    Ok(CaptureOutcome::Captured {
-        bundle: Box::new(EvidenceBundle {
-            invocation,
-            toolchain,
-            instances: compiler_manifest.instances,
-            modules,
-        }),
+    Ok(EvidenceBundle {
+        invocation: compilation.invocation,
+        toolchain: compilation.toolchain,
+        instances: compiler_manifest.instances,
+        modules,
     })
 }
 

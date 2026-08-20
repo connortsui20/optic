@@ -1,15 +1,15 @@
 //! Captures compiler evidence for `cargo-optic`.
 //!
-//! This crate owns the Cargo, compiler, and LLVM boundary. [`capture`] runs one selected Cargo target
-//! and returns an [`EvidenceBundle`] whose paths belong to the caller-provided analysis directory.
-//! It does not assign Optic capture IDs or persist evidence.
+//! This crate owns the Cargo, compiler, and LLVM boundary. [`compile`] runs one selected Cargo target.
+//! [`ingest`] reads its retained artifacts and returns an [`EvidenceBundle`]. It does not assign
+//! Optic capture IDs or persist evidence.
 
 mod capture;
 pub use capture::{
-    AliasTarget, ArtifactProvenance, BodyRange, CaptureInvocation, CaptureMethod, CaptureOutcome,
-    CargoArtifact, CommandInvocation, EnvironmentVariable, EvidenceBundle, LlvmAlias,
-    LlvmDeclaration, LlvmStage, LtoScope, ModuleEvidence, UnstableAccess, UnstableAccessMechanism,
-    UnstableAccessScope, capture,
+    AliasTarget, ArtifactProvenance, BodyRange, CaptureInvocation, CaptureMethod, CargoArtifact,
+    CommandInvocation, CompileOutcome, CompiledCapture, EnvironmentVariable, EvidenceBundle,
+    LlvmAlias, LlvmDeclaration, LlvmStage, LtoScope, ModuleEvidence, UnstableAccess,
+    UnstableAccessMechanism, UnstableAccessScope, compile, ingest, require_compiled_evidence,
 };
 
 mod error;
