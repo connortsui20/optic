@@ -47,10 +47,16 @@ pub enum Error {
 
     /// The analyzed toolchain does not contain `llvm-dis`.
     #[error(
-        "the selected compiler does not contain llvm-dis at {path}{}",
+        "the selected compiler rustc {release} ({commit_hash}) does not contain llvm-dis at {path}{}",
         install_command.as_ref().map(|command| format!("; run `{command}`")).unwrap_or_else(|| "; install its matching llvm-tools component".to_owned())
     )]
     MissingLlvmDis {
+        /// The selected rustc release.
+        release: String,
+
+        /// The selected rustc commit hash.
+        commit_hash: String,
+
         /// The expected executable path.
         path: PathBuf,
 
@@ -60,10 +66,16 @@ pub enum Error {
 
     /// The active toolchain does not contain compiler libraries for an external driver.
     #[error(
-        "the selected compiler does not contain rustc-dev libraries at {path}{}",
+        "the selected compiler rustc {release} ({commit_hash}) does not contain rustc-dev libraries at {path}{}",
         install_command.as_ref().map(|command| format!("; run `{command}`")).unwrap_or_else(|| "; install its matching rustc-dev component".to_owned())
     )]
     MissingRustcDev {
+        /// The selected rustc release.
+        release: String,
+
+        /// The selected rustc commit hash.
+        commit_hash: String,
+
         /// The directory that must contain rustc compiler libraries.
         path: PathBuf,
 

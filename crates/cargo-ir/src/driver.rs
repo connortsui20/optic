@@ -96,6 +96,8 @@ impl RustcDriver {
 
 fn require_rustc_dev(toolchain: &Toolchain) -> Result<()> {
     let missing = || Error::MissingRustcDev {
+        release: toolchain.release.clone(),
+        commit_hash: toolchain.commit_hash.clone(),
         path: toolchain.rustc_private_lib.clone(),
         install_command: toolchain
             .rustup_toolchain

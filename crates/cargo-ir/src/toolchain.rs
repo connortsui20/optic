@@ -256,6 +256,8 @@ pub(crate) fn inspect_rustc(rustc: &Path) -> Result<Toolchain> {
 
     if !llvm_dis.is_file() {
         return Err(Error::MissingLlvmDis {
+            release: release.clone(),
+            commit_hash: commit_hash.clone(),
             path: llvm_dis,
             install_command: rustup_toolchain.as_ref().map(|toolchain| {
                 format!("rustup component add --toolchain {toolchain} llvm-tools")
