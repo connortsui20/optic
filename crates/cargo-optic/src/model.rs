@@ -520,12 +520,6 @@ pub struct BodySetSummary {
     /// Distinct fixed vector lane counts in ascending order.
     pub vector_widths: Vec<usize>,
 
-    /// Total direct and indirect calls.
-    pub calls: usize,
-
-    /// Total indirect calls.
-    pub indirect_calls: usize,
-
     /// Structural classification of `call`, `invoke`, and `callbr` instructions.
     pub call_sites: CallSiteSummary,
 
@@ -541,8 +535,6 @@ impl BodySetSummary {
             instructions: 0,
             vector_lines: 0,
             vector_widths: Vec::new(),
-            calls: 0,
-            indirect_calls: 0,
             call_sites: CallSiteSummary::default(),
             safety_checks: 0,
         };
@@ -553,8 +545,6 @@ impl BodySetSummary {
             summary
                 .vector_widths
                 .extend(body.summary.vector_widths.iter().copied());
-            summary.calls += body.summary.call_sites.total;
-            summary.indirect_calls += body.summary.call_sites.indirect;
             summary.call_sites.add_assign(&body.summary.call_sites);
             summary.safety_checks += body.summary.safety_checks;
         }
@@ -580,12 +570,6 @@ pub struct BodySetDelta {
     /// Change in fixed-vector lines.
     pub vector_lines: i128,
 
-    /// Change in direct and indirect calls.
-    pub calls: i128,
-
-    /// Change in indirect calls.
-    pub indirect_calls: i128,
-
     /// Changes in classified `call`, `invoke`, and `callbr` instructions.
     pub call_sites: CallSiteDelta,
 
@@ -600,8 +584,6 @@ impl BodySetDelta {
             bytes: delta(before.bytes, after.bytes),
             instructions: delta(before.instructions, after.instructions),
             vector_lines: delta(before.vector_lines, after.vector_lines),
-            calls: delta(before.calls, after.calls),
-            indirect_calls: delta(before.indirect_calls, after.indirect_calls),
             call_sites: CallSiteDelta::between(&before.call_sites, &after.call_sites),
             safety_checks: delta(before.safety_checks, after.safety_checks),
         }
@@ -702,12 +684,8 @@ mod tests {
         assert_eq!(after.call_sites.indirect, 1);
         assert_eq!(after.call_sites.inline_asm, 1);
         assert_eq!(after.call_sites.memory_intrinsics, 1);
-        assert_eq!(after.calls, after.call_sites.total);
-        assert_eq!(after.indirect_calls, after.call_sites.indirect);
         assert_eq!(delta.call_sites.total, 2);
         assert_eq!(delta.call_sites.indirect, 1);
         assert_eq!(delta.call_sites.inline_asm, 1);
-        assert_eq!(delta.calls, delta.call_sites.total);
-        assert_eq!(delta.indirect_calls, delta.call_sites.indirect);
     }
 }
