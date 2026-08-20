@@ -2482,8 +2482,9 @@ mod tests {
     use rusqlite::Connection;
 
     use super::{
-        IndexedBody, PublishedModule, STORE_VERSION, Store, bodies_for_instance, insert_instances,
-        insert_modules, lock_workspace_exclusive, lock_workspace_shared, unique_prefix_length,
+        IndexedBody, PublishedModule, PublishedRemarkFile, STORE_VERSION, Store,
+        bodies_for_instance, insert_instances, insert_modules, insert_remarks,
+        lock_workspace_exclusive, lock_workspace_shared, unique_prefix_length,
     };
     use crate::{
         CaptureDisposition, CaptureId, CompilerOutput, Error, FindMatchKind, FindOptions,
@@ -2739,6 +2740,16 @@ mod tests {
             "_Rremark_kernel",
             [1, 0, 0, 0, 0, 0],
         );
+        insert_search_instance(
+            &store,
+            2,
+            "second-remark-definition",
+            "remark_crate",
+            "remark_crate::second_kernel",
+            "remark_crate::second_kernel",
+            "_Rremark_kernel",
+            [1, 0, 0, 0, 0, 0],
+        );
         let instance_id = "ins_00000000000000000000000000000001"
             .parse::<InstanceId>()
             .expect("the test instance ID is valid");
@@ -2747,6 +2758,18 @@ mod tests {
             .show_remarks(&instance_id, &RemarkOptions::default())
             .expect("the non-remark capture can be inspected");
         assert_eq!(missing.summary.state, RemarkEvidenceState::NotCaptured);
+        store
+            .connection
+            .execute(
+                "UPDATE captures SET remarks_captured = 1
+                 WHERE id = 'cap_11111111111111111111111111111111'",
+                [],
+            )
+            .expect("the test can represent an empty remark capture");
+        let empty = store
+            .show_remarks(&instance_id, &RemarkOptions::default())
+            .expect("the empty remark capture can be inspected");
+        assert_eq!(empty.summary.state, RemarkEvidenceState::CapturedEmpty);
 
         let raw_path = temporary.path().join("remarks.opt.opt.yaml");
         fs::write(&raw_path, b"raw remark evidence")
@@ -2756,30 +2779,59 @@ mod tests {
             .expect("the raw remark can be published");
         store
             .connection
-            .execute_batch(&format!(
+            .execute(
                 "UPDATE captures SET
-                     remarks_captured = 1, remark_file_count = 1, remark_record_count = 3,
+                     remark_file_count = 1, remark_record_count = 3,
                      remark_linked_record_count = 2
-                 WHERE id = 'cap_11111111111111111111111111111111';
-                 INSERT INTO remark_files(id, capture_id, name, blob, record_count) VALUES (
-                     'remfile_1', 'cap_11111111111111111111111111111111',
-                     'crate.opt.opt.yaml', '{raw_blob}', 3
-                 );
-                 INSERT INTO remarks(
-                     id, file_id, ordinal, kind, unknown_kind, pass_name, remark_name,
-                     function_symbol, arguments_json, message
-                 ) VALUES
-                     ('rem_1', 'remfile_1', 0, 'passed', NULL, 'inline', 'Inlined',
-                      '_Rremark_kernel', '[]', 'inlined'),
-                     ('rem_2', 'remfile_1', 1, 'missed', NULL, 'loop-vectorize', 'NotVectorized',
-                      '_Rremark_kernel', '[]', 'not vectorized'),
-                     ('rem_3', 'remfile_1', 2, 'analysis', NULL, 'inline', 'Unlinked',
-                      '_Runlinked', '[]', 'unlinked');
-                 INSERT INTO remark_instances(remark_id, instance_id) VALUES
-                     ('rem_1', 'ins_00000000000000000000000000000001'),
-                     ('rem_2', 'ins_00000000000000000000000000000001');"
-            ))
-            .expect("the test can insert optimization remarks");
+                 WHERE id = 'cap_11111111111111111111111111111111'",
+                [],
+            )
+            .expect("the test can record remark summary counts");
+        let records = vec![
+            test_remark(
+                cargo_ir::RemarkKind::Passed,
+                "inline",
+                "_Rremark_kernel",
+                "inlined",
+            ),
+            test_remark(
+                cargo_ir::RemarkKind::Missed,
+                "loop-vectorize",
+                "_Rremark_kernel",
+                "not vectorized",
+            ),
+            test_remark(
+                cargo_ir::RemarkKind::Analysis,
+                "inline",
+                "_Runlinked",
+                "unlinked",
+            ),
+        ];
+        let second_instance = "ins_00000000000000000000000000000002"
+            .parse::<InstanceId>()
+            .expect("the second test instance ID is valid");
+        let instance_index = HashMap::from([(
+            "_Rremark_kernel".to_owned(),
+            vec![instance_id.clone(), second_instance.clone()],
+        )]);
+        let transaction = store
+            .connection
+            .transaction()
+            .expect("the test can start a remark transaction");
+        insert_remarks(
+            &transaction,
+            &lookup_capture_id(),
+            &[PublishedRemarkFile {
+                name: "crate.opt.opt.yaml".to_owned(),
+                blob: raw_blob,
+                records,
+            }],
+            &instance_index,
+        )
+        .expect("the test can insert optimization remarks");
+        transaction
+            .commit()
+            .expect("the test can commit optimization remarks");
 
         let remarks = store
             .show_remarks(&instance_id, &RemarkOptions::default())
@@ -2790,6 +2842,10 @@ mod tests {
         assert_eq!(remarks.summary.unlinked_records, 1);
         assert_eq!(remarks.remarks.len(), 2);
         assert!(!remarks.truncated);
+        let second_remarks = store
+            .show_remarks(&second_instance, &RemarkOptions::default())
+            .expect("the second exact-symbol instance has the same linked records");
+        assert_eq!(second_remarks.remarks.len(), 2);
 
         let filtered = store
             .show_remarks(
@@ -2814,6 +2870,26 @@ mod tests {
             )
             .expect("remark limits can be applied");
         assert!(limited.truncated);
+
+        store
+            .connection
+            .execute(
+                "UPDATE remarks SET arguments_json = 'not json' WHERE message = 'inlined'",
+                [],
+            )
+            .expect("the test can corrupt typed remark arguments");
+        assert!(
+            store
+                .show_remarks(&instance_id, &RemarkOptions::default())
+                .is_err()
+        );
+        store
+            .connection
+            .execute(
+                "UPDATE remarks SET arguments_json = '[]' WHERE message = 'inlined'",
+                [],
+            )
+            .expect("the test can restore typed remark arguments");
 
         assert!(
             store
@@ -2862,6 +2938,24 @@ mod tests {
             result.instances[0].symbol_fingerprint,
             &blake3::hash(b"_Rexact").to_hex()[..12]
         );
+    }
+
+    fn test_remark(
+        kind: cargo_ir::RemarkKind,
+        pass_name: &str,
+        function: &str,
+        message: &str,
+    ) -> cargo_ir::OptimizationRemark {
+        cargo_ir::OptimizationRemark {
+            kind,
+            pass_name: pass_name.to_owned(),
+            remark_name: "TestRemark".to_owned(),
+            function: function.to_owned(),
+            source_location: None,
+            hotness: None,
+            arguments: Vec::new(),
+            message: message.to_owned(),
+        }
     }
 
     #[test]

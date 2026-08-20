@@ -591,6 +591,68 @@ fn captures_finds_and_shows_concrete_generic_instances() {
 }
 
 #[test]
+fn captures_and_reports_optimization_remark_state() {
+    let fixture = Fixture::new();
+    let shown = fixture.run([
+        "show",
+        "optic_mvp_kernel::ReexportedKernel::identity",
+        "-p",
+        "optic-mvp-app",
+        "--bin",
+        "optic-mvp-app",
+        "--release",
+        "--fresh",
+        "--output",
+        "remarks",
+        "--limit",
+        "1",
+        "--format",
+        "json",
+    ]);
+    assert_success(&shown);
+    let shown = json(&shown);
+    let capture_id = string(&shown, "/result/capture_id");
+    assert_ne!(shown["result"]["summary"]["state"], "not-captured");
+
+    let instance_id = stored_instance_ids(&fixture, capture_id)
+        .into_iter()
+        .next()
+        .expect("the remark capture contains an instance");
+    let catalog = Connection::open(fixture.root.join(".optic/store/catalog.sqlite"))
+        .expect("the test can open the evidence catalog");
+    let captures_before = catalog
+        .query_row("SELECT COUNT(*) FROM captures", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("the test can count captures");
+    let stored = fixture.run([
+        "show",
+        "--instance",
+        &instance_id,
+        "--output",
+        "remarks",
+        "--limit",
+        "1",
+        "--format",
+        "json",
+    ]);
+    assert_success(&stored);
+    let stored = json(&stored);
+    assert_ne!(stored["result"]["summary"]["state"], "not-captured");
+    assert!(stored["result"]["remarks"].is_array());
+    let captures_after = catalog
+        .query_row("SELECT COUNT(*) FROM captures", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("the test can recount captures");
+    assert_eq!(captures_after, captures_before);
+
+    let inspected = fixture.run(["inspect", "--capture", capture_id, "--format", "json"]);
+    assert_success(&inspected);
+    assert!(json(&inspected)["result"]["remark_files"].is_array());
+}
+
+#[test]
 fn resumes_retained_ingestion_before_cargo_even_with_fresh() {
     let fixture = Fixture::new();
     let catalog = fixture.install_failing_capture_trigger();

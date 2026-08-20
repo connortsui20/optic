@@ -600,7 +600,7 @@ fn remove_pending(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Error, FindOptions};
+    use crate::{Error, FindOptions, RemarkOptions};
 
     #[test]
     fn find_options_reject_nul_and_out_of_range_limits() {
@@ -617,6 +617,29 @@ mod tests {
         options.limit = FindOptions::MAX_LIMIT + 1;
         assert!(matches!(
             super::validate_find_options(&options),
+            Err(Error::InvalidRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn remark_options_reject_empty_passes_and_out_of_range_limits() {
+        let mut options = RemarkOptions {
+            pass: Some(String::new()),
+            ..RemarkOptions::default()
+        };
+        assert!(matches!(
+            super::validate_remark_options(&options),
+            Err(Error::InvalidRequest { .. })
+        ));
+        options.pass = None;
+        options.limit = 0;
+        assert!(matches!(
+            super::validate_remark_options(&options),
+            Err(Error::InvalidRequest { .. })
+        ));
+        options.limit = RemarkOptions::MAX_LIMIT + 1;
+        assert!(matches!(
+            super::validate_remark_options(&options),
             Err(Error::InvalidRequest { .. })
         ));
     }

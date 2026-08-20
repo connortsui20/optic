@@ -1224,6 +1224,8 @@ Args:
                 .expect("the selected optimization remarks are valid");
 
         assert_eq!(remarks.len(), 2);
+        assert_eq!(remarks[0].name, "crate-b.opt.opt.yaml");
+        assert_eq!(remarks[1].name, "nested/crate-a.opt.opt.yaml");
         assert_eq!(
             remarks[0].raw_path.file_name(),
             Some(OsStr::new("crate-b.opt.opt.yaml"))
@@ -1257,6 +1259,14 @@ Args:
             },
         )
         .expect_err("the files exceed the aggregate byte limit");
+        let record_error = collect_remarks_with_limits(
+            temporary.path(),
+            RemarkCollectionLimits {
+                max_records: 1,
+                ..RemarkCollectionLimits::default()
+            },
+        )
+        .expect_err("the files exceed the aggregate record limit");
 
         assert!(
             file_error
@@ -1267,6 +1277,11 @@ Args:
             byte_error
                 .to_string()
                 .contains("aggregate file length exceeds")
+        );
+        assert!(
+            record_error
+                .to_string()
+                .contains("aggregate record count exceeds 1, got 2")
         );
     }
 

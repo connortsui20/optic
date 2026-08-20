@@ -1044,7 +1044,6 @@ fn select_and_show(
             })?;
         let text = selection_text(
             result,
-            failure,
             &display_capture,
             &display_instances,
             output,
@@ -1679,7 +1678,6 @@ fn duplicate_display_name(result: &FindResult, instance: &InstanceSummary) -> bo
 
 fn selection_text(
     result: &FindResult,
-    failure: SelectionFailure,
     display_capture: &DisplayIdentifier,
     display_instances: &[DisplayIdentifier],
     selected_output: ShowOutput,
@@ -1687,6 +1685,11 @@ fn selection_text(
     include_source: bool,
     terminal: &Terminal,
 ) -> String {
+    let failure = if result.instances.is_empty() {
+        SelectionFailure::NotFound
+    } else {
+        SelectionFailure::Ambiguous
+    };
     let mut output = match failure {
         SelectionFailure::NotFound => format!(
             "{} {}.\n",
@@ -1947,9 +1950,12 @@ fn normalized_arguments() -> Vec<OsString> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DisplayIdentifier, find_text};
+    use clap::Parser as _;
+
+    use super::{Cli, Command, DisplayIdentifier, ShowOutput, find_text};
     use crate::{
-        CaptureId, FindMatchKind, FindResult, InstanceId, InstanceSummary, SourceLocation,
+        CaptureId, FindMatchKind, FindResult, InstanceId, InstanceSummary, RemarkKindFilter,
+        SourceLocation,
     };
 
     #[test]
@@ -1967,6 +1973,56 @@ mod tests {
 
         assert_eq!(identifier.text, "ins_0123456789abc");
         assert_eq!(identifier.unique_prefix_length, 17);
+    }
+
+    #[test]
+    fn parses_remark_options_without_widening_compare() {
+        let capture = Cli::try_parse_from(["cargo optic", "capture", "--remarks"])
+            .expect("capture accepts the remark policy");
+        assert!(matches!(
+            capture.command,
+            Command::Capture { build, .. } if build.remarks
+        ));
+
+        let show = Cli::try_parse_from([
+            "cargo optic",
+            "show",
+            "--instance",
+            "ins_0",
+            "--output",
+            "remarks",
+            "--kind",
+            "missed",
+            "--pass",
+            "loop-vectorize",
+            "--limit",
+            "17",
+        ])
+        .expect("show accepts remark filters");
+        assert!(matches!(
+            show.command,
+            Command::Show {
+                output: ShowOutput::Remarks,
+                kind: Some(RemarkKindFilter::Missed),
+                pass_name: Some(ref pass),
+                limit: Some(17),
+                ..
+            } if pass == "loop-vectorize"
+        ));
+
+        assert!(
+            Cli::try_parse_from([
+                "cargo optic",
+                "compare",
+                "--before",
+                "ins_0",
+                "--after",
+                "ins_1",
+                "--output",
+                "remarks",
+            ])
+            .is_err()
+        );
     }
 
     #[test]
