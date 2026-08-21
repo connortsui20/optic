@@ -691,7 +691,7 @@ fn execute(application: &mut Application, cli: Cli) -> Result<Execution, Failure
             write_progress("Resolving compiler evidence...");
             let spec = build.to_spec(manifest_path);
             let summary = application
-                .capture(&spec, build.cache_policy())
+                .capture_with_events(&spec, build.cache_policy(), write_cargo_event)
                 .map_err(|error| Failure {
                     format,
                     message: error.to_string(),
@@ -996,7 +996,7 @@ fn execute_show(application: &mut Application, request: ShowRequest) -> Result<E
             spec.capture_remarks = true;
         }
         application
-            .capture(&spec, build.cache_policy())
+            .capture_with_events(&spec, build.cache_policy(), write_cargo_event)
             .map_err(|error| Failure {
                 format,
                 message: error.to_string(),
@@ -1295,6 +1295,10 @@ fn parse_remark_limit(value: &str) -> std::result::Result<usize, String> {
 
 fn write_progress(message: &str) {
     let _ = write_stderr(&format!("{message}\n"));
+}
+
+fn write_cargo_event(event: crate::CargoProcessEvent) {
+    let _ = io::stderr().lock().write_all(event.bytes());
 }
 
 fn write_stdout(output: &str) -> io::Result<()> {

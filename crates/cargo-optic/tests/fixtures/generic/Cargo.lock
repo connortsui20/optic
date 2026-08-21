@@ -7,8 +7,13 @@ name = "optic-mvp-app"
 version = "0.0.0"
 dependencies = [
  "optic-mvp-kernel",
+ "optic-mvp-optional-kernel",
 ]
 
 [[package]]
 name = "optic-mvp-kernel"
+version = "0.0.0"
+
+[[package]]
+name = "optic-mvp-optional-kernel"
 version = "0.0.0"

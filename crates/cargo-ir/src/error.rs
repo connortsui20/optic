@@ -38,6 +38,16 @@ pub enum Error {
         diagnostics: String,
     },
 
+    /// Cargo output could not be read within the supervision contract.
+    #[error("failed to supervise {program}: {message}")]
+    CargoOutput {
+        /// The supervised program.
+        program: String,
+
+        /// The failed output requirement.
+        message: String,
+    },
+
     /// A required value was absent from compiler version output.
     #[error("rustc -vV did not report {field}")]
     MissingToolchainField {

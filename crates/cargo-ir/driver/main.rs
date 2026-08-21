@@ -168,7 +168,14 @@ fn main() -> ExitCode {
 }
 
 fn run_driver() -> ExitCode {
-    let arguments = env::args().skip(1).collect::<Vec<_>>();
+    let arguments = match utf8_compiler_arguments() {
+        Ok(arguments) => arguments,
+        Err(error) => {
+            eprintln!("{error}");
+
+            return ExitCode::FAILURE;
+        }
+    };
     if arguments.is_empty() {
         eprintln!("optic rustc driver requires the rustc path as its first argument");
 
@@ -217,6 +224,18 @@ fn run_driver() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn utf8_compiler_arguments() -> Result<Vec<String>, String> {
+    env::args_os()
+        .skip(1)
+        .map(|argument| {
+            argument.into_string().map_err(|_| {
+                "optic rustc driver requires UTF-8 compiler arguments, got a non-UTF-8 argument"
+                    .to_owned()
+            })
+        })
+        .collect()
 }
 
 fn run_wrapper() -> ExitCode {

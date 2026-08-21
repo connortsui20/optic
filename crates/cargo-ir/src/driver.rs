@@ -40,7 +40,7 @@ impl RustcDriver {
         }
 
         require_rustc_dev(toolchain)?;
-        let executable = cached_driver(toolchain)?;
+        let executable = cached_driver(toolchain, cargo)?;
 
         Ok(Self {
             executable,
@@ -57,6 +57,7 @@ impl RustcDriver {
         rustc_commit: &str,
     ) {
         command
+            .env_remove("RUSTC_BOOTSTRAP")
             .env("RUSTC_WRAPPER", &self.executable)
             .env(WRAPPER_ACTIVE_ENV, "1")
             .env(SELECTED_TEMPS_ENV, analysis_directory)
@@ -141,7 +142,7 @@ fn require_rustc_dev(toolchain: &Toolchain) -> Result<()> {
     Ok(())
 }
 
-fn cached_driver(toolchain: &Toolchain) -> Result<PathBuf> {
+fn cached_driver(toolchain: &Toolchain, cargo: &CargoContext) -> Result<PathBuf> {
     let directory = driver_cache_directory(&cargo_home()?, toolchain);
     create_private_directory(&directory)?;
     let lock_path = directory.join("build.lock");
@@ -164,7 +165,7 @@ fn cached_driver(toolchain: &Toolchain) -> Result<PathBuf> {
         })?;
     }
 
-    build_driver(toolchain, &directory, &executable)?;
+    build_driver(toolchain, cargo, &directory, &executable)?;
     if !driver_is_compatible(&executable) {
         return Err(Error::CompilerEnvironment {
             message: format!(
@@ -190,7 +191,12 @@ fn driver_cache_directory(cargo_home: &Path, toolchain: &Toolchain) -> PathBuf {
         .join(PROTOCOL_VERSION)
 }
 
-fn build_driver(toolchain: &Toolchain, directory: &Path, executable: &Path) -> Result<()> {
+fn build_driver(
+    toolchain: &Toolchain,
+    cargo: &CargoContext,
+    directory: &Path,
+    executable: &Path,
+) -> Result<()> {
     let source = directory.join("driver.rs");
     fs::write(&source, DRIVER_SOURCE).map_err(|source_error| Error::Filesystem {
         operation: "write",
@@ -210,6 +216,7 @@ fn build_driver(toolchain: &Toolchain, directory: &Path, executable: &Path) -> R
     }
     let program = toolchain.rustc.to_string_lossy().into_owned();
     let output = Command::new(&toolchain.rustc)
+        .current_dir(cargo.workspace_root())
         .arg(&source)
         .args(["--crate-name", "optic_rustc_driver", "--edition=2024"])
         .args(["-D", "warnings"])

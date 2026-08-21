@@ -23,6 +23,7 @@ const CONFIG_FIELDS: [&str; 3] = [
 /// Cargo and compiler commands selected for one workspace.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CargoContext {
+    workspace_root: PathBuf,
     cargo: OsString,
     rustc: PathBuf,
     global_wrapper: Option<OsString>,
@@ -51,6 +52,7 @@ impl CargoContext {
         );
 
         Ok(Self {
+            workspace_root: workspace_root.to_owned(),
             cargo,
             rustc: PathBuf::from(rustc),
             global_wrapper,
@@ -72,6 +74,10 @@ impl CargoContext {
 
     pub(crate) fn workspace_wrapper(&self) -> Option<&OsStr> {
         self.workspace_wrapper.as_deref()
+    }
+
+    pub(crate) fn workspace_root(&self) -> &Path {
+        &self.workspace_root
     }
 }
 
@@ -225,16 +231,17 @@ pub fn inspect_toolchain() -> Result<Toolchain> {
 pub fn inspect_workspace_toolchain(workspace_root: &Path) -> Result<Toolchain> {
     let cargo = CargoContext::discover(workspace_root)?;
 
-    inspect_rustc(cargo.rustc())
+    inspect_rustc(&cargo)
 }
 
-pub(crate) fn inspect_rustc(rustc: &Path) -> Result<Toolchain> {
-    let verbose = run_rustc(rustc, ["-vV"])?;
+pub(crate) fn inspect_rustc(cargo: &CargoContext) -> Result<Toolchain> {
+    let rustc = cargo.rustc();
+    let verbose = run_rustc(cargo, ["-vV"])?;
     let release = field(&verbose, "release")?.to_owned();
     let commit_hash = field(&verbose, "commit-hash")?.to_owned();
     let host = field(&verbose, "host")?.to_owned();
     let llvm_version = field(&verbose, "LLVM version")?.to_owned();
-    let reported_sysroot = PathBuf::from(run_rustc(rustc, ["--print", "sysroot"])?.trim());
+    let reported_sysroot = PathBuf::from(run_rustc(cargo, ["--print", "sysroot"])?.trim());
     let sysroot = fs::canonicalize(&reported_sysroot).map_err(|source| Error::Filesystem {
         operation: "canonicalize compiler sysroot",
         path: reported_sysroot,
@@ -362,9 +369,11 @@ fn has_path_separator(path: &Path) -> bool {
             .contains(std::path::MAIN_SEPARATOR)
 }
 
-fn run_rustc<const N: usize>(rustc: &Path, arguments: [&str; N]) -> Result<String> {
+fn run_rustc<const N: usize>(cargo: &CargoContext, arguments: [&str; N]) -> Result<String> {
+    let rustc = cargo.rustc();
     let program = rustc.to_string_lossy().into_owned();
     let output = Command::new(rustc)
+        .current_dir(cargo.workspace_root())
         .args(arguments)
         .output()
         .map_err(|source| Error::StartProcess {

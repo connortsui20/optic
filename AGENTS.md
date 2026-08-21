@@ -56,6 +56,9 @@ selected-target compilation. It does not require a user-supplied `RUSTC_BOOTSTRA
 
 Cargo Optic does not enable unstable access for dependencies, build scripts, or compiler probes.
 
+Cargo progress and compiler diagnostics stream to standard error. The final text or JSON result
+uses standard output. One Cargo JSON message and the retained failure tail each have a 1 MiB limit.
+
 The selected target uses saved-temporary arguments and has a separate Cargo fingerprint. Cargo
 checks this fingerprint before Optic reuses evidence.
 
@@ -71,6 +74,7 @@ rustc driver records compiler identities for the selected target.
 - `crates/cargo-optic/src/source.rs` snapshots build inputs and finds source items.
 - `crates/cargo-optic/src/pending.rs` validates recoverable post-compilation evidence.
 - `crates/cargo-ir/src/capture.rs` runs Cargo and collects LLVM evidence.
+- `crates/cargo-ir/src/cargo_output.rs` streams bounded Cargo output and tracks artifact freshness.
 - `crates/cargo-ir/src/llvm.rs` indexes LLVM function bodies by byte range.
 - `crates/cargo-ir/src/remarks.rs` parses bounded LLVM optimization remarks.
 - `crates/cargo-optic/tests/e2e.rs` covers the complete supported workflow.
@@ -104,6 +108,7 @@ workspace rustc.
 - The prototype supports optimized LLVM IR, pre-optimization LLVM IR, and optimization remarks.
 - It does not support MIR, assembly, object files, or a TUI.
 - Source lookup requires an exact rustc definition span and canonical local source path.
+- The rustc identity driver returns an error for non-UTF-8 compiler arguments.
 - Cargo cannot find undeclared build-script inputs.
 - Inline occurrences do not link to enclosing optimized bodies.
 - The current acceptance test covers Apple silicon macOS.

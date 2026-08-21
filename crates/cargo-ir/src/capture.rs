@@ -1,8 +1,9 @@
 //! Runs one Cargo analysis and collects supported LLVM modules.
 //!
-//! [`compile`] uses `cargo rustc` so normal and analysis builds share dependency artifacts. The
-//! selected target has a separate Cargo identity because saving compiler temporaries is part of
-//! Cargo's fingerprint. [`ingest`] reads the retained artifacts without invoking Cargo again.
+//! [`compile_with_events`] uses `cargo rustc` so normal and analysis builds share dependency
+//! artifacts. [`compile`] discards its user-visible Cargo events. The selected target has a
+//! separate Cargo identity because saved compiler temporaries are part of Cargo's fingerprint.
+//! [`ingest`] reads the retained artifacts without invoking Cargo again.
 
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -13,6 +14,7 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
+use crate::cargo_output::{self, CargoProcessEvent};
 use crate::driver::RustcDriver;
 use crate::llvm;
 use crate::mono;
@@ -275,22 +277,6 @@ pub struct CaptureInvocation {
     pub unstable_access: UnstableAccess,
 }
 
-/// One compiler-artifact event emitted by Cargo.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct CargoArtifact {
-    /// Cargo's opaque package identifier.
-    pub package_id: String,
-
-    /// The target name reported by Cargo.
-    pub target_name: String,
-
-    /// The target kinds reported by Cargo.
-    pub target_kinds: Vec<String>,
-
-    /// Whether Cargo reported this artifact as fresh.
-    pub fresh: bool,
-}
-
 /// The result of asking Cargo for evidence.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", tag = "kind")]
@@ -306,8 +292,8 @@ pub enum CompileOutcome {
         /// Request and Cargo invocation metadata. `rustc` is absent.
         invocation: Box<CaptureInvocation>,
 
-        /// The fresh compiler-artifact events reported by Cargo.
-        artifacts: Vec<CargoArtifact>,
+        /// The number of fresh compiler-artifact events that Cargo reported.
+        artifact_count: usize,
     },
 }
 
@@ -340,15 +326,27 @@ pub struct EvidenceBundle {
     pub remarks: Option<Vec<RemarkEvidence>>,
 }
 
-/// Runs one analysis for the selected Cargo target.
+/// Runs one analysis for the selected Cargo target and discards its Cargo output events.
+///
+/// # Errors
+///
+/// Returns an error from [`compile_with_events`].
+pub fn compile(request: &BuildRequest) -> Result<CompileOutcome> {
+    compile_with_events(request, |_| {})
+}
+
+/// Runs one analysis and reports user-visible Cargo output as it arrives.
 ///
 /// # Errors
 ///
 /// Returns an error if the toolchain is unsupported, the analysis directory is not empty, Cargo
-/// fails, or emitted LLVM evidence cannot be read.
-pub fn compile(request: &BuildRequest) -> Result<CompileOutcome> {
+/// fails, Cargo exceeds an output bound, or emitted LLVM evidence cannot be read.
+pub fn compile_with_events(
+    request: &BuildRequest,
+    mut on_event: impl FnMut(CargoProcessEvent),
+) -> Result<CompileOutcome> {
     let cargo = CargoContext::discover(&request.workspace_root)?;
-    let toolchain = inspect_rustc(cargo.rustc())?;
+    let toolchain = inspect_rustc(&cargo)?;
     prepare_analysis_directory(&request.analysis_directory)?;
     if request.capture_remarks {
         prepare_remarks_directory(&request.analysis_directory)?;
@@ -379,24 +377,20 @@ pub fn compile(request: &BuildRequest) -> Result<CompileOutcome> {
             ],
         },
     };
-    let output = command.output().map_err(|source| Error::StartProcess {
-        program: "cargo rustc".to_owned(),
-        source,
-    })?;
-    if !output.status.success() {
+    let output = cargo_output::run(&mut command, "cargo rustc", &mut on_event)?;
+    if !output.status().success() {
         return Err(Error::ProcessFailed {
             program: "cargo rustc".to_owned(),
-            status: output.status.to_string(),
-            diagnostics: cargo_diagnostics(&output.stdout, &output.stderr),
+            status: output.status().to_string(),
+            diagnostics: output.diagnostics(),
         });
     }
 
-    let cargo_artifacts = cargo_artifacts(&output.stdout);
     if !manifest_path.is_file() {
-        if !cargo_artifacts.is_empty() && cargo_artifacts.iter().all(|artifact| artifact.fresh) {
+        if let Some(artifact_count) = output.fresh_artifact_count() {
             return Ok(CompileOutcome::Fresh {
                 invocation: Box::new(invocation),
-                artifacts: cargo_artifacts,
+                artifact_count,
             });
         }
 
@@ -426,7 +420,7 @@ pub fn check_fresh(request: &BuildRequest, expected_toolchain: &Toolchain) -> Re
     const FRESHNESS_STALE_DIAGNOSTIC: &str = "cargo-optic selected target is not fresh";
 
     let cargo = CargoContext::discover(&request.workspace_root)?;
-    let toolchain = inspect_rustc(cargo.rustc())?;
+    let toolchain = inspect_rustc(&cargo)?;
     if &toolchain != expected_toolchain {
         return Ok(false);
     }
@@ -440,26 +434,21 @@ pub fn check_fresh(request: &BuildRequest, expected_toolchain: &Toolchain) -> Re
         &toolchain.commit_hash,
     );
     command.env(FRESHNESS_CHECK_ENV, "1");
-    let output = command.output().map_err(|source| Error::StartProcess {
-        program: "cargo rustc freshness check".to_owned(),
-        source,
-    })?;
-    if !output.status.success() {
-        let diagnostics = cargo_diagnostics(&output.stdout, &output.stderr);
+    let output = cargo_output::run(&mut command, "cargo rustc freshness check", &mut |_| {})?;
+    if !output.status().success() {
+        let diagnostics = output.diagnostics();
         if diagnostics.contains(FRESHNESS_STALE_DIAGNOSTIC) {
             return Ok(false);
         }
 
         return Err(Error::ProcessFailed {
             program: "cargo rustc freshness check".to_owned(),
-            status: output.status.to_string(),
+            status: output.status().to_string(),
             diagnostics,
         });
     }
 
-    let artifacts = cargo_artifacts(&output.stdout);
-
-    Ok(!artifacts.is_empty() && artifacts.iter().all(|artifact| artifact.fresh))
+    Ok(output.fresh_artifact_count().is_some())
 }
 
 /// Confirms that a successful compiler run left the identity manifest and supported bitcode.
@@ -662,37 +651,11 @@ fn is_compiler_environment(name: &str) -> bool {
             | "CARGO_ENCODED_RUSTFLAGS"
             | "CARGO_TARGET_DIR"
             | "RUSTC"
-            | "RUSTC_BOOTSTRAP"
             | "RUSTC_WRAPPER"
             | "RUSTC_WORKSPACE_WRAPPER"
             | "RUSTFLAGS"
     ) || name.starts_with("CARGO_PROFILE_")
         || name.starts_with("CARGO_TARGET_")
-}
-
-fn cargo_artifacts(stdout: &[u8]) -> Vec<CargoArtifact> {
-    stdout
-        .split(|byte| *byte == b'\n')
-        .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
-        .filter(|message| message["reason"] == "compiler-artifact")
-        .filter_map(|message| {
-            let package_id = message["package_id"].as_str()?.to_owned();
-            let target_name = message["target"]["name"].as_str()?.to_owned();
-            let target_kinds = message["target"]["kind"]
-                .as_array()?
-                .iter()
-                .map(|kind| kind.as_str().map(str::to_owned))
-                .collect::<Option<Vec<_>>>()?;
-            let fresh = message["fresh"].as_bool()?;
-
-            Some(CargoArtifact {
-                package_id,
-                target_name,
-                target_kinds,
-                fresh,
-            })
-        })
-        .collect()
 }
 
 fn prepare_analysis_directory(path: &Path) -> Result<()> {
@@ -732,33 +695,6 @@ fn prepare_remarks_directory(analysis_directory: &Path) -> Result<()> {
 
 fn remarks_directory(analysis_directory: &Path) -> PathBuf {
     analysis_directory.join(REMARKS_DIRECTORY_NAME)
-}
-
-fn cargo_diagnostics(stdout: &[u8], stderr: &[u8]) -> String {
-    let mut diagnostics = String::new();
-
-    for message in stdout
-        .split(|byte| *byte == b'\n')
-        .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
-    {
-        let Some(rendered) = message["message"]["rendered"].as_str() else {
-            continue;
-        };
-
-        diagnostics.push_str(rendered);
-
-        if !rendered.ends_with('\n') {
-            diagnostics.push('\n');
-        }
-    }
-
-    diagnostics.push_str(&String::from_utf8_lossy(stderr));
-
-    if diagnostics.is_empty() {
-        diagnostics.push_str(&String::from_utf8_lossy(stdout));
-    }
-
-    diagnostics
 }
 
 struct BitcodeArtifact {
@@ -1059,9 +995,9 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        RemarkCollectionLimits, artifact_provenance, cargo_artifacts, cargo_diagnostics,
-        collect_remarks_with_limits, injected_rustc_arguments, prepare_analysis_directory,
-        prepare_remarks_directory, requested_remarks,
+        RemarkCollectionLimits, artifact_provenance, collect_remarks_with_limits,
+        injected_rustc_arguments, prepare_analysis_directory, prepare_remarks_directory,
+        requested_remarks,
     };
     use crate::{
         BuildRequest, CaptureProfile, Error, LlvmStage, LtoScope, UnstableAccess,
@@ -1095,18 +1031,6 @@ Args:
                 "mechanism": "rustc-bootstrap",
                 "authorized_scopes": ["selected-target"],
             })
-        );
-    }
-
-    #[test]
-    fn renders_cargo_json_diagnostics_and_standard_error() {
-        let stdout = br#"{"reason":"compiler-message","message":{"rendered":"error: bad input\n"}}
-{"reason":"build-finished","success":false}
-"#;
-
-        assert_eq!(
-            cargo_diagnostics(stdout, b"error: could not compile\n"),
-            "error: bad input\nerror: could not compile\n"
         );
     }
 
@@ -1345,19 +1269,6 @@ Args:
 
         let optimized = artifact_provenance("example.cgu.0.rcgu.bc");
         assert_eq!(optimized.stage, Some(LlvmStage::Optimized));
-    }
-
-    #[test]
-    fn reads_freshness_from_cargo_artifacts() {
-        let stdout = br#"{"reason":"compiler-artifact","package_id":"path+file:///tmp/example#0.1.0","target":{"kind":["lib"],"name":"example"},"fresh":true}
-{"reason":"build-finished","success":true}
-"#;
-
-        let artifacts = cargo_artifacts(stdout);
-
-        assert_eq!(artifacts.len(), 1);
-        assert_eq!(artifacts[0].target_name, "example");
-        assert!(artifacts[0].fresh);
     }
 
     fn request(capture_profile: CaptureProfile) -> BuildRequest {

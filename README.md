@@ -81,6 +81,9 @@ source is absent unless you add `--source`.
 
 The default format is plain text. Add `--format json` to get a versioned JSON envelope.
 
+Cargo Optic writes Cargo progress and compiler diagnostics to standard error as they arrive. The
+final text or JSON result remains on standard output.
+
 Cargo Optic highlights interface text, Rust source, and LLVM IR when standard output is a terminal.
 Use `--color always` to keep color in redirected output. Use `--color never` to disable color.
 
@@ -171,8 +174,11 @@ cargo optic compare \
 
 The comparison reports body bytes, instruction-like lines, vector lines, call categories, and
 safety-check symbols. Call categories separate runtime calls, indirect calls, memory intrinsics,
-and compiler metadata intrinsics. The result also reports incompatible compiler or Cargo
-dimensions. These counts are structural LLVM summaries, not performance measurements.
+and compiler metadata intrinsics.
+
+The compatibility result checks the compiler commit, host, environment, wrapper chain, and
+effective rustc arguments. It ignores Optic arguments that only collect evidence. The structural
+counts are not performance measurements.
 
 ## Manage stored evidence
 
@@ -216,7 +222,7 @@ or instance ID. An instance ID identifies its capture. Content-addressed blobs h
 The current store schema is version 7. Cargo Optic rejects older stores. Run `cargo optic clean`
 once to replace an older prototype store.
 
-This prototype also uses JSON transport version 3, evidence request version 4, pending marker
+This prototype also uses JSON transport version 3, evidence request version 5, pending marker
 version 1, and compiler manifest protocol version 2. These formats have no compatibility promise.
 
 Cargo Optic asks Cargo to evaluate the selected target before it reuses a capture. This design
@@ -238,11 +244,18 @@ Cargo can reuse dependency artifacts from normal commands.
 Cargo Optic installs an outer global compiler wrapper. This wrapper preserves existing global and
 workspace wrappers. It passes dependency compilations and compiler probes through without changes.
 
+Cargo Optic clears an ambient `RUSTC_BOOTSTRAP` value from Cargo metadata and compilation. It
+restores `RUSTC_BOOTSTRAP=1` only for the selected target.
+
 The evidence arguments and the compiler identity driver apply only to the selected target. Cargo
 Optic records identities before code generation and continues the same compilation.
 
 Cargo Optic uses the Cargo process that invoked the external subcommand. It resolves the effective
-rustc and compiler wrappers from the same workspace configuration.
+rustc and compiler wrappers from the same workspace configuration. Rustc inspection and driver
+compilation also run from that workspace.
+
+Cargo output uses bounded streaming. One Cargo JSON message and the retained failure tail can each
+use at most 1 MiB. Cargo Optic drains the child process before it reports a message-limit error.
 
 The selected rustc requires matching `rustc-dev` and `llvm-tools` components. Cargo Optic reports a
 specific error when one of these components is absent. It does not install components.
@@ -256,7 +269,8 @@ The faithful profile permits the normal link step. Existing normal artifacts rem
 ## MVP limits
 
 - Cargo Optic requires matching `llvm-tools` and `rustc-dev` components for the selected rustc.
-- The prototype records source from workspace packages and local path dependencies.
+- The prototype records source from workspace packages and feature-selected local path
+  dependencies.
 - The prototype records one selected library, binary, benchmark, or example target.
 - The prototype does not record MIR, assembly, or object files.
 - The store retains exact compiler stage names. The user interface shows only supported LLVM
@@ -266,6 +280,8 @@ The faithful profile permits the normal link step. Existing normal artifacts rem
 - Source lookup requires an exact rustc definition span and canonical local source path. It returns
   no source when either identity is unavailable.
 - The prototype does not navigate inline occurrences to their enclosing optimized bodies.
+- The rustc identity driver requires UTF-8 compiler arguments. It returns an error for a non-UTF-8
+  argument.
 - The prototype is verified on Apple silicon macOS.
 
 ### Instance-to-body identity

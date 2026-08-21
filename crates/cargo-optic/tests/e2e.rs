@@ -1,7 +1,9 @@
 //! End-to-end acceptance tests for the Cargo Optic command-line workflow.
 //!
-//! The fixture covers concurrent capture, reuse, invalidation, lookup, and source and LLVM output.
+//! The fixture covers capture, reuse, invalidation, compiler supervision, feature selection,
+//! lookup, and source and LLVM output.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -815,6 +817,158 @@ fn rustc_arguments_require_the_experiment_profile() {
     );
 }
 
+#[test]
+fn captures_source_from_feature_selected_path_dependencies() {
+    let fixture = Fixture::new();
+
+    for feature_arguments in [
+        &["--features", "optional-kernel"][..],
+        &["--all-features"][..],
+    ] {
+        let mut arguments = vec![
+            "show",
+            "optic_mvp_optional_kernel::optional_source",
+            "-p",
+            "optic-mvp-app",
+            "--bin",
+            "optic-mvp-app",
+            "--release",
+            "--source",
+            "--fresh",
+            "--format",
+            "json",
+        ];
+        arguments.extend_from_slice(feature_arguments);
+        let output = fixture
+            .command(arguments)
+            .output()
+            .expect("the feature-selected capture starts");
+
+        assert_success(&output);
+        let result = json(&output);
+        assert!(
+            string(&result, "/result/source/text")
+                .contains("pub fn optional_source<T>(value: T) -> T")
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("streamed fixture warning"));
+    }
+}
+
+#[test]
+fn comparison_reports_effective_rustflags() {
+    let fixture = Fixture::new();
+    let arguments = [
+        "show",
+        "optic_mvp_kernel::ReexportedKernel::identity",
+        "-p",
+        "optic-mvp-app",
+        "--bin",
+        "optic-mvp-app",
+        "--release",
+        "--fresh",
+        "--format",
+        "json",
+    ];
+    let before = fixture.run(arguments);
+    assert_success(&before);
+    let before = json(&before);
+    let before_instance = string(&before, "/result/instance/id");
+    let after = fixture
+        .command(arguments)
+        .env("RUSTFLAGS", "-C target-cpu=native")
+        .output()
+        .expect("the capture with RUSTFLAGS starts");
+    assert_success(&after);
+    let after = json(&after);
+    let after_instance = string(&after, "/result/instance/id");
+    let comparison = fixture.run([
+        "compare",
+        "--before",
+        before_instance,
+        "--after",
+        after_instance,
+        "--format",
+        "json",
+    ]);
+    assert_success(&comparison);
+    let comparison = json(&comparison);
+    let differences = comparison["result"]["compatibility_differences"]
+        .as_array()
+        .expect("the comparison includes compatibility dimensions");
+
+    assert!(
+        differences
+            .iter()
+            .any(|difference| difference == "compiler environment")
+    );
+    assert!(
+        differences
+            .iter()
+            .any(|difference| difference == "rustc arguments")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn resolves_rustc_from_the_manifest_workspace() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new();
+    let caller = fixture
+        .temporary
+        .path()
+        .join("caller-outside-the-workspace");
+    fs::create_dir(&caller).expect("the test can create the caller directory");
+    let rustc = rustc_path();
+    let rustc_proxy = fixture.root.join("workspace-rustc.sh");
+    let log = fixture.root.join("rustc-cwd.log");
+    fs::write(
+        &rustc_proxy,
+        format!(
+            "#!/bin/sh\npwd >> \"$OPTIC_TEST_RUSTC_CWD_LOG\"\nexec \"{}\" \"$@\"\n",
+            rustc.display()
+        ),
+    )
+    .expect("the test can write the rustc proxy");
+    fs::set_permissions(&rustc_proxy, fs::Permissions::from_mode(0o700))
+        .expect("the test can make the rustc proxy executable");
+    let manifest = fixture.root.join("Cargo.toml");
+    let output = fixture
+        .command([
+            "capture",
+            "--manifest-path",
+            manifest.to_str().expect("the fixture path is UTF-8"),
+            "-p",
+            "optic-mvp-app",
+            "--bin",
+            "optic-mvp-app",
+            "--release",
+            "--fresh",
+            "--format",
+            "json",
+        ])
+        .current_dir(&caller)
+        .env("RUSTC", &rustc_proxy)
+        .env("RUSTC_WRAPPER", "")
+        .env("RUSTC_WORKSPACE_WRAPPER", "")
+        .env("OPTIC_TEST_RUSTC_CWD_LOG", &log)
+        .output()
+        .expect("the cross-workspace capture starts");
+
+    assert_success(&output);
+    let expected = fixture
+        .root
+        .canonicalize()
+        .expect("the fixture root exists");
+    let invocations = fs::read_to_string(log).expect("the rustc proxy log is readable");
+    assert!(!invocations.is_empty());
+    assert!(
+        invocations
+            .lines()
+            .all(|directory| Path::new(directory) == expected)
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn preserves_compiler_wrappers_and_reuses_dependency_artifacts() {
@@ -930,30 +1084,35 @@ fn scopes_unstable_access_to_the_selected_target() {
             "--format",
             "json",
         ])
+        .env("RUSTC_BOOTSTRAP", "1")
         .env("RUSTC_WRAPPER", &wrapper)
         .env("OPTIC_TEST_WRAPPER_LOG", &log)
         .output()
         .expect("the Cargo Optic capture starts");
     assert_success(&capture);
     let invocations = fs::read_to_string(&log).expect("the compiler wrapper log is readable");
-    let mut saw_dependency = false;
+    let mut saw_non_selected_invocation = false;
     let mut saw_selected_target = false;
 
     for invocation in invocations.lines() {
-        if invocation.starts_with("optic_mvp_app:") {
+        let (crate_name, bootstrap) = invocation
+            .split_once(':')
+            .expect("the wrapper recorded a crate name and bootstrap state");
+
+        if crate_name == "optic_mvp_app" {
             saw_selected_target = true;
-            assert_eq!(invocation, "optic_mvp_app:1");
+            assert_eq!(bootstrap, "1");
         } else {
-            saw_dependency = true;
-            assert!(
-                invocation.ends_with(":unset"),
-                "dependency received Optic bootstrap: {invocation}"
+            saw_non_selected_invocation = true;
+            assert_ne!(
+                bootstrap, "1",
+                "non-selected invocation received Optic bootstrap: {invocation}"
             );
         }
     }
     assert!(
-        saw_dependency,
-        "the fresh target compiled at least one dependency"
+        saw_non_selected_invocation,
+        "the capture passed through a non-selected compiler invocation"
     );
     assert!(
         saw_selected_target,
@@ -961,8 +1120,57 @@ fn scopes_unstable_access_to_the_selected_target() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn rejects_non_utf8_compiler_arguments_without_panicking() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let fixture = Fixture::new();
+    let capture = fixture.run(capture_fresh_arguments());
+    assert_success(&capture);
+    let capture = json(&capture);
+    let details = fixture.run([
+        "inspect",
+        "--capture",
+        string(&capture, "/result/id"),
+        "--format",
+        "json",
+    ]);
+    assert_success(&details);
+    let details = json(&details);
+    let driver = string(&details, "/result/wrapper_chain/0");
+    let invalid_argument = std::ffi::OsString::from_vec(vec![0xff]);
+    let output = Command::new(driver)
+        .arg("rustc")
+        .arg(invalid_argument)
+        .output()
+        .expect("the rustc identity driver starts");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("requires UTF-8 compiler arguments, got a non-UTF-8 argument")
+    );
+}
+
+#[cfg(unix)]
+fn rustc_path() -> PathBuf {
+    let output = Command::new("rustc")
+        .args(["--print", "sysroot"])
+        .output()
+        .expect("rustc can report its sysroot");
+    assert_success(&output);
+
+    PathBuf::from(
+        String::from_utf8(output.stdout)
+            .expect("the sysroot is UTF-8")
+            .trim(),
+    )
+    .join("bin/rustc")
+}
+
 struct Fixture {
-    _temporary: TempDir,
+    temporary: TempDir,
     root: PathBuf,
 }
 
@@ -973,10 +1181,7 @@ impl Fixture {
         let root = temporary.path().join("generic");
         copy_tree(&source, &root);
 
-        Self {
-            _temporary: temporary,
-            root,
-        }
+        Self { temporary, root }
     }
 
     fn run<const N: usize>(&self, arguments: [&str; N]) -> Output {
@@ -985,7 +1190,11 @@ impl Fixture {
             .expect("the Cargo Optic binary starts")
     }
 
-    fn command<const N: usize>(&self, arguments: [&str; N]) -> Command {
+    fn command<I, S>(&self, arguments: I) -> Command
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-optic"));
         command
             .arg("optic")

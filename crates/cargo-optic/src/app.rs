@@ -24,7 +24,7 @@ use crate::{
     StoreStatus, VerifySummary,
 };
 
-const EVIDENCE_VERSION: u32 = 4;
+const EVIDENCE_VERSION: u32 = 5;
 
 /// Product workflows for one Cargo workspace and its `.optic` store.
 pub struct Application {
@@ -75,15 +75,32 @@ impl Application {
         Ok(CleanSummary { path, removed })
     }
 
-    /// Captures or reuses enriched compiler evidence for one Cargo target.
+    /// Captures or reuses compiler evidence and discards Cargo output events.
     ///
     /// # Errors
     ///
-    /// Returns an error if source capture, compiler execution, or evidence publication fails.
+    /// Returns an error from [`Self::capture_with_events`].
     pub fn capture(
         &mut self,
         spec: &BuildSpec,
         cache_policy: CachePolicy,
+    ) -> Result<CaptureSummary> {
+        self.capture_with_events(spec, cache_policy, |_| {})
+    }
+
+    /// Captures or reuses evidence and reports user-visible Cargo output as it arrives.
+    ///
+    /// The callback runs on the calling thread. It does not report the internal freshness probe for
+    /// retained pending evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if source capture, compiler execution, or evidence publication fails.
+    pub fn capture_with_events(
+        &mut self,
+        spec: &BuildSpec,
+        cache_policy: CachePolicy,
+        mut on_event: impl FnMut(cargo_ir::CargoProcessEvent),
     ) -> Result<CaptureSummary> {
         if spec.capture_profile != crate::CaptureProfile::Experiment
             && !spec.rustc_arguments.is_empty()
@@ -139,7 +156,7 @@ impl Application {
             .map_err(|source| crate::Error::filesystem("create", &staging, source))?;
         let sources = SourceBaseline::capture(&self.workspace_root, spec, &staging)?;
         let request = self.build_request(spec, analysis_directory.clone());
-        let outcome = cargo_ir::compile(&request);
+        let outcome = cargo_ir::compile_with_events(&request, &mut on_event);
         match outcome {
             Ok(cargo_ir::CompileOutcome::Compiled { compilation }) => {
                 sources.validate()?;
@@ -380,6 +397,12 @@ impl Application {
         if before_capture.summary.rustc_release != after_capture.summary.rustc_release {
             compatibility_differences.push("rustc release".to_owned());
         }
+        if before_capture.compiler.commit_hash != after_capture.compiler.commit_hash {
+            compatibility_differences.push("rustc commit".to_owned());
+        }
+        if before_capture.compiler.host != after_capture.compiler.host {
+            compatibility_differences.push("compiler host".to_owned());
+        }
         if before_capture.summary.llvm_version != after_capture.summary.llvm_version {
             compatibility_differences.push("LLVM version".to_owned());
         }
@@ -391,6 +414,21 @@ impl Application {
         }
         if before_capture.request != after_capture.request {
             compatibility_differences.push("Cargo build request".to_owned());
+        }
+        if effective_compiler_environment(&before_capture.environment)
+            != effective_compiler_environment(&after_capture.environment)
+        {
+            compatibility_differences.push("compiler environment".to_owned());
+        }
+        if user_wrapper_chain(&before_capture.wrapper_chain)
+            != user_wrapper_chain(&after_capture.wrapper_chain)
+        {
+            compatibility_differences.push("compiler wrappers".to_owned());
+        }
+        if effective_rustc_arguments(before_capture.rustc.as_ref())
+            != effective_rustc_arguments(after_capture.rustc.as_ref())
+        {
+            compatibility_differences.push("rustc arguments".to_owned());
         }
 
         let before_summary = BodySetSummary::from_bodies(&before_view.bodies);
@@ -487,7 +525,12 @@ fn validate_find_options(options: &FindOptions) -> Result<()> {
 
 fn metadata(directory: &Path, manifest_path: Option<&Path>) -> Result<cargo_metadata::Metadata> {
     let mut command = cargo_metadata::MetadataCommand::new();
-    command.current_dir(directory).no_deps();
+    // NB: MetadataCommand cannot remove inherited variables. An empty value disables unstable
+    // access for rustc probes that Cargo metadata can start.
+    command
+        .current_dir(directory)
+        .no_deps()
+        .env("RUSTC_BOOTSTRAP", "");
     if let Some(path) = manifest_path {
         command.manifest_path(path);
     }
@@ -576,13 +619,64 @@ fn compiler_environment_name(name: &OsStr) -> bool {
             | "CARGO_HOME"
             | "RUSTFLAGS"
             | "RUSTC"
-            | "RUSTC_BOOTSTRAP"
             | "RUSTC_WRAPPER"
             | "RUSTC_WORKSPACE_WRAPPER"
             | "RUSTUP_TOOLCHAIN"
     ) || name.starts_with("CARGO_BUILD_")
         || name.starts_with("CARGO_PROFILE_")
         || name.starts_with("CARGO_TARGET_")
+}
+
+fn effective_compiler_environment(environment: &[crate::EnvironmentView]) -> Vec<(&str, &str)> {
+    // Older queryable captures can contain the ambient value that new captures clear.
+    environment
+        .iter()
+        .filter(|variable| variable.name != "RUSTC_BOOTSTRAP")
+        .map(|variable| (variable.name.as_str(), variable.value.as_str()))
+        .collect()
+}
+
+fn user_wrapper_chain(wrappers: &[String]) -> &[String] {
+    // The Optic driver is always the outer wrapper and does not affect captured code generation.
+    wrappers.get(1..).unwrap_or_default()
+}
+
+/// Removes Optic evidence-only arguments from a recorded rustc command.
+fn effective_rustc_arguments(command: Option<&crate::CommandView>) -> Option<Vec<&str>> {
+    let arguments = &command?.arguments;
+    let mut effective = Vec::with_capacity(arguments.len());
+    let mut index = 0;
+
+    while index < arguments.len() {
+        if index + 1 < arguments.len()
+            && is_evidence_collection_argument_pair(&arguments[index], &arguments[index + 1])
+        {
+            index += 2;
+
+            continue;
+        }
+        if is_joined_evidence_collection_argument(&arguments[index]) {
+            index += 1;
+
+            continue;
+        }
+
+        effective.push(arguments[index].as_str());
+        index += 1;
+    }
+
+    Some(effective)
+}
+
+fn is_evidence_collection_argument_pair(option: &str, value: &str) -> bool {
+    matches!((option, value), ("-C", "save-temps") | ("-C", "remark=all"))
+        || option == "-Z" && (value.starts_with("temps-dir=") || value.starts_with("remark-dir="))
+}
+
+fn is_joined_evidence_collection_argument(argument: &str) -> bool {
+    matches!(argument, "-Csave-temps" | "-Cremark=all")
+        || argument.starts_with("-Ztemps-dir=")
+        || argument.starts_with("-Zremark-dir=")
 }
 
 fn selected_target<'a>(spec: &'a BuildSpec, host: &'a str) -> &'a str {
@@ -600,7 +694,70 @@ fn remove_pending(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Error, FindOptions, RemarkOptions};
+    use std::ffi::OsStr;
+
+    use super::{
+        compiler_environment_name, effective_compiler_environment, effective_rustc_arguments,
+        user_wrapper_chain,
+    };
+    use crate::{CommandView, EnvironmentView, Error, FindOptions, RemarkOptions};
+
+    #[test]
+    fn compatibility_keeps_codegen_arguments_and_ignores_evidence_collection_arguments() {
+        let command = CommandView {
+            program: "rustc".to_owned(),
+            arguments: [
+                "--crate-name",
+                "example",
+                "-C",
+                "save-temps",
+                "-Ztemps-dir=/optic/analysis",
+                "-C",
+                "target-cpu=native",
+                "-Cremark=all",
+                "-Z",
+                "remark-dir=/optic/remarks",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+        };
+
+        assert_eq!(
+            effective_rustc_arguments(Some(&command)),
+            Some(vec!["--crate-name", "example", "-C", "target-cpu=native"])
+        );
+    }
+
+    #[test]
+    fn compatibility_uses_only_the_user_wrapper_chain() {
+        let wrappers = ["optic-driver", "sccache", "workspace-wrapper"].map(str::to_owned);
+
+        assert_eq!(
+            user_wrapper_chain(&wrappers),
+            ["sccache", "workspace-wrapper"]
+        );
+        assert!(user_wrapper_chain(&[]).is_empty());
+    }
+
+    #[test]
+    fn ambient_bootstrap_is_not_an_effective_compiler_setting() {
+        let environment = vec![
+            EnvironmentView {
+                name: "RUSTC_BOOTSTRAP".to_owned(),
+                value: "1".to_owned(),
+            },
+            EnvironmentView {
+                name: "RUSTFLAGS".to_owned(),
+                value: "-C target-cpu=native".to_owned(),
+            },
+        ];
+
+        assert_eq!(
+            effective_compiler_environment(&environment),
+            vec![("RUSTFLAGS", "-C target-cpu=native")]
+        );
+        assert!(!compiler_environment_name(OsStr::new("RUSTC_BOOTSTRAP")));
+    }
 
     #[test]
     fn find_options_reject_nul_and_out_of_range_limits() {

@@ -82,6 +82,22 @@ cargo optic inspect --capture CAPTURE_ID
 The result includes the request, compiler commands, wrappers, environment, and artifact stages. It
 also identifies the workspace Cargo, rustc, sysroot, and internal bootstrap scopes.
 
+## Show a feature-selected dependency
+
+Run this command to capture source from the optional local path dependency:
+
+```console
+cargo optic show optic_mvp_optional_kernel::optional_source \
+  -p optic-mvp-app \
+  --bin optic-mvp-app \
+  --release \
+  --features optional-kernel \
+  --source
+```
+
+Cargo progress and compiler warnings use standard error. The final Optic result uses standard
+output. This separation also applies to `--format json`.
+
 ## Select a different compiler output
 
 The generated command shows optimized LLVM IR by default. Run this command to show LLVM IR before

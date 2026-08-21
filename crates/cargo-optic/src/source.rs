@@ -263,9 +263,24 @@ struct SourcePaths {
 
 fn source_paths(workspace_root: &Path, spec: &BuildSpec) -> Result<SourcePaths> {
     let mut command = cargo_metadata::MetadataCommand::new();
-    command.current_dir(workspace_root);
+    // NB: MetadataCommand cannot remove inherited variables. An empty value disables unstable
+    // access for rustc probes that Cargo metadata can start.
+    command
+        .current_dir(workspace_root)
+        .env("RUSTC_BOOTSTRAP", "");
     if let Some(path) = &spec.manifest_path {
         command.manifest_path(path);
+    }
+    if !spec.features.is_empty() {
+        command.features(cargo_metadata::CargoOpt::SomeFeatures(
+            spec.features.clone(),
+        ));
+    }
+    if spec.all_features {
+        command.features(cargo_metadata::CargoOpt::AllFeatures);
+    }
+    if spec.no_default_features {
+        command.features(cargo_metadata::CargoOpt::NoDefaultFeatures);
     }
     command.other_options(metadata_options(spec));
     let metadata = command.exec()?;

@@ -21,7 +21,7 @@ pub use ids::{CaptureId, InstanceId};
 
 mod model;
 pub use cargo_ir::{
-    LlvmStage, RemarkArgument, RemarkKind, RemarkSourceLocation, UnstableAccess,
+    CargoProcessEvent, LlvmStage, RemarkArgument, RemarkKind, RemarkSourceLocation, UnstableAccess,
     UnstableAccessMechanism, UnstableAccessScope,
 };
 pub use model::{
