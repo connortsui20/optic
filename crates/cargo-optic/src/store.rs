@@ -4,13 +4,16 @@
 //! typed views. A capture becomes visible only after every blob is durable and one catalog
 //! transaction commits.
 
-use std::collections::{HashMap, HashSet};
+#[cfg(test)]
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use cargo_ir::{EvidenceBundle, LlvmStage, Toolchain};
+use cargo_ir::{CompiledCapture, EvidenceEvent, LlvmStage, Toolchain};
 use fs2::FileExt;
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -19,14 +22,14 @@ use walkdir::WalkDir;
 use crate::source::{SourceBaseline, StoredSource};
 use crate::{
     ArtifactSummary, BodyView, BuildSpec, CaptureDetails, CaptureDisposition, CaptureId,
-    CaptureProfile, CaptureSummary, CommandView, CompilerOutput, CompilerProvenance,
-    EnvironmentView, Error, FindMatchKind, FindOptions, FindResult, GcSummary, InstanceId,
-    InstanceSummary, OutputAvailability, RemarkCaptureSummary, RemarkEvidenceState,
+    CaptureMetadata, CaptureProfile, CaptureSummary, CommandView, CompilerOutput,
+    CompilerProvenance, EnvironmentView, Error, FindMatchKind, FindOptions, FindResult, GcSummary,
+    InstanceId, InstanceSummary, OutputAvailability, RemarkCaptureSummary, RemarkEvidenceState,
     RemarkFileSummary, RemarkKindFilter, RemarkOptions, RemarkShowView, RemarkView, RemoveSummary,
-    Result, ShowView, SourceLocation, StoreStatus, VerifySummary,
+    Result, ShowEvent, ShowView, SourceLocation, StoreStatus, TEXT_CHUNK_BYTES, VerifySummary,
 };
 
-const STORE_VERSION: u32 = 7;
+const STORE_VERSION: u32 = 9;
 
 #[derive(Clone, Debug)]
 pub(crate) struct AnalysisKey(String);
@@ -219,132 +222,235 @@ impl Store {
             .transpose()
     }
 
-    pub(crate) fn publish(
+    pub(crate) fn publish_stream(
         &mut self,
         capture_id: &CaptureId,
         cache_key: CaptureCacheKey<'_>,
         spec: &BuildSpec,
-        bundle: &EvidenceBundle,
+        compilation: CompiledCapture,
         sources: &SourceBaseline,
         target: &str,
     ) -> Result<CaptureSummary> {
-        let created_at_ms = now_ms()?;
-        let request_json = serde_json::to_string(spec)?;
-        let invocation_json = serde_json::to_string(&bundle.invocation)?;
-        if spec.capture_remarks != bundle.remarks.is_some() {
+        let analysis_directory = compilation.invocation.request.analysis_directory.clone();
+        let staging_path = analysis_directory
+            .parent()
+            .expect("analysis directories are created below one pending run directory")
+            .join("ingest.sqlite");
+        let mut staging = StagedCapture::create(&staging_path)?;
+        let mut staging_error = None;
+        let metadata = cargo_ir::ingest_with_events(
+            &compilation.invocation.request.clone(),
+            compilation,
+            |event| {
+                if staging_error.is_some() {
+                    return;
+                }
+
+                if let Err(error) = staging.push(self, event) {
+                    staging_error = Some(error);
+                }
+            },
+        )?;
+        if let Some(error) = staging_error {
+            return Err(error);
+        }
+        if spec.capture_remarks != metadata.remarks_captured {
             return Err(Error::InvalidStoredData {
                 message: "remark evidence must match the capture request".to_owned(),
             });
         }
-        let final_codegen_units = bundle
-            .modules
-            .iter()
-            .filter(|module| module.provenance.compiler_stage == "thin-lto-after-pm")
-            .map(|module| module.provenance.codegen_unit.clone())
-            .collect::<HashSet<_>>();
-        let mut modules = Vec::with_capacity(bundle.modules.len());
 
-        for module in &bundle.modules {
-            let bitcode_blob = self.publish_blob(&module.bitcode_path)?;
-            let text_blob = self.publish_blob(&module.text_path)?;
-            modules.push(PublishedModule {
-                name: module.name.clone(),
-                provenance: module.provenance.clone(),
-                bitcode_blob,
-                text_blob,
-                bodies: module.bodies.clone(),
-                declarations: module.declarations.clone(),
-                aliases: module.aliases.clone(),
-                selected: module.provenance.stage != Some(LlvmStage::Optimized)
-                    || module.provenance.compiler_stage == "thin-lto-after-pm"
-                    || !final_codegen_units.contains(&module.provenance.codegen_unit),
-            });
-        }
-
-        let instance_symbols = bundle
-            .instances
-            .iter()
-            .map(|instance| instance.raw_symbol.as_str())
-            .collect::<HashSet<_>>();
-        let mut published_remarks = Vec::new();
-        let mut remark_records = 0_usize;
-        let mut linked_remark_records = 0_usize;
-        if let Some(remarks) = &bundle.remarks {
-            published_remarks.reserve(remarks.len());
-            for file in remarks {
-                let blob = self.publish_blob(&file.raw_path)?;
-                remark_records = remark_records.saturating_add(file.records.len());
-                linked_remark_records = linked_remark_records.saturating_add(
-                    file.records
-                        .iter()
-                        .filter(|record| instance_symbols.contains(record.function.as_str()))
-                        .count(),
-                );
-                published_remarks.push(PublishedRemarkFile {
-                    name: file.name.clone(),
-                    blob,
-                    records: file.records.clone(),
-                });
-            }
-        }
-        let remark_summary = remark_summary(
-            bundle.remarks.is_some(),
-            published_remarks.len(),
-            remark_records,
-            linked_remark_records,
-        );
-
-        let mut published_sources = Vec::with_capacity(sources.entries.len());
         for source in &sources.entries {
-            let blob = self.publish_blob(&source.snapshot)?;
-            published_sources.push(PublishedSource {
-                path: source.path.to_string_lossy().into_owned(),
-                blob,
-            });
+            staging.push_source(self, source)?;
         }
 
-        let transaction = self.connection.transaction()?;
-        insert_capture(
-            &transaction,
-            PublishedCapture {
-                capture_id,
-                request_key: cache_key.request,
-                request_json: &request_json,
-                invocation_json: &invocation_json,
-                spec,
-                toolchain: &bundle.toolchain,
-                target,
-                created_at_ms,
-                remarks: remark_summary,
-            },
-        )?;
-        let evidence_index = insert_modules(&transaction, capture_id, &modules)?;
-        let instance_index =
-            insert_instances(&transaction, capture_id, &bundle.instances, &evidence_index)?;
-        insert_remarks(
-            &transaction,
-            capture_id,
-            &published_remarks,
-            &instance_index,
-        )?;
-        insert_sources(&transaction, capture_id, &published_sources)?;
-        transaction.execute(
-            "INSERT INTO capture_cache(request_key, capture_id, analysis_key) VALUES (?1, ?2, ?3)
-             ON CONFLICT(request_key) DO UPDATE SET
-                 capture_id = excluded.capture_id,
-                 analysis_key = excluded.analysis_key",
-            params![
-                cache_key.request,
-                capture_id.as_str(),
-                cache_key.analysis.as_str()
-            ],
-        )?;
-        transaction.commit()?;
+        let staged = staging.finish()?;
+        self.commit_staged_capture(capture_id, cache_key, spec, &metadata, target, staged)?;
 
         self.capture_summary(capture_id, CaptureDisposition::Captured)
     }
 
+    fn commit_staged_capture(
+        &mut self,
+        capture_id: &CaptureId,
+        cache_key: CaptureCacheKey<'_>,
+        spec: &BuildSpec,
+        metadata: &cargo_ir::EvidenceMetadata,
+        target: &str,
+        staged: CompletedStaging,
+    ) -> Result<()> {
+        let staging_path = staged.path.to_string_lossy().into_owned();
+        self.connection
+            .execute("ATTACH DATABASE ?1 AS staged", [&staging_path])?;
+        let result = (|| {
+            let created_at_ms = now_ms()?;
+            let request_json = serde_json::to_string(spec)?;
+            let invocation_json = serde_json::to_string(&metadata.invocation)?;
+            let remarks = remark_summary(
+                metadata.remarks_captured,
+                staged.remark_files,
+                staged.remark_records,
+                staged.linked_remark_records,
+            );
+            let transaction = self.connection.transaction()?;
+            insert_capture(
+                &transaction,
+                PublishedCapture {
+                    capture_id,
+                    request_key: cache_key.request,
+                    request_json: &request_json,
+                    invocation_json: &invocation_json,
+                    spec,
+                    toolchain: &metadata.toolchain,
+                    target,
+                    created_at_ms,
+                    remarks,
+                },
+            )?;
+            transaction.execute(
+                "INSERT INTO definitions(
+                     id, capture_id, crate_name, path, source_path, source_byte_start,
+                     source_byte_end, source_line_start, source_column_start, source_line_end,
+                     source_column_end, source_item_start, source_item_end,
+                     source_item_line_start
+                 )
+                 SELECT id, ?1, crate_name, path, source_path, source_byte_start,
+                        source_byte_end, source_line_start, source_column_start, source_line_end,
+                        source_column_end, source_item_start, source_item_end,
+                        source_item_line_start
+                 FROM staged.definitions",
+                [capture_id.as_str()],
+            )?;
+            transaction.execute(
+                "INSERT INTO instances(
+                     id, capture_id, definition_id, display_name, compiler_symbol
+                 )
+                 SELECT id, ?1, definition_id, display_name, compiler_symbol
+                 FROM staged.instances",
+                [capture_id.as_str()],
+            )?;
+            transaction.execute(
+                "INSERT INTO placements(
+                     instance_id, codegen_unit, linkage, visibility, local_copy, size_estimate
+                 )
+                 SELECT instance_id, codegen_unit, linkage, visibility, local_copy, size_estimate
+                 FROM staged.placements",
+                [],
+            )?;
+            transaction.execute(
+                "INSERT INTO modules(
+                     id, capture_id, name, stage, compiler_stage, codegen_unit, lto,
+                     capture_method, bitcode_blob, text_blob
+                 )
+                 SELECT id, ?1, name, stage, compiler_stage, codegen_unit, lto,
+                        capture_method, bitcode_blob, text_blob
+                 FROM staged.modules",
+                [capture_id.as_str()],
+            )?;
+            transaction.execute(
+                "INSERT INTO bodies(id, module_id, symbol, start, end)
+                 SELECT id, module_id, symbol, start, end FROM staged.bodies",
+                [],
+            )?;
+            transaction.execute(
+                "INSERT INTO declarations(id, module_id, symbol, start, end)
+                 SELECT id, module_id, symbol, start, end FROM staged.declarations",
+                [],
+            )?;
+            transaction.execute(
+                "INSERT INTO aliases(
+                     id, module_id, symbol, target_kind, target_symbol, start, end
+                 )
+                 SELECT id, module_id, symbol, target_kind, target_symbol, start, end
+                 FROM staged.aliases",
+                [],
+            )?;
+            associate_streamed_bodies(&transaction, capture_id)?;
+            update_streamed_availability(&transaction, capture_id)?;
+            transaction.execute(
+                "INSERT INTO instance_search(
+                     rowid, instance_id, capture_id, definition_path, display_name,
+                     compiler_symbol
+                 )
+                 SELECT instances.rowid, instances.id, instances.capture_id,
+                        definitions.path, instances.display_name, instances.compiler_symbol
+                 FROM instances
+                 JOIN definitions ON definitions.id = instances.definition_id
+                 WHERE instances.capture_id = ?1",
+                [capture_id.as_str()],
+            )?;
+            transaction.execute(
+                "INSERT INTO remark_files(id, capture_id, name, blob, record_count)
+                 SELECT id, ?1, name, blob, record_count FROM staged.remark_files",
+                [capture_id.as_str()],
+            )?;
+            transaction.execute(
+                "INSERT INTO remarks(
+                     id, file_id, ordinal, kind, unknown_kind, pass_name, remark_name,
+                     function_symbol, source_file, source_line, source_column, hotness,
+                     arguments_json, message
+                 )
+                 SELECT id, file_id, ordinal, kind, unknown_kind, pass_name, remark_name,
+                        function_symbol, source_file, source_line, source_column, hotness,
+                        arguments_json, message
+                 FROM staged.remarks",
+                [],
+            )?;
+            transaction.execute(
+                "INSERT INTO remark_instances(remark_id, instance_id)
+                 SELECT remarks.id, instances.id
+                 FROM remarks
+                 JOIN remark_files ON remark_files.id = remarks.file_id
+                 JOIN instances ON instances.compiler_symbol = remarks.function_symbol
+                               AND instances.capture_id = remark_files.capture_id
+                 WHERE remark_files.capture_id = ?1",
+                [capture_id.as_str()],
+            )?;
+            transaction.execute(
+                "INSERT INTO sources(capture_id, path, blob)
+                 SELECT ?1, path, blob FROM staged.sources",
+                [capture_id.as_str()],
+            )?;
+            transaction.execute(
+                "INSERT INTO capture_cache(request_key, capture_id, analysis_key)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(request_key) DO UPDATE SET
+                     capture_id = excluded.capture_id,
+                     analysis_key = excluded.analysis_key",
+                params![
+                    cache_key.request,
+                    capture_id.as_str(),
+                    cache_key.analysis.as_str()
+                ],
+            )?;
+            transaction.commit()?;
+
+            Ok(())
+        })();
+        let detach_result = self.connection.execute_batch("DETACH DATABASE staged");
+
+        match (result, detach_result) {
+            (Err(error), _) => Err(error),
+            (Ok(()), Err(error)) => Err(error.into()),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+
     pub(crate) fn captures(&self) -> Result<Vec<CaptureSummary>> {
+        let mut captures = Vec::new();
+        self.stream_captures(&mut |capture| {
+            captures.push(capture);
+
+            std::ops::ControlFlow::Continue(())
+        })?;
+
+        Ok(captures)
+    }
+
+    pub(crate) fn stream_captures(
+        &self,
+        on_capture: &mut impl FnMut(CaptureSummary) -> std::ops::ControlFlow<()>,
+    ) -> Result<usize> {
         let mut statement = self.connection.prepare(
             "SELECT id, created_at_ms, rustc_release, llvm_version, target, profile,
                     (SELECT COUNT(*) FROM instances WHERE capture_id = captures.id),
@@ -353,13 +459,18 @@ impl Store {
                     remark_linked_record_count
              FROM captures ORDER BY created_at_ms DESC",
         )?;
-        let captures = statement
-            .query_map([], |row| {
-                summary_from_row(row, CaptureDisposition::Captured)
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut rows = statement.query([])?;
+        let mut count = 0;
 
-        Ok(captures)
+        while let Some(row) = rows.next()? {
+            let capture = summary_from_row(row, CaptureDisposition::Captured)?;
+            if on_capture(capture).is_break() {
+                return Err(Error::ConsumerStopped);
+            }
+            count += 1;
+        }
+
+        Ok(count)
     }
 
     pub(crate) fn status(&self) -> Result<StoreStatus> {
@@ -449,6 +560,48 @@ impl Store {
     }
 
     pub(crate) fn capture_details(&self, capture_prefix: &CaptureId) -> Result<CaptureDetails> {
+        let metadata = self.capture_metadata(capture_prefix)?;
+        let capture_id = metadata.summary.id.clone();
+        let mut artifacts = Vec::new();
+        self.stream_capture_artifacts(&capture_id, &mut |artifact| {
+            artifacts.push(artifact);
+
+            ControlFlow::Continue(())
+        })?;
+        let mut remark_files = Vec::new();
+        self.stream_capture_remark_files(&capture_id, &mut |remark_file| {
+            remark_files.push(remark_file);
+
+            ControlFlow::Continue(())
+        })?;
+        let CaptureMetadata {
+            summary,
+            request,
+            compiler,
+            unstable_access,
+            cargo,
+            rustc,
+            wrapper_chain,
+            environment,
+            injected_rustc_arguments,
+        } = metadata;
+
+        Ok(CaptureDetails {
+            summary,
+            request,
+            compiler,
+            unstable_access,
+            cargo,
+            rustc,
+            wrapper_chain,
+            environment,
+            injected_rustc_arguments,
+            artifacts,
+            remark_files,
+        })
+    }
+
+    pub(crate) fn capture_metadata(&self, capture_prefix: &CaptureId) -> Result<CaptureMetadata> {
         let capture_id = self.resolve_capture(capture_prefix)?;
         let summary = self.capture_summary(&capture_id, CaptureDisposition::Captured)?;
         let (request_json, invocation_json, compiler) = self.connection.query_row(
@@ -474,31 +627,8 @@ impl Store {
         )?;
         let request = serde_json::from_str::<BuildSpec>(&request_json)?;
         let invocation = serde_json::from_str::<cargo_ir::CaptureInvocation>(&invocation_json)?;
-        let mut statement = self.connection.prepare(
-            "SELECT modules.name, modules.stage, modules.compiler_stage, modules.codegen_unit,
-                    modules.lto, modules.capture_method,
-                    (SELECT COUNT(*) FROM bodies WHERE module_id = modules.id),
-                    (SELECT COUNT(*) FROM declarations WHERE module_id = modules.id),
-                    (SELECT COUNT(*) FROM aliases WHERE module_id = modules.id)
-             FROM modules WHERE capture_id = ?1 ORDER BY modules.name, modules.compiler_stage",
-        )?;
-        let artifacts = statement
-            .query_map([capture_id.as_str()], artifact_summary_from_row)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let mut statement = self.connection.prepare(
-            "SELECT name, record_count FROM remark_files
-             WHERE capture_id = ?1 ORDER BY name",
-        )?;
-        let remark_files = statement
-            .query_map([capture_id.as_str()], |row| {
-                Ok(RemarkFileSummary {
-                    name: row.get(0)?,
-                    records: integer_from_row(row, 1)?,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
 
-        Ok(CaptureDetails {
+        Ok(CaptureMetadata {
             summary,
             request,
             compiler,
@@ -521,9 +651,59 @@ impl Store {
                 .into_iter()
                 .map(|argument| sanitize_store_path(argument, &self.root))
                 .collect(),
-            artifacts,
-            remark_files,
         })
+    }
+
+    pub(crate) fn stream_capture_artifacts(
+        &self,
+        capture_id: &CaptureId,
+        on_artifact: &mut impl FnMut(ArtifactSummary) -> ControlFlow<()>,
+    ) -> Result<usize> {
+        let mut statement = self.connection.prepare(
+            "SELECT modules.name, modules.stage, modules.compiler_stage, modules.codegen_unit,
+                    modules.lto, modules.capture_method,
+                    (SELECT COUNT(*) FROM bodies WHERE module_id = modules.id),
+                    (SELECT COUNT(*) FROM declarations WHERE module_id = modules.id),
+                    (SELECT COUNT(*) FROM aliases WHERE module_id = modules.id)
+             FROM modules WHERE capture_id = ?1 ORDER BY modules.name, modules.compiler_stage",
+        )?;
+        let mut artifacts =
+            statement.query_map([capture_id.as_str()], artifact_summary_from_row)?;
+        let mut count = 0;
+        for artifact in &mut artifacts {
+            count += 1;
+            if on_artifact(artifact?).is_break() {
+                return Err(Error::ConsumerStopped);
+            }
+        }
+
+        Ok(count)
+    }
+
+    pub(crate) fn stream_capture_remark_files(
+        &self,
+        capture_id: &CaptureId,
+        on_remark_file: &mut impl FnMut(RemarkFileSummary) -> ControlFlow<()>,
+    ) -> Result<usize> {
+        let mut statement = self.connection.prepare(
+            "SELECT name, record_count FROM remark_files
+             WHERE capture_id = ?1 ORDER BY name",
+        )?;
+        let mut remark_files = statement.query_map([capture_id.as_str()], |row| {
+            Ok(RemarkFileSummary {
+                name: row.get(0)?,
+                records: integer_from_row(row, 1)?,
+            })
+        })?;
+        let mut count = 0;
+        for remark_file in &mut remark_files {
+            count += 1;
+            if on_remark_file(remark_file?).is_break() {
+                return Err(Error::ConsumerStopped);
+            }
+        }
+
+        Ok(count)
     }
 
     pub(crate) fn unique_capture_prefix(&self, capture_id: &CaptureId) -> Result<CaptureId> {
@@ -633,6 +813,119 @@ impl Store {
             bodies,
             source: None,
         })
+    }
+
+    pub(crate) fn prepare_show(
+        &self,
+        instance_prefix: &InstanceId,
+        output: CompilerOutput,
+    ) -> Result<PreparedShow> {
+        let resolved = self.resolve_instance(instance_prefix)?;
+        let instance = self.connection.query_row(
+            &format!("{} WHERE instances.id = ?1", instance_select()),
+            [resolved.instance_id.as_str()],
+            instance_from_row,
+        )?;
+
+        Ok(PreparedShow {
+            capture_id: resolved.capture_id,
+            instance,
+            output,
+        })
+    }
+
+    pub(crate) fn stream_show_bodies(
+        &self,
+        show: &PreparedShow,
+        on_event: &mut impl FnMut(ShowEvent) -> std::ops::ControlFlow<()>,
+    ) -> Result<usize> {
+        let mut statement = self.connection.prepare(
+            "SELECT modules.name, bodies.symbol, modules.text_blob,
+                    bodies.start, bodies.end
+             FROM bodies
+             JOIN instance_bodies ON instance_bodies.body_id = bodies.id
+             JOIN selected_modules AS modules ON modules.id = bodies.module_id
+             WHERE instance_bodies.instance_id = ?1 AND modules.stage = ?2
+             ORDER BY modules.name, bodies.start",
+        )?;
+        let mut rows = statement.query(params![
+            show.instance.id.as_str(),
+            show.output.stage().as_str()
+        ])?;
+        let mut body_count = 0;
+
+        while let Some(row) = rows.next()? {
+            let body = stored_body_from_row(row)?;
+            emit_show_event(
+                on_event,
+                ShowEvent::BodyStarted {
+                    stage: show.output.stage(),
+                    module: body.module,
+                    symbol: body.symbol,
+                },
+            )?;
+            let mut summary = crate::model::LlvmBodySummaryBuilder::new();
+            self.read_blob_range_with(&body.text_blob, body.start, body.end, |text| {
+                summary.push(&text);
+                emit_show_event(on_event, ShowEvent::BodyChunk { text })
+            })?;
+            emit_show_event(
+                on_event,
+                ShowEvent::BodyFinished {
+                    summary: summary.finish(),
+                },
+            )?;
+            body_count += 1;
+        }
+
+        Ok(body_count)
+    }
+
+    pub(crate) fn stream_show_source(
+        &self,
+        show: &PreparedShow,
+        on_event: &mut impl FnMut(ShowEvent) -> std::ops::ControlFlow<()>,
+    ) -> Result<bool> {
+        let source = self
+            .connection
+            .query_row(
+                "SELECT sources.path, sources.blob, definitions.source_item_start,
+                        definitions.source_item_end, definitions.source_item_line_start
+                 FROM instances
+                 JOIN definitions ON definitions.id = instances.definition_id
+                 JOIN sources ON sources.capture_id = instances.capture_id
+                             AND sources.path = definitions.source_path
+                 WHERE instances.id = ?1
+                   AND definitions.source_item_start IS NOT NULL",
+                [show.instance.id.as_str()],
+                |row| {
+                    Ok(StoredSourceRange {
+                        path: row.get(0)?,
+                        blob: row.get(1)?,
+                        start: row.get(2)?,
+                        end: row.get(3)?,
+                        start_line: integer_from_row(row, 4)?,
+                    })
+                },
+            )
+            .optional()?;
+        let Some(source) = source else {
+            return Ok(false);
+        };
+
+        emit_show_event(
+            on_event,
+            ShowEvent::SourceStarted {
+                path: source.path,
+                start_line: source.start_line,
+            },
+        )?;
+        self.read_blob_range_with(&source.blob, source.start, source.end, |text| {
+            emit_show_event(on_event, ShowEvent::SourceChunk { text })
+        })?;
+        emit_show_event(on_event, ShowEvent::SourceFinished)?;
+
+        Ok(true)
     }
 
     pub(crate) fn show_remarks(
@@ -1194,6 +1487,65 @@ impl Store {
         })
     }
 
+    fn read_blob_range_with(
+        &self,
+        digest: &str,
+        start: i64,
+        end: i64,
+        mut on_chunk: impl FnMut(String) -> Result<()>,
+    ) -> Result<()> {
+        let (path, expected) = self.verified_blob_path(digest)?;
+        verify_file_digest(&path, expected)?;
+        let start = u64::try_from(start).map_err(|_| Error::InvalidRange {
+            path: path.clone(),
+            start: 0,
+            end: 0,
+        })?;
+        let end = u64::try_from(end).map_err(|_| Error::InvalidRange {
+            path: path.clone(),
+            start,
+            end: 0,
+        })?;
+        let length = end.checked_sub(start).ok_or_else(|| Error::InvalidRange {
+            path: path.clone(),
+            start,
+            end,
+        })?;
+        let mut file =
+            File::open(&path).map_err(|source| Error::filesystem("open", &path, source))?;
+        if end
+            > file
+                .metadata()
+                .map_err(|source| Error::filesystem("read metadata for", &path, source))?
+                .len()
+        {
+            return Err(Error::InvalidRange { path, start, end });
+        }
+        file.seek(SeekFrom::Start(start))
+            .map_err(|source| Error::filesystem("seek", &path, source))?;
+        let mut reader = file.take(length);
+        let mut buffer = vec![0_u8; TEXT_CHUNK_BYTES - 4];
+        let mut pending = Vec::with_capacity(TEXT_CHUNK_BYTES);
+        let mut read_bytes = 0_u64;
+
+        loop {
+            let bytes = reader
+                .read(&mut buffer)
+                .map_err(|source| Error::filesystem("read", &path, source))?;
+            if bytes == 0 {
+                break;
+            }
+
+            read_bytes += bytes as u64;
+            pending.extend_from_slice(&buffer[..bytes]);
+            emit_utf8_prefix(&path, &mut pending, false, &mut on_chunk)?;
+        }
+        if read_bytes != length {
+            return Err(Error::InvalidRange { path, start, end });
+        }
+        emit_utf8_prefix(&path, &mut pending, true, &mut on_chunk)
+    }
+
     fn verified_blob_path(&self, digest: &str) -> Result<(PathBuf, blake3::Hash)> {
         let expected = digest.parse::<blake3::Hash>().map_err(|source| {
             Error::filesystem(
@@ -1339,6 +1691,7 @@ fn common_prefix_length(left: &str, right: &str) -> usize {
         .count()
 }
 
+#[cfg(test)]
 struct PublishedModule {
     name: String,
     provenance: cargo_ir::ArtifactProvenance,
@@ -1362,17 +1715,14 @@ struct PublishedCapture<'a> {
     remarks: RemarkCaptureSummary,
 }
 
+#[cfg(test)]
 struct PublishedRemarkFile {
     name: String,
     blob: String,
     records: Vec<cargo_ir::OptimizationRemark>,
 }
 
-struct PublishedSource {
-    path: String,
-    blob: String,
-}
-
+#[cfg(test)]
 #[derive(Clone)]
 struct IndexedBody {
     body_id: String,
@@ -1380,6 +1730,7 @@ struct IndexedBody {
     selected: bool,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Default)]
 struct AvailabilityCounts {
     llvm_definitions: usize,
@@ -1390,6 +1741,7 @@ struct AvailabilityCounts {
     pre_opt_aliases: usize,
 }
 
+#[cfg(test)]
 impl AvailabilityCounts {
     fn add_definition(&mut self, stage: Option<LlvmStage>) {
         match stage {
@@ -1416,6 +1768,7 @@ impl AvailabilityCounts {
     }
 }
 
+#[cfg(test)]
 struct IndexedEvidence {
     bodies: HashMap<String, Vec<IndexedBody>>,
     availability: HashMap<String, AvailabilityCounts>,
@@ -1429,10 +1782,521 @@ struct StoredBody {
     end: i64,
 }
 
+struct StoredSourceRange {
+    path: String,
+
+    blob: String,
+
+    start: i64,
+
+    end: i64,
+
+    start_line: usize,
+}
+
+pub(crate) struct PreparedShow {
+    pub(crate) capture_id: CaptureId,
+
+    pub(crate) instance: InstanceSummary,
+
+    pub(crate) output: CompilerOutput,
+}
+
 struct BlobEntry {
     path: PathBuf,
     digest: String,
     bytes: u64,
+}
+
+struct StagedCapture {
+    path: PathBuf,
+
+    connection: Connection,
+
+    current_module: Option<String>,
+
+    current_remark_file: Option<StagedRemarkFile>,
+}
+
+struct StagedRemarkFile {
+    id: String,
+
+    next_ordinal: usize,
+}
+
+struct CompletedStaging {
+    path: PathBuf,
+
+    remark_files: usize,
+
+    remark_records: usize,
+
+    linked_remark_records: usize,
+}
+
+impl StagedCapture {
+    fn create(path: &Path) -> Result<Self> {
+        if path.exists() {
+            fs::remove_file(path).map_err(|source| Error::filesystem("remove", path, source))?;
+        }
+        let connection = Connection::open(path)?;
+        connection.pragma_update(None, "journal_mode", "DELETE")?;
+        connection.pragma_update(None, "synchronous", "NORMAL")?;
+        connection.execute_batch(
+            "CREATE TABLE definitions(
+                 key TEXT PRIMARY KEY,
+                 id TEXT NOT NULL,
+                 crate_name TEXT NOT NULL,
+                 path TEXT NOT NULL,
+                 source_path TEXT,
+                 source_byte_start INTEGER,
+                 source_byte_end INTEGER,
+                 source_line_start INTEGER,
+                 source_column_start INTEGER,
+                 source_line_end INTEGER,
+                 source_column_end INTEGER,
+                 source_item_start INTEGER,
+                 source_item_end INTEGER,
+                 source_item_line_start INTEGER
+             );
+             CREATE TABLE instances(
+                 key TEXT PRIMARY KEY,
+                 id TEXT NOT NULL,
+                 definition_id TEXT NOT NULL,
+                 definition_path TEXT NOT NULL,
+                 display_name TEXT NOT NULL,
+                 compiler_symbol TEXT NOT NULL
+             );
+             CREATE INDEX instances_symbol ON instances(compiler_symbol);
+             CREATE TABLE placements(
+                 instance_id TEXT NOT NULL,
+                 codegen_unit TEXT NOT NULL,
+                 linkage TEXT NOT NULL,
+                 visibility TEXT NOT NULL,
+                 local_copy INTEGER NOT NULL,
+                 size_estimate INTEGER NOT NULL,
+                 PRIMARY KEY(instance_id, codegen_unit)
+             );
+             CREATE TABLE modules(
+                 id TEXT PRIMARY KEY,
+                 name TEXT NOT NULL,
+                 stage TEXT,
+                 compiler_stage TEXT NOT NULL,
+                 codegen_unit TEXT,
+                 lto TEXT NOT NULL,
+                 capture_method TEXT NOT NULL,
+                 bitcode_blob TEXT NOT NULL,
+                 text_blob TEXT NOT NULL
+             );
+             CREATE TABLE bodies(
+                 id TEXT PRIMARY KEY,
+                 module_id TEXT NOT NULL,
+                 symbol TEXT NOT NULL,
+                 start INTEGER NOT NULL,
+                 end INTEGER NOT NULL
+             );
+             CREATE INDEX bodies_symbol ON bodies(symbol);
+             CREATE TABLE declarations(
+                 id TEXT PRIMARY KEY,
+                 module_id TEXT NOT NULL,
+                 symbol TEXT NOT NULL,
+                 start INTEGER NOT NULL,
+                 end INTEGER NOT NULL
+             );
+             CREATE INDEX declarations_symbol ON declarations(symbol);
+             CREATE TABLE aliases(
+                 id TEXT PRIMARY KEY,
+                 module_id TEXT NOT NULL,
+                 symbol TEXT NOT NULL,
+                 target_kind TEXT NOT NULL,
+                 target_symbol TEXT,
+                 start INTEGER NOT NULL,
+                 end INTEGER NOT NULL
+             );
+             CREATE INDEX aliases_symbol ON aliases(symbol);
+             CREATE TABLE remark_files(
+                 id TEXT PRIMARY KEY,
+                 name TEXT NOT NULL UNIQUE,
+                 blob TEXT NOT NULL,
+                 record_count INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE remarks(
+                 id TEXT PRIMARY KEY,
+                 file_id TEXT NOT NULL,
+                 ordinal INTEGER NOT NULL,
+                 kind TEXT NOT NULL,
+                 unknown_kind TEXT,
+                 pass_name TEXT NOT NULL,
+                 remark_name TEXT NOT NULL,
+                 function_symbol TEXT NOT NULL,
+                 source_file TEXT,
+                 source_line INTEGER,
+                 source_column INTEGER,
+                 hotness INTEGER,
+                 arguments_json TEXT NOT NULL,
+                 message TEXT NOT NULL,
+                 UNIQUE(file_id, ordinal)
+             );
+             CREATE INDEX remarks_function ON remarks(function_symbol);
+             CREATE TABLE sources(
+                 path TEXT PRIMARY KEY,
+                 blob TEXT NOT NULL
+             );
+             BEGIN IMMEDIATE;",
+        )?;
+
+        Ok(Self {
+            path: path.to_owned(),
+            connection,
+            current_module: None,
+            current_remark_file: None,
+        })
+    }
+
+    fn push(&mut self, store: &Store, event: EvidenceEvent) -> Result<()> {
+        match event {
+            EvidenceEvent::Placement { record } => self.push_placement(record),
+            EvidenceEvent::ModuleStarted { module } => self.start_module(store, module),
+            EvidenceEvent::Body { body } => self.push_body(body),
+            EvidenceEvent::Declaration { declaration } => self.push_declaration(declaration),
+            EvidenceEvent::Alias { alias } => self.push_alias(alias),
+            EvidenceEvent::RemarkFileStarted { file } => self.start_remark_file(store, file),
+            EvidenceEvent::Remark { remark } => self.push_remark(remark),
+        }
+    }
+
+    fn push_placement(&mut self, record: cargo_ir::CompilerPlacement) -> Result<()> {
+        let definition_key = serde_json::to_string(&record.origin)?;
+        let definition_id = format!("def_{}", uuid::Uuid::now_v7().simple());
+        let source = record.origin.source.as_ref();
+        self.connection.execute(
+            "INSERT OR IGNORE INTO definitions(
+                 key, id, crate_name, path, source_path, source_byte_start, source_byte_end,
+                 source_line_start, source_column_start, source_line_end, source_column_end
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                definition_key,
+                definition_id,
+                record.origin.crate_name,
+                record.origin.definition_path,
+                source.map(|source| source.file_name.as_str()),
+                optional_sqlite_integer(
+                    "source byte start",
+                    source.map(|source| source.byte_start)
+                )?,
+                optional_sqlite_integer("source byte end", source.map(|source| source.byte_end))?,
+                optional_sqlite_usize("source line start", source.map(|source| source.line_start))?,
+                optional_sqlite_usize(
+                    "source column start",
+                    source.map(|source| source.column_start)
+                )?,
+                optional_sqlite_usize("source line end", source.map(|source| source.line_end))?,
+                optional_sqlite_usize("source column end", source.map(|source| source.column_end))?,
+            ],
+        )?;
+        let stored_definition_id = self.connection.query_row(
+            "SELECT id FROM definitions WHERE key = ?1",
+            [&definition_key],
+            |row| row.get::<_, String>(0),
+        )?;
+        let instance_key =
+            serde_json::to_string(&(&definition_key, &record.display_name, &record.raw_symbol))?;
+        let instance_id = InstanceId::new();
+        self.connection.execute(
+            "INSERT OR IGNORE INTO instances(
+                 key, id, definition_id, definition_path, display_name, compiler_symbol
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                instance_key,
+                instance_id.as_str(),
+                stored_definition_id,
+                record.origin.definition_path,
+                record.display_name,
+                record.raw_symbol,
+            ],
+        )?;
+        let stored_instance_id = self.connection.query_row(
+            "SELECT id FROM instances WHERE key = ?1",
+            [&instance_key],
+            |row| row.get::<_, String>(0),
+        )?;
+        self.connection.execute(
+            "INSERT OR REPLACE INTO placements(
+                 instance_id, codegen_unit, linkage, visibility, local_copy, size_estimate
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                stored_instance_id,
+                record.placement.codegen_unit,
+                record.placement.linkage,
+                record.placement.visibility,
+                record.placement.local_copy,
+                sqlite_usize("instance size estimate", record.placement.size_estimate)?,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    fn start_module(&mut self, store: &Store, module: cargo_ir::ModuleStart) -> Result<()> {
+        let module_id = format!("mod_{}", uuid::Uuid::now_v7().simple());
+        let bitcode_blob = store.publish_blob(&module.bitcode_path)?;
+        let text_blob = store.publish_blob(&module.text_path)?;
+        self.connection.execute(
+            "INSERT INTO modules(
+                 id, name, stage, compiler_stage, codegen_unit, lto, capture_method,
+                 bitcode_blob, text_blob
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                module_id,
+                module.name,
+                module.provenance.stage.map(LlvmStage::as_str),
+                module.provenance.compiler_stage,
+                module.provenance.codegen_unit,
+                lto_name(module.provenance.lto),
+                capture_method_name(module.provenance.capture_method),
+                bitcode_blob,
+                text_blob,
+            ],
+        )?;
+        self.current_module = Some(module_id);
+
+        Ok(())
+    }
+
+    fn push_body(&mut self, body: cargo_ir::BodyRange) -> Result<()> {
+        let module_id = self.current_module()?;
+        self.connection.execute(
+            "INSERT INTO bodies(id, module_id, symbol, start, end) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                format!("body_{}", uuid::Uuid::now_v7().simple()),
+                module_id,
+                body.raw_symbol,
+                sqlite_integer("LLVM body start offset", body.start)?,
+                sqlite_integer("LLVM body end offset", body.end)?,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    fn push_declaration(&mut self, declaration: cargo_ir::LlvmDeclaration) -> Result<()> {
+        let module_id = self.current_module()?;
+        self.connection.execute(
+            "INSERT INTO declarations(id, module_id, symbol, start, end)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                format!("decl_{}", uuid::Uuid::now_v7().simple()),
+                module_id,
+                declaration.raw_symbol,
+                sqlite_integer("LLVM declaration start offset", declaration.start)?,
+                sqlite_integer("LLVM declaration end offset", declaration.end)?,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    fn push_alias(&mut self, alias: cargo_ir::LlvmAlias) -> Result<()> {
+        let module_id = self.current_module()?;
+        let (target_kind, target_symbol) = match &alias.target {
+            cargo_ir::AliasTarget::Symbol { raw_symbol } => ("symbol", Some(raw_symbol.as_str())),
+            cargo_ir::AliasTarget::Expression => ("expression", None),
+        };
+        self.connection.execute(
+            "INSERT INTO aliases(
+                 id, module_id, symbol, target_kind, target_symbol, start, end
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                format!("alias_{}", uuid::Uuid::now_v7().simple()),
+                module_id,
+                alias.raw_symbol,
+                target_kind,
+                target_symbol,
+                sqlite_integer("LLVM alias start offset", alias.start)?,
+                sqlite_integer("LLVM alias end offset", alias.end)?,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    fn start_remark_file(&mut self, store: &Store, file: cargo_ir::RemarkFileStart) -> Result<()> {
+        let id = format!("remfile_{}", uuid::Uuid::now_v7().simple());
+        let blob = store.publish_blob(&file.raw_path)?;
+        self.connection.execute(
+            "INSERT INTO remark_files(id, name, blob) VALUES (?1, ?2, ?3)",
+            params![id, file.name, blob],
+        )?;
+        self.current_remark_file = Some(StagedRemarkFile {
+            id,
+            next_ordinal: 0,
+        });
+
+        Ok(())
+    }
+
+    fn push_remark(&mut self, remark: cargo_ir::OptimizationRemark) -> Result<()> {
+        let file = self
+            .current_remark_file
+            .as_mut()
+            .ok_or_else(|| Error::InvalidStoredData {
+                message: "a remark record must follow a remark-file event".to_owned(),
+            })?;
+        let ordinal = file.next_ordinal;
+        file.next_ordinal = file.next_ordinal.saturating_add(1);
+        let (kind, unknown_kind) = remark_kind_name(&remark.kind);
+        let source = remark.source_location.as_ref();
+        self.connection.execute(
+            "INSERT INTO remarks(
+                 id, file_id, ordinal, kind, unknown_kind, pass_name, remark_name,
+                 function_symbol, source_file, source_line, source_column, hotness,
+                 arguments_json, message
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                format!("rem_{}", uuid::Uuid::now_v7().simple()),
+                file.id,
+                sqlite_usize("remark ordinal", ordinal)?,
+                kind,
+                unknown_kind,
+                remark.pass_name,
+                remark.remark_name,
+                remark.function,
+                source.map(|source| source.file.as_str()),
+                optional_sqlite_integer("remark source line", source.map(|source| source.line))?,
+                optional_sqlite_integer(
+                    "remark source column",
+                    source.map(|source| source.column)
+                )?,
+                optional_sqlite_integer("remark hotness", remark.hotness)?,
+                serde_json::to_string(&remark.arguments)?,
+                remark.message,
+            ],
+        )?;
+        self.connection.execute(
+            "UPDATE remark_files SET record_count = record_count + 1 WHERE id = ?1",
+            [&file.id],
+        )?;
+
+        Ok(())
+    }
+
+    fn push_source(&mut self, store: &Store, source: &crate::source::SourceEntry) -> Result<()> {
+        let blob = store.publish_blob(&source.snapshot)?;
+        let source_path = source.path.to_string_lossy();
+        self.connection.execute(
+            "INSERT INTO sources(path, blob) VALUES (?1, ?2)",
+            params![source_path.as_ref(), blob],
+        )?;
+        for range in crate::source::source_item_ranges(&source.snapshot)? {
+            self.connection.execute(
+                "UPDATE definitions SET
+                     source_item_start = ?1,
+                     source_item_end = ?2,
+                     source_item_line_start = ?3
+                 WHERE source_path = ?4 AND source_byte_start = ?5 AND source_byte_end = ?6",
+                params![
+                    sqlite_usize("source item start", range.item.start)?,
+                    sqlite_usize("source item end", range.item.end)?,
+                    sqlite_usize("source item line start", range.start_line)?,
+                    source_path.as_ref(),
+                    sqlite_usize("definition source start", range.definition.start)?,
+                    sqlite_usize("definition source end", range.definition.end)?,
+                ],
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn current_module(&self) -> Result<&str> {
+        self.current_module
+            .as_deref()
+            .ok_or_else(|| Error::InvalidStoredData {
+                message: "an LLVM symbol record must follow a module event".to_owned(),
+            })
+    }
+
+    fn finish(self) -> Result<CompletedStaging> {
+        let remark_files =
+            self.connection
+                .query_row("SELECT count(*) FROM remark_files", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+        let remark_records =
+            self.connection
+                .query_row("SELECT count(*) FROM remarks", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+        let linked_remark_records = self.connection.query_row(
+            "SELECT count(*) FROM remarks
+             WHERE EXISTS(
+                 SELECT 1 FROM instances
+                 WHERE instances.compiler_symbol = remarks.function_symbol
+             )",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        self.connection.execute_batch("COMMIT")?;
+        drop(self.connection);
+
+        Ok(CompletedStaging {
+            path: self.path,
+            remark_files: stored_count("remark file count", remark_files)?,
+            remark_records: stored_count("remark record count", remark_records)?,
+            linked_remark_records: stored_count(
+                "linked remark record count",
+                linked_remark_records,
+            )?,
+        })
+    }
+}
+
+fn stored_count(field: &str, value: i64) -> Result<usize> {
+    usize::try_from(value).map_err(|_| Error::InvalidStoredData {
+        message: format!("{field} must fit in usize, got {value}"),
+    })
+}
+
+fn emit_show_event(
+    on_event: &mut impl FnMut(ShowEvent) -> std::ops::ControlFlow<()>,
+    event: ShowEvent,
+) -> Result<()> {
+    if on_event(event).is_break() {
+        return Err(Error::ConsumerStopped);
+    }
+
+    Ok(())
+}
+
+fn emit_utf8_prefix(
+    path: &Path,
+    pending: &mut Vec<u8>,
+    final_chunk: bool,
+    on_chunk: &mut impl FnMut(String) -> Result<()>,
+) -> Result<()> {
+    let valid_bytes = match std::str::from_utf8(pending) {
+        Ok(_) => pending.len(),
+        Err(error) if error.error_len().is_none() && !final_chunk => error.valid_up_to(),
+        Err(error) => {
+            return Err(Error::filesystem(
+                "decode UTF-8 from",
+                path,
+                io::Error::new(io::ErrorKind::InvalidData, error),
+            ));
+        }
+    };
+    if valid_bytes == 0 {
+        return Ok(());
+    }
+
+    let chunk = String::from_utf8(pending.drain(..valid_bytes).collect()).map_err(|source| {
+        Error::filesystem(
+            "decode UTF-8 from",
+            path,
+            io::Error::new(io::ErrorKind::InvalidData, source),
+        )
+    })?;
+    on_chunk(chunk)
 }
 
 struct ResolvedInstance {
@@ -1524,7 +2388,16 @@ fn create_schema(connection: &mut Connection) -> Result<()> {
              source_line_start INTEGER,
              source_column_start INTEGER,
              source_line_end INTEGER,
-             source_column_end INTEGER
+             source_column_end INTEGER,
+             source_item_start INTEGER,
+             source_item_end INTEGER,
+             source_item_line_start INTEGER,
+             CHECK(
+                 (source_item_start IS NULL AND source_item_end IS NULL
+                  AND source_item_line_start IS NULL)
+                 OR (source_item_start IS NOT NULL AND source_item_end IS NOT NULL
+                     AND source_item_line_start IS NOT NULL)
+             )
          );
          CREATE INDEX definitions_path ON definitions(capture_id, path, id);
          CREATE INDEX definitions_identity ON definitions(capture_id, crate_name, path, id);
@@ -1696,6 +2569,7 @@ fn insert_capture(transaction: &Transaction<'_>, capture: PublishedCapture<'_>) 
     Ok(())
 }
 
+#[cfg(test)]
 fn insert_modules(
     transaction: &Transaction<'_>,
     capture_id: &CaptureId,
@@ -1808,6 +2682,90 @@ fn insert_modules(
     })
 }
 
+fn update_streamed_availability(
+    transaction: &Transaction<'_>,
+    capture_id: &CaptureId,
+) -> Result<()> {
+    transaction.execute(
+        "UPDATE instances SET
+             llvm_definitions = (
+                 SELECT count(*) FROM instance_bodies
+                 JOIN bodies ON bodies.id = instance_bodies.body_id
+                 JOIN selected_modules AS modules ON modules.id = bodies.module_id
+                 WHERE instance_bodies.instance_id = instances.id
+                   AND modules.stage = 'llvm-optimized'
+             ),
+             pre_opt_definitions = (
+                 SELECT count(*) FROM instance_bodies
+                 JOIN bodies ON bodies.id = instance_bodies.body_id
+                 JOIN selected_modules AS modules ON modules.id = bodies.module_id
+                 WHERE instance_bodies.instance_id = instances.id
+                   AND modules.stage = 'llvm-pre-optimization'
+             ),
+             llvm_declarations = (
+                 SELECT count(*) FROM declarations
+                 JOIN selected_modules AS modules ON modules.id = declarations.module_id
+                 WHERE declarations.symbol = instances.compiler_symbol
+                   AND modules.capture_id = instances.capture_id
+                   AND modules.stage = 'llvm-optimized'
+             ),
+             pre_opt_declarations = (
+                 SELECT count(*) FROM declarations
+                 JOIN selected_modules AS modules ON modules.id = declarations.module_id
+                 WHERE declarations.symbol = instances.compiler_symbol
+                   AND modules.capture_id = instances.capture_id
+                   AND modules.stage = 'llvm-pre-optimization'
+             ),
+             llvm_aliases = (
+                 SELECT count(*) FROM aliases
+                 JOIN selected_modules AS modules ON modules.id = aliases.module_id
+                 WHERE aliases.symbol = instances.compiler_symbol
+                   AND modules.capture_id = instances.capture_id
+                   AND modules.stage = 'llvm-optimized'
+             ),
+             pre_opt_aliases = (
+                 SELECT count(*) FROM aliases
+                 JOIN selected_modules AS modules ON modules.id = aliases.module_id
+                 WHERE aliases.symbol = instances.compiler_symbol
+                   AND modules.capture_id = instances.capture_id
+                   AND modules.stage = 'llvm-pre-optimization'
+             )
+         WHERE capture_id = ?1",
+        [capture_id.as_str()],
+    )?;
+
+    Ok(())
+}
+
+fn associate_streamed_bodies(transaction: &Transaction<'_>, capture_id: &CaptureId) -> Result<()> {
+    transaction.execute(
+        "INSERT INTO instance_bodies(instance_id, body_id)
+         SELECT instances.id, bodies.id
+         FROM instances
+         JOIN bodies ON bodies.symbol = instances.compiler_symbol
+         JOIN selected_modules AS modules ON modules.id = bodies.module_id
+                                         AND modules.capture_id = instances.capture_id
+         WHERE instances.capture_id = ?1
+         UNION
+         SELECT instances.id, bodies.id
+         FROM instances
+         JOIN aliases ON aliases.symbol = instances.compiler_symbol
+                     AND aliases.target_kind = 'symbol'
+         JOIN selected_modules AS alias_modules
+           ON alias_modules.id = aliases.module_id
+          AND alias_modules.capture_id = instances.capture_id
+         JOIN bodies ON bodies.symbol = aliases.target_symbol
+         JOIN selected_modules AS body_modules
+           ON body_modules.id = bodies.module_id
+          AND body_modules.capture_id = instances.capture_id
+         WHERE instances.capture_id = ?1",
+        [capture_id.as_str()],
+    )?;
+
+    Ok(())
+}
+
+#[cfg(test)]
 fn insert_instances(
     transaction: &Transaction<'_>,
     capture_id: &CaptureId,
@@ -1914,6 +2872,7 @@ fn insert_instances(
     Ok(instances_by_symbol)
 }
 
+#[cfg(test)]
 fn insert_definition(
     transaction: &Transaction<'_>,
     capture_id: &CaptureId,
@@ -1947,6 +2906,7 @@ fn insert_definition(
     Ok(definition_id)
 }
 
+#[cfg(test)]
 fn bodies_for_instance<'a>(
     instance: &cargo_ir::CompilerInstance,
     body_index: &'a HashMap<String, Vec<IndexedBody>>,
@@ -1956,6 +2916,7 @@ fn bodies_for_instance<'a>(
         .map_or(&[], Vec::as_slice)
 }
 
+#[cfg(test)]
 fn insert_remarks(
     transaction: &Transaction<'_>,
     capture_id: &CaptureId,
@@ -2035,21 +2996,6 @@ fn remark_kind_name(kind: &cargo_ir::RemarkKind) -> (&'static str, Option<&str>)
         cargo_ir::RemarkKind::Failure => ("failure", None),
         cargo_ir::RemarkKind::Unknown { tag } => ("unknown", Some(tag)),
     }
-}
-
-fn insert_sources(
-    transaction: &Transaction<'_>,
-    capture_id: &CaptureId,
-    sources: &[PublishedSource],
-) -> Result<()> {
-    for source in sources {
-        transaction.execute(
-            "INSERT INTO sources(capture_id, path, blob) VALUES (?1, ?2, ?3)",
-            params![capture_id.as_str(), source.path, source.blob],
-        )?;
-    }
-
-    Ok(())
 }
 
 fn summary_from_row(
@@ -2483,8 +3429,9 @@ mod tests {
 
     use super::{
         IndexedBody, PublishedModule, PublishedRemarkFile, STORE_VERSION, Store,
-        bodies_for_instance, insert_instances, insert_modules, insert_remarks,
-        lock_workspace_exclusive, lock_workspace_shared, unique_prefix_length,
+        associate_streamed_bodies, bodies_for_instance, insert_instances, insert_modules,
+        insert_remarks, lock_workspace_exclusive, lock_workspace_shared, unique_prefix_length,
+        update_streamed_availability,
     };
     use crate::{
         CaptureDisposition, CaptureId, CompilerOutput, Error, FindMatchKind, FindOptions,
@@ -2724,6 +3671,98 @@ mod tests {
         let optimized = &result.instances[0].availability[0];
 
         assert_eq!(optimized.definitions, 1);
+    }
+
+    #[test]
+    fn streamed_relationships_use_only_the_instance_capture() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let mut store = lookup_store(temporary.path());
+        let capture_id = "cap_22222222222222222222222222222222"
+            .parse::<CaptureId>()
+            .expect("the second capture ID is valid");
+        store
+            .connection
+            .execute(
+                "INSERT INTO captures(
+                     id, created_at_ms, request_key, request_json, rustc_path, rustc_release,
+                     rustc_commit, rustc_host, llvm_version, rustc_sysroot, llvm_dis_path, target,
+                     profile, invocation_json
+                 ) VALUES (?1, 1, 'second', '{}', '', '', '', '', '', '', '', '', 'faithful', '{}')",
+                [capture_id.as_str()],
+            )
+            .expect("the test can insert the second capture");
+        store
+            .connection
+            .execute_batch(
+                "INSERT INTO definitions(id, capture_id, crate_name, path) VALUES
+                     ('def_shared', 'cap_22222222222222222222222222222222', 'crate', 'crate::f');
+                 INSERT INTO instances(id, capture_id, definition_id, display_name, compiler_symbol)
+                 VALUES (
+                     'ins_22222222222222222222222222222222',
+                     'cap_22222222222222222222222222222222',
+                     'def_shared', 'crate::f', '_Rshared'
+                 );
+                 INSERT INTO modules(
+                     id, capture_id, name, stage, compiler_stage, lto, capture_method,
+                     bitcode_blob, text_blob
+                 ) VALUES
+                     ('old_module', 'cap_11111111111111111111111111111111', 'old',
+                      'llvm-optimized', 'rcgu', 'none', 'saved-temporary', 'old_bc', 'old_ll'),
+                     ('new_module', 'cap_22222222222222222222222222222222', 'new',
+                      'llvm-optimized', 'rcgu', 'none', 'saved-temporary', 'new_bc', 'new_ll');
+                 INSERT INTO bodies(id, module_id, symbol, start, end) VALUES
+                     ('old_body', 'old_module', '_Rshared', 0, 1),
+                     ('old_target', 'old_module', '_Rtarget', 1, 2),
+                     ('new_body', 'new_module', '_Rshared', 0, 1),
+                     ('new_target', 'new_module', '_Rtarget', 1, 2);
+                 INSERT INTO declarations(id, module_id, symbol, start, end) VALUES
+                     ('old_declaration', 'old_module', '_Rshared', 0, 1),
+                     ('new_declaration', 'new_module', '_Rshared', 0, 1);
+                 INSERT INTO aliases(
+                     id, module_id, symbol, target_kind, target_symbol, start, end
+                 ) VALUES
+                     ('old_alias', 'old_module', '_Rshared', 'symbol', '_Rtarget', 0, 1),
+                     ('new_alias', 'new_module', '_Rshared', 'symbol', '_Rtarget', 0, 1);",
+            )
+            .expect("the test can insert matching evidence in both captures");
+        let transaction = store
+            .connection
+            .transaction()
+            .expect("the test can start the relationship transaction");
+
+        associate_streamed_bodies(&transaction, &capture_id)
+            .expect("the test can associate streamed bodies");
+        update_streamed_availability(&transaction, &capture_id)
+            .expect("the test can update streamed availability");
+        transaction
+            .commit()
+            .expect("the test can commit streamed relationships");
+
+        let stale_bodies = store
+            .connection
+            .query_row(
+                "SELECT count(*)
+                 FROM instance_bodies
+                 JOIN bodies ON bodies.id = instance_bodies.body_id
+                 JOIN modules ON modules.id = bodies.module_id
+                 WHERE instance_bodies.instance_id = 'ins_22222222222222222222222222222222'
+                   AND modules.capture_id != 'cap_22222222222222222222222222222222'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("the test can count stale body associations");
+        let availability = store
+            .connection
+            .query_row(
+                "SELECT llvm_definitions, llvm_declarations, llvm_aliases
+                 FROM instances WHERE id = 'ins_22222222222222222222222222222222'",
+                [],
+                |row| Ok([row.get::<_, i64>(0)?, row.get(1)?, row.get(2)?]),
+            )
+            .expect("the test can read capture-scoped availability");
+
+        assert_eq!(stale_bodies, 0);
+        assert_eq!(availability, [2, 1, 1]);
     }
 
     #[test]
@@ -3266,6 +4305,35 @@ mod tests {
             .expect("the store can publish the source evidence");
 
         assert_invalid_data(store.read_blob_range(&digest, 0, 1));
+    }
+
+    #[test]
+    fn streams_verified_utf8_ranges_in_bounded_chunks() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let store = Store::open(temporary.path()).expect("the test can open a store");
+        let source = temporary.path().join("source.ll");
+        let contents = format!("{}é{}", "a".repeat(crate::TEXT_CHUNK_BYTES), "b".repeat(32));
+        fs::write(&source, &contents).expect("the test can write UTF-8 evidence");
+        let digest = store
+            .publish_blob(&source)
+            .expect("the store can publish the source evidence");
+        let mut chunks = Vec::new();
+
+        store
+            .read_blob_range_with(&digest, 0, contents.len() as i64, |chunk| {
+                chunks.push(chunk);
+
+                Ok(())
+            })
+            .expect("the store can stream the complete range");
+
+        assert!(chunks.len() > 1);
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.len() <= crate::TEXT_CHUNK_BYTES)
+        );
+        assert_eq!(chunks.concat(), contents);
     }
 
     #[test]

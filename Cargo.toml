@@ -10,11 +10,13 @@ repository = "https://github.com/connortsui20/optic"
 
 [workspace.dependencies]
 anstyle = "1.0.13"
+base64 = "0.22.1"
 blake3 = "1.8.2"
 cargo-ir = { path = "crates/cargo-ir", version = "0.0.1" }
 cargo_metadata = "0.23.1"
 clap = { version = "4.5.48", features = ["derive"] }
 fs2 = "0.4.3"
+libc = "0.2.189"
 proc-macro2 = { version = "1.0.101", features = ["span-locations"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 rustc-demangle = "0.1.26"

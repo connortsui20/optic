@@ -2,16 +2,16 @@
 //!
 //! This crate owns the Cargo, compiler, and LLVM boundary. [`compile_with_events`] runs one selected
 //! Cargo target and reports its user-visible output. [`compile`] is the silent convenience entry
-//! point. [`ingest`] reads retained artifacts and returns an [`EvidenceBundle`]. This crate does not
-//! assign Optic capture IDs or persist evidence.
+//! point. [`ingest_with_events`] streams retained artifacts to the product store. This crate does
+//! not assign Optic capture IDs or persist evidence.
 
 mod capture;
 pub use capture::{
     AliasTarget, ArtifactProvenance, BodyRange, CaptureInvocation, CaptureMethod,
-    CommandInvocation, CompileOutcome, CompiledCapture, EnvironmentVariable, EvidenceBundle,
-    LlvmAlias, LlvmDeclaration, LlvmStage, LtoScope, ModuleEvidence, RemarkEvidence,
-    UnstableAccess, UnstableAccessMechanism, UnstableAccessScope, check_fresh, compile,
-    compile_with_events, ingest, require_compiled_evidence,
+    CommandInvocation, CompileOutcome, CompiledCapture, EnvironmentVariable, EvidenceEvent,
+    EvidenceMetadata, LlvmAlias, LlvmDeclaration, LlvmStage, LtoScope, ModuleStart,
+    RemarkFileStart, UnstableAccess, UnstableAccessMechanism, UnstableAccessScope, check_fresh,
+    compile, compile_with_events, ingest_with_events, require_compiled_evidence,
 };
 
 mod cargo_output;
@@ -25,7 +25,10 @@ mod driver;
 mod llvm;
 
 mod mono;
-pub use mono::{CodegenUnitPlacement, CompilerInstance, DefinitionOrigin, SourceSpan};
+pub use mono::{
+    CodegenUnitPlacement, CompilerInstance, CompilerManifestReader, CompilerPlacement,
+    DefinitionOrigin, SourceSpan,
+};
 
 mod request;
 pub use request::{BuildRequest, CaptureProfile, CargoTarget};
@@ -33,7 +36,7 @@ pub use request::{BuildRequest, CaptureProfile, CargoTarget};
 mod remarks;
 pub use remarks::{
     OptimizationRemark, RemarkArgument, RemarkKind, RemarkParseLimits, RemarkSourceLocation,
-    parse_optimization_remarks,
+    parse_optimization_remarks, parse_optimization_remarks_with,
 };
 
 mod toolchain;

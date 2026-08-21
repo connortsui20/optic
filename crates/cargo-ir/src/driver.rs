@@ -15,7 +15,7 @@ use crate::{Error, Result, Toolchain};
 use fs2::FileExt;
 
 const DRIVER_SOURCE: &str = include_str!("../driver/main.rs");
-const PROTOCOL_VERSION: &str = "2";
+const PROTOCOL_VERSION: &str = "3";
 
 const DRIVER_INNER_ENV: &str = "OPTIC_RUSTC_DRIVER_INNER";
 const MANIFEST_PATH_ENV: &str = "OPTIC_IDENTITY_MANIFEST";

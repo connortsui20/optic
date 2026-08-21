@@ -349,6 +349,37 @@ pub struct CompilerProvenance {
     pub llvm_dis: PathBuf,
 }
 
+/// Bounded reproducibility metadata for one immutable capture.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CaptureMetadata {
+    /// The standard capture summary.
+    pub summary: CaptureSummary,
+
+    /// The normalized product request.
+    pub request: BuildSpec,
+
+    /// The exact compiler and matching LLVM disassembler.
+    pub compiler: CompilerProvenance,
+
+    /// The bounded policy for unstable compiler access.
+    pub unstable_access: UnstableAccess,
+
+    /// The exact Cargo subprocess command.
+    pub cargo: CommandView,
+
+    /// The selected rustc command, when rustc ran.
+    pub rustc: Option<CommandView>,
+
+    /// The effective wrapper chain, from outermost to innermost.
+    pub wrapper_chain: Vec<String>,
+
+    /// Codegen-related environment inherited by Cargo.
+    pub environment: Vec<EnvironmentView>,
+
+    /// Compiler arguments injected by Optic.
+    pub injected_rustc_arguments: Vec<String>,
+}
+
 /// Reproducibility details for one immutable capture.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CaptureDetails {
@@ -589,42 +620,79 @@ pub struct LlvmBodySummary {
 
 impl LlvmBodySummary {
     pub(crate) fn from_text(text: &str) -> Self {
-        let mut summary = Self {
-            bytes: text.len(),
-            instructions: 0,
-            vector_lines: 0,
-            vector_widths: Vec::new(),
-            call_sites: CallSiteSummary::default(),
-            safety_checks: 0,
-        };
+        let mut builder = LlvmBodySummaryBuilder::new();
+        builder.push(text);
 
-        for line in text.lines().map(str::trim) {
-            let is_call_site = summary.call_sites.record_line(line);
-            if line.starts_with('%')
-                || line.starts_with("store ")
-                || is_call_site
-                || line.starts_with("ret ")
-                || line.starts_with("br ")
-                || line.starts_with("switch ")
-                || line.starts_with("unreachable")
-            {
-                summary.instructions += 1;
-            }
-            if let Some(width) = vector_width(line) {
-                summary.vector_lines += 1;
-                summary.vector_widths.push(width);
-            }
-            if line.contains("panic_bounds_check")
-                || line.contains("slice_index_fail")
-                || line.contains("begin_panic")
-            {
-                summary.safety_checks += 1;
-            }
+        builder.finish()
+    }
+}
+
+pub(crate) struct LlvmBodySummaryBuilder {
+    summary: LlvmBodySummary,
+
+    pending_line: String,
+}
+
+impl LlvmBodySummaryBuilder {
+    pub(crate) fn new() -> Self {
+        Self {
+            summary: LlvmBodySummary {
+                bytes: 0,
+                instructions: 0,
+                vector_lines: 0,
+                vector_widths: Vec::new(),
+                call_sites: CallSiteSummary::default(),
+                safety_checks: 0,
+            },
+            pending_line: String::new(),
         }
-        summary.vector_widths.sort_unstable();
-        summary.vector_widths.dedup();
+    }
 
-        summary
+    pub(crate) fn push(&mut self, text: &str) {
+        self.summary.bytes += text.len();
+        self.pending_line.push_str(text);
+
+        while let Some(newline) = self.pending_line.find('\n') {
+            let line = self.pending_line[..newline].to_owned();
+            self.record_line(&line);
+            self.pending_line.drain(..=newline);
+        }
+    }
+
+    pub(crate) fn finish(mut self) -> LlvmBodySummary {
+        if !self.pending_line.is_empty() {
+            let line = std::mem::take(&mut self.pending_line);
+            self.record_line(&line);
+        }
+        self.summary.vector_widths.sort_unstable();
+        self.summary.vector_widths.dedup();
+
+        self.summary
+    }
+
+    fn record_line(&mut self, line: &str) {
+        let line = line.trim();
+        let is_call_site = self.summary.call_sites.record_line(line);
+        if line.starts_with('%')
+            || line.starts_with("store ")
+            || is_call_site
+            || line.starts_with("ret ")
+            || line.starts_with("br ")
+            || line.starts_with("switch ")
+            || line.starts_with("unreachable")
+        {
+            self.summary.instructions += 1;
+        }
+        if let Some(width) = vector_width(line) {
+            self.summary.vector_lines += 1;
+            self.summary.vector_widths.push(width);
+        }
+        if line.contains("panic_bounds_check")
+            || line.contains("slice_index_fail")
+            || line.contains("begin_panic")
+        {
+            self.summary.safety_checks += 1;
+        }
     }
 }
 
@@ -820,30 +888,39 @@ pub struct BodySetSummary {
 }
 
 impl BodySetSummary {
+    #[cfg(test)]
     pub(crate) fn from_bodies(bodies: &[BodyView]) -> Self {
-        let mut summary = Self {
-            bodies: bodies.len(),
+        let mut summary = Self::empty();
+        for body in bodies {
+            summary.add_body(&body.summary);
+        }
+
+        summary
+    }
+
+    pub(crate) fn empty() -> Self {
+        Self {
+            bodies: 0,
             bytes: 0,
             instructions: 0,
             vector_lines: 0,
             vector_widths: Vec::new(),
             call_sites: CallSiteSummary::default(),
             safety_checks: 0,
-        };
-        for body in bodies {
-            summary.bytes += body.summary.bytes;
-            summary.instructions += body.summary.instructions;
-            summary.vector_lines += body.summary.vector_lines;
-            summary
-                .vector_widths
-                .extend(body.summary.vector_widths.iter().copied());
-            summary.call_sites.add_assign(&body.summary.call_sites);
-            summary.safety_checks += body.summary.safety_checks;
         }
-        summary.vector_widths.sort_unstable();
-        summary.vector_widths.dedup();
+    }
 
-        summary
+    pub(crate) fn add_body(&mut self, body: &LlvmBodySummary) {
+        self.bodies += 1;
+        self.bytes += body.bytes;
+        self.instructions += body.instructions;
+        self.vector_lines += body.vector_lines;
+        self.vector_widths
+            .extend(body.vector_widths.iter().copied());
+        self.vector_widths.sort_unstable();
+        self.vector_widths.dedup();
+        self.call_sites.add_assign(&body.call_sites);
+        self.safety_checks += body.safety_checks;
     }
 }
 
@@ -913,7 +990,7 @@ pub struct CompareView {
 
 #[cfg(test)]
 mod tests {
-    use super::{BodySetDelta, BodySetSummary, BodyView, LlvmBodySummary};
+    use super::{BodySetDelta, BodySetSummary, BodyView, LlvmBodySummary, LlvmBodySummaryBuilder};
     use crate::LlvmStage;
 
     fn body(text: &str) -> BodyView {
@@ -928,14 +1005,15 @@ mod tests {
 
     #[test]
     fn summarizes_vector_calls_and_safety_checks() {
-        let summary = LlvmBodySummary::from_text(concat!(
+        let text = concat!(
             "define void @kernel(ptr %callback) {\n",
             "  %values = load <4 x i32>, ptr null\n",
             "  %result = call i32 %callback(i32 1)\n",
             "  call void @panic_bounds_check()\n",
             "  ret void\n",
             "}\n",
-        ));
+        );
+        let summary = LlvmBodySummary::from_text(text);
 
         assert_eq!(summary.instructions, 4);
         assert_eq!(summary.vector_lines, 1);
@@ -944,6 +1022,24 @@ mod tests {
         assert_eq!(summary.call_sites.direct_non_intrinsic, 1);
         assert_eq!(summary.call_sites.indirect, 1);
         assert_eq!(summary.safety_checks, 1);
+    }
+
+    #[test]
+    fn streamed_summary_matches_the_complete_body() {
+        let text = concat!(
+            "define void @kernel(ptr %callback) {\n",
+            "  %vector = load <16 x i8>, ptr null\n",
+            "  call void @panic_bounds_check()\n",
+            "  ret void\n",
+            "}\n",
+        );
+        let mut builder = LlvmBodySummaryBuilder::new();
+
+        for chunk in text.as_bytes().chunks(7) {
+            builder.push(std::str::from_utf8(chunk).expect("the LLVM fixture is ASCII"));
+        }
+
+        assert_eq!(builder.finish(), LlvmBodySummary::from_text(text));
     }
 
     #[test]

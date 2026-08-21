@@ -44,8 +44,6 @@ pub(crate) struct ResumableCapture {
     pub(crate) compilation: cargo_ir::CompiledCapture,
 
     pub(crate) sources: SourceBaseline,
-
-    pub(crate) request: cargo_ir::BuildRequest,
 }
 
 impl PendingCapture {
@@ -165,7 +163,6 @@ impl PendingCapture {
             analysis_key,
             compilation: pending.compilation,
             sources,
-            request,
         })
     }
 

@@ -3,13 +3,15 @@
 //! [`compile_with_events`] uses `cargo rustc` so normal and analysis builds share dependency
 //! artifacts. [`compile`] discards its user-visible Cargo events. The selected target has a
 //! separate Cargo identity because saved compiler temporaries are part of Cargo's fingerprint.
-//! [`ingest`] reads the retained artifacts without invoking Cargo again.
+//! [`ingest_with_events`] reads the retained artifacts without invoking Cargo again.
 
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::Read;
+use std::ops::ControlFlow;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
@@ -18,16 +20,19 @@ use crate::cargo_output::{self, CargoProcessEvent};
 use crate::driver::RustcDriver;
 use crate::llvm;
 use crate::mono;
+#[cfg(test)]
+use crate::parse_optimization_remarks;
 use crate::toolchain::{CargoContext, inspect_rustc};
 use crate::{
-    BuildRequest, CaptureProfile, CargoTarget, CompilerInstance, Error, OptimizationRemark,
-    RemarkParseLimits, Result, Toolchain, parse_optimization_remarks,
+    BuildRequest, CaptureProfile, CargoTarget, CompilerPlacement, Error, OptimizationRemark,
+    RemarkParseLimits, Result, Toolchain, parse_optimization_remarks_with,
 };
 
 const REMARKS_DIRECTORY_NAME: &str = "remarks";
 const MAX_REMARK_FILES: usize = 4_096;
 const MAX_REMARK_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_REMARK_RECORDS: usize = 1_000_000;
+const MAX_DISASSEMBLER_DIAGNOSTIC_BYTES: usize = 1024 * 1024;
 
 /// The byte range of one LLVM function definition.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -135,9 +140,36 @@ pub struct ArtifactProvenance {
     pub capture_method: CaptureMethod,
 }
 
-/// One disassembled LLVM module and its body index.
+/// One raw LLVM optimization-remark file and its parsed records.
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ModuleEvidence {
+pub struct RemarkEvidence {
+    /// The normalized compiler-owned path relative to the remark directory.
+    pub name: String,
+
+    /// The compiler-owned YAML file.
+    pub raw_path: PathBuf,
+
+    /// The typed records parsed from the raw YAML document stream.
+    pub records: Vec<OptimizationRemark>,
+}
+
+/// Capture metadata that is available before evidence records are streamed.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct EvidenceMetadata {
+    /// The request and effective compiler invocation.
+    pub invocation: CaptureInvocation,
+
+    /// The exact analyzed compiler.
+    pub toolchain: Toolchain,
+
+    /// Whether the capture requested optimization remarks.
+    pub remarks_captured: bool,
+}
+
+/// Metadata for one module before its symbol records are streamed.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ModuleStart {
     /// The compiler-owned artifact file name.
     pub name: String,
 
@@ -149,28 +181,63 @@ pub struct ModuleEvidence {
 
     /// The matching textual LLVM module path.
     pub text_path: PathBuf,
-
-    /// Indexed function definitions in the textual module.
-    pub bodies: Vec<BodyRange>,
-
-    /// Indexed function declarations in the textual module.
-    pub declarations: Vec<LlvmDeclaration>,
-
-    /// Indexed aliases and their exact direct relationships.
-    pub aliases: Vec<LlvmAlias>,
 }
 
-/// One raw LLVM optimization-remark file and its parsed records.
+/// Metadata for one optimization-remark file before its records are streamed.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct RemarkEvidence {
+pub struct RemarkFileStart {
     /// The normalized compiler-owned path relative to the remark directory.
     pub name: String,
 
     /// The compiler-owned YAML file.
     pub raw_path: PathBuf,
+}
 
-    /// The typed records parsed from the raw YAML document stream.
-    pub records: Vec<OptimizationRemark>,
+/// One bounded record in a retained compiler-evidence stream.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "kind")]
+pub enum EvidenceEvent {
+    /// One rustc monomorphization placement.
+    Placement {
+        /// The placement record.
+        record: CompilerPlacement,
+    },
+
+    /// The start of one disassembled LLVM module.
+    ModuleStarted {
+        /// The module metadata.
+        module: ModuleStart,
+    },
+
+    /// One function definition range in the current module.
+    Body {
+        /// The indexed function body.
+        body: BodyRange,
+    },
+
+    /// One function declaration range in the current module.
+    Declaration {
+        /// The indexed declaration.
+        declaration: LlvmDeclaration,
+    },
+
+    /// One LLVM alias range in the current module.
+    Alias {
+        /// The indexed alias.
+        alias: LlvmAlias,
+    },
+
+    /// The start of one raw optimization-remark file.
+    RemarkFileStarted {
+        /// The remark-file metadata.
+        file: RemarkFileStart,
+    },
+
+    /// One optimization-remark document in the current file.
+    Remark {
+        /// The parsed remark.
+        remark: OptimizationRemark,
+    },
 }
 
 /// A supported stage of the LLVM compilation pipeline.
@@ -307,32 +374,13 @@ pub struct CompiledCapture {
     pub toolchain: Toolchain,
 }
 
-/// All evidence produced by one compiler invocation.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct EvidenceBundle {
-    /// The request and effective compiler invocation.
-    pub invocation: CaptureInvocation,
-
-    /// The exact analyzed compiler.
-    pub toolchain: Toolchain,
-
-    /// Concrete functions selected by rustc.
-    pub instances: Vec<CompilerInstance>,
-
-    /// Supported saved LLVM modules.
-    pub modules: Vec<ModuleEvidence>,
-
-    /// Structured LLVM optimization remarks, or `None` when they were not requested.
-    pub remarks: Option<Vec<RemarkEvidence>>,
-}
-
 /// Runs one analysis for the selected Cargo target and discards its Cargo output events.
 ///
 /// # Errors
 ///
 /// Returns an error from [`compile_with_events`].
 pub fn compile(request: &BuildRequest) -> Result<CompileOutcome> {
-    compile_with_events(request, |_| {})
+    compile_with_events(request, |_| ControlFlow::Continue(()))
 }
 
 /// Runs one analysis and reports user-visible Cargo output as it arrives.
@@ -343,7 +391,7 @@ pub fn compile(request: &BuildRequest) -> Result<CompileOutcome> {
 /// fails, Cargo exceeds an output bound, or emitted LLVM evidence cannot be read.
 pub fn compile_with_events(
     request: &BuildRequest,
-    mut on_event: impl FnMut(CargoProcessEvent),
+    mut on_event: impl FnMut(CargoProcessEvent) -> ControlFlow<()>,
 ) -> Result<CompileOutcome> {
     let cargo = CargoContext::discover(&request.workspace_root)?;
     let toolchain = inspect_rustc(&cargo)?;
@@ -434,7 +482,9 @@ pub fn check_fresh(request: &BuildRequest, expected_toolchain: &Toolchain) -> Re
         &toolchain.commit_hash,
     );
     command.env(FRESHNESS_CHECK_ENV, "1");
-    let output = cargo_output::run(&mut command, "cargo rustc freshness check", &mut |_| {})?;
+    let output = cargo_output::run(&mut command, "cargo rustc freshness check", &mut |_| {
+        ControlFlow::Continue(())
+    })?;
     if !output.status().success() {
         let diagnostics = output.diagnostics();
         if diagnostics.contains(FRESHNESS_STALE_DIAGNOSTIC) {
@@ -465,35 +515,50 @@ pub fn require_compiled_evidence(request: &BuildRequest) -> Result<()> {
     Ok(())
 }
 
-/// Reads retained compiler artifacts without invoking Cargo.
+/// Streams retained compiler evidence without invoking Cargo again.
+///
+/// The callback runs on the calling thread. Each event owns at most one bounded evidence record.
 ///
 /// # Errors
 ///
-/// Returns an error if the manifest, LLVM bitcode, or textual LLVM output is invalid.
-pub fn ingest(request: &BuildRequest, mut compilation: CompiledCapture) -> Result<EvidenceBundle> {
+/// Returns an error if the manifest, LLVM bitcode, textual LLVM output, or remarks are invalid.
+pub fn ingest_with_events(
+    request: &BuildRequest,
+    mut compilation: CompiledCapture,
+    mut on_event: impl FnMut(EvidenceEvent),
+) -> Result<EvidenceMetadata> {
     require_compiled_evidence(request)?;
     compilation.invocation.request = request.clone();
     let manifest_path = request.analysis_directory.join(mono::MANIFEST_NAME);
-    let compiler_manifest = mono::read(&manifest_path, &compilation.toolchain.commit_hash)?;
-    compilation.invocation.rustc = Some(compiler_invocation(&compiler_manifest.rustc_arguments)?);
-    let modules = supported_bitcode(&request.analysis_directory)?
-        .into_iter()
-        .map(|artifact| {
-            disassemble(
-                &compilation.toolchain,
-                artifact,
-                &request.analysis_directory,
-            )
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let remarks = requested_remarks(request)?;
+    let mut manifest =
+        mono::CompilerManifestReader::open(&manifest_path, &compilation.toolchain.commit_hash)?;
+    compilation.invocation.rustc = Some(compiler_invocation(manifest.rustc_arguments())?);
 
-    Ok(EvidenceBundle {
+    while let Some(record) = manifest.next_placement()? {
+        on_event(EvidenceEvent::Placement { record });
+    }
+
+    for artifact in supported_bitcode(&request.analysis_directory)? {
+        disassemble_with_events(
+            &compilation.toolchain,
+            artifact,
+            &request.analysis_directory,
+            &mut on_event,
+        )?;
+    }
+
+    if request.capture_remarks {
+        stream_remarks(
+            &remarks_directory(&request.analysis_directory),
+            RemarkCollectionLimits::default(),
+            &mut on_event,
+        )?;
+    }
+
+    Ok(EvidenceMetadata {
         invocation: compilation.invocation,
         toolchain: compilation.toolchain,
-        instances: compiler_manifest.instances,
-        modules,
-        remarks,
+        remarks_captured: request.capture_remarks,
     })
 }
 
@@ -721,10 +786,12 @@ impl Default for RemarkCollectionLimits {
     }
 }
 
+#[cfg(test)]
 fn collect_remarks(directory: &Path) -> Result<Vec<RemarkEvidence>> {
     collect_remarks_with_limits(directory, RemarkCollectionLimits::default())
 }
 
+#[cfg(test)]
 fn requested_remarks(request: &BuildRequest) -> Result<Option<Vec<RemarkEvidence>>> {
     request
         .capture_remarks
@@ -732,10 +799,57 @@ fn requested_remarks(request: &BuildRequest) -> Result<Option<Vec<RemarkEvidence
         .transpose()
 }
 
+#[cfg(test)]
 fn collect_remarks_with_limits(
     directory: &Path,
     limits: RemarkCollectionLimits,
 ) -> Result<Vec<RemarkEvidence>> {
+    let paths = remark_paths(directory, limits)?;
+    let mut evidence = Vec::with_capacity(paths.len());
+    let mut total_records = 0_usize;
+
+    for raw_path in paths {
+        let name = normalized_remark_name(directory, &raw_path)?;
+        let records = parse_optimization_remarks(&raw_path, limits.parse)?;
+        total_records = total_records.saturating_add(records.len());
+        validate_remark_record_count(directory, limits, total_records)?;
+        evidence.push(RemarkEvidence {
+            name,
+            raw_path,
+            records,
+        });
+    }
+
+    Ok(evidence)
+}
+
+fn stream_remarks(
+    directory: &Path,
+    limits: RemarkCollectionLimits,
+    on_event: &mut impl FnMut(EvidenceEvent),
+) -> Result<()> {
+    let paths = remark_paths(directory, limits)?;
+    let mut total_records = 0_usize;
+
+    for raw_path in paths {
+        let name = normalized_remark_name(directory, &raw_path)?;
+        on_event(EvidenceEvent::RemarkFileStarted {
+            file: RemarkFileStart {
+                name,
+                raw_path: raw_path.clone(),
+            },
+        });
+        parse_optimization_remarks_with(&raw_path, limits.parse, |remark| {
+            total_records = total_records.saturating_add(1);
+            on_event(EvidenceEvent::Remark { remark });
+        })?;
+        validate_remark_record_count(directory, limits, total_records)?;
+    }
+
+    Ok(())
+}
+
+fn remark_paths(directory: &Path, limits: RemarkCollectionLimits) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     let mut total_bytes = 0_u64;
 
@@ -783,31 +897,26 @@ fn collect_remarks_with_limits(
     }
 
     paths.sort();
-    let mut evidence = Vec::with_capacity(paths.len());
-    let mut total_records = 0_usize;
 
-    for raw_path in paths {
-        let name = normalized_remark_name(directory, &raw_path)?;
-        let records = parse_optimization_remarks(&raw_path, limits.parse)?;
-        total_records = total_records.saturating_add(records.len());
-        if total_records > limits.max_records {
-            return Err(invalid_remark_collection(
-                directory,
-                format!(
-                    "aggregate record count exceeds {}, got {total_records}",
-                    limits.max_records
-                ),
-            ));
-        }
+    Ok(paths)
+}
 
-        evidence.push(RemarkEvidence {
-            name,
-            raw_path,
-            records,
-        });
+fn validate_remark_record_count(
+    directory: &Path,
+    limits: RemarkCollectionLimits,
+    total_records: usize,
+) -> Result<()> {
+    if total_records > limits.max_records {
+        return Err(invalid_remark_collection(
+            directory,
+            format!(
+                "aggregate record count exceeds {}, got {total_records}",
+                limits.max_records
+            ),
+        ));
     }
 
-    Ok(evidence)
+    Ok(())
 }
 
 fn normalized_remark_name(directory: &Path, path: &Path) -> Result<String> {
@@ -941,11 +1050,31 @@ fn codegen_unit(name: &str, compiler_stage: &str) -> Option<String> {
     Some(codegen_unit.to_owned())
 }
 
-fn disassemble(
+fn disassemble_with_events(
     toolchain: &Toolchain,
     artifact: BitcodeArtifact,
     analysis_directory: &Path,
-) -> Result<ModuleEvidence> {
+    on_event: &mut impl FnMut(EvidenceEvent),
+) -> Result<()> {
+    let module = disassemble_module(toolchain, artifact, analysis_directory)?;
+    let text_path = module.text_path.clone();
+    on_event(EvidenceEvent::ModuleStarted { module });
+    llvm::scan_with(&text_path, |record| {
+        on_event(match record {
+            llvm::ModuleRecord::Body(body) => EvidenceEvent::Body { body },
+            llvm::ModuleRecord::Declaration(declaration) => {
+                EvidenceEvent::Declaration { declaration }
+            }
+            llvm::ModuleRecord::Alias(alias) => EvidenceEvent::Alias { alias },
+        });
+    })
+}
+
+fn disassemble_module(
+    toolchain: &Toolchain,
+    artifact: BitcodeArtifact,
+    analysis_directory: &Path,
+) -> Result<ModuleStart> {
     let BitcodeArtifact {
         path: bitcode_path,
         provenance,
@@ -957,35 +1086,73 @@ fn disassemble(
     let mut text_name = file_name.to_owned();
     text_name.push(".ll");
     let text_path = analysis_directory.join(text_name);
-    let output = Command::new(&toolchain.llvm_dis)
-        .arg("-o")
-        .arg(&text_path)
-        .arg(&bitcode_path)
-        .output()
-        .map_err(|source| Error::StartProcess {
-            program: toolchain.llvm_dis.display().to_string(),
-            source,
-        })?;
-
-    if !output.status.success() {
+    let (status, diagnostics) = run_disassembler(toolchain, &bitcode_path, &text_path)?;
+    if !status.success() {
         return Err(Error::ProcessFailed {
             program: toolchain.llvm_dis.display().to_string(),
-            status: output.status.to_string(),
-            diagnostics: String::from_utf8_lossy(&output.stderr).into_owned(),
+            status: status.to_string(),
+            diagnostics: String::from_utf8_lossy(&diagnostics).into_owned(),
         });
     }
 
-    let index = llvm::scan(&text_path)?;
-
-    Ok(ModuleEvidence {
+    Ok(ModuleStart {
         name,
         provenance,
         bitcode_path,
         text_path,
-        bodies: index.bodies,
-        declarations: index.declarations,
-        aliases: index.aliases,
     })
+}
+
+fn run_disassembler(
+    toolchain: &Toolchain,
+    bitcode_path: &Path,
+    text_path: &Path,
+) -> Result<(std::process::ExitStatus, Vec<u8>)> {
+    let mut child = Command::new(&toolchain.llvm_dis)
+        .arg("-o")
+        .arg(text_path)
+        .arg(bitcode_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|source| Error::StartProcess {
+            program: toolchain.llvm_dis.display().to_string(),
+            source,
+        })?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .expect("llvm-dis stderr was configured as a pipe before the child started");
+    let mut diagnostics = Vec::new();
+    let mut buffer = [0_u8; 8 * 1024];
+
+    loop {
+        let bytes = stderr
+            .read(&mut buffer)
+            .map_err(|source| Error::Filesystem {
+                operation: "read diagnostics from",
+                path: toolchain.llvm_dis.clone(),
+                source,
+            })?;
+        if bytes == 0 {
+            break;
+        }
+
+        diagnostics.extend_from_slice(&buffer[..bytes]);
+        let excess = diagnostics
+            .len()
+            .saturating_sub(MAX_DISASSEMBLER_DIAGNOSTIC_BYTES);
+        if excess != 0 {
+            diagnostics.drain(..excess);
+        }
+    }
+    let status = child.wait().map_err(|source| Error::Filesystem {
+        operation: "wait for",
+        path: toolchain.llvm_dis.clone(),
+        source,
+    })?;
+
+    Ok((status, diagnostics))
 }
 
 #[cfg(test)]

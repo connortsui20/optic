@@ -6,6 +6,7 @@
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use cargo_ir::BuildRequest;
@@ -19,9 +20,10 @@ use crate::store::{
 };
 use crate::{
     BodySetDelta, BodySetSummary, BuildSpec, CachePolicy, CaptureDetails, CaptureDisposition,
-    CaptureId, CaptureSummary, CleanSummary, CompareView, CompilerOutput, FindOptions, FindResult,
-    GcSummary, InstanceId, RemarkOptions, RemarkShowView, RemoveSummary, Result, ShowView,
-    StoreStatus, VerifySummary,
+    CaptureEvent, CaptureId, CapturePhase, CaptureSummary, CleanSummary, CompareView,
+    CompilerOutput, FindOptions, FindResult, GcSummary, InspectEvent, InspectSummary, InstanceId,
+    RemarkOptions, RemarkShowView, RemoveSummary, Result, ShowEvent, ShowSummary, ShowView,
+    StoreStatus, StreamCount, VerifySummary,
 };
 
 const EVIDENCE_VERSION: u32 = 5;
@@ -85,7 +87,7 @@ impl Application {
         spec: &BuildSpec,
         cache_policy: CachePolicy,
     ) -> Result<CaptureSummary> {
-        self.capture_with_events(spec, cache_policy, |_| {})
+        self.capture_with_events(spec, cache_policy, |_| ControlFlow::Continue(()))
     }
 
     /// Captures or reuses evidence and reports user-visible Cargo output as it arrives.
@@ -100,7 +102,7 @@ impl Application {
         &mut self,
         spec: &BuildSpec,
         cache_policy: CachePolicy,
-        mut on_event: impl FnMut(cargo_ir::CargoProcessEvent),
+        mut on_event: impl FnMut(CaptureEvent) -> ControlFlow<()>,
     ) -> Result<CaptureSummary> {
         if spec.capture_profile != crate::CaptureProfile::Experiment
             && !spec.rustc_arguments.is_empty()
@@ -132,6 +134,7 @@ impl Application {
                         &pending_directory,
                         pending,
                         CaptureDisposition::Resumed,
+                        &mut on_event,
                     );
                 }
                 Err(crate::Error::InputChanged { .. } | crate::Error::PendingInputsChanged) => {
@@ -154,9 +157,32 @@ impl Application {
         let analysis_directory = run_directory.join("analysis");
         fs::create_dir_all(&staging)
             .map_err(|source| crate::Error::filesystem("create", &staging, source))?;
+        emit_discardable_capture_event(
+            &mut on_event,
+            CaptureEvent::PhaseStarted(CapturePhase::Source),
+            &pending_directory,
+        )?;
         let sources = SourceBaseline::capture(&self.workspace_root, spec, &staging)?;
+        emit_discardable_capture_event(
+            &mut on_event,
+            CaptureEvent::PhaseFinished(CapturePhase::Source),
+            &pending_directory,
+        )?;
         let request = self.build_request(spec, analysis_directory.clone());
-        let outcome = cargo_ir::compile_with_events(&request, &mut on_event);
+        emit_discardable_capture_event(
+            &mut on_event,
+            CaptureEvent::PhaseStarted(CapturePhase::Compile),
+            &pending_directory,
+        )?;
+        let outcome =
+            cargo_ir::compile_with_events(&request, |event| on_event(CaptureEvent::Cargo(event)));
+        if !matches!(outcome, Err(cargo_ir::Error::ConsumerStopped)) {
+            emit_discardable_capture_event(
+                &mut on_event,
+                CaptureEvent::PhaseFinished(CapturePhase::Compile),
+                &pending_directory,
+            )?;
+        }
         match outcome {
             Ok(cargo_ir::CompileOutcome::Compiled { compilation }) => {
                 sources.validate()?;
@@ -186,6 +212,7 @@ impl Application {
                     &pending_directory,
                     pending,
                     CaptureDisposition::Captured,
+                    &mut on_event,
                 )
             }
             Ok(cargo_ir::CompileOutcome::Fresh { .. }) => {
@@ -200,8 +227,11 @@ impl Application {
             }
             Err(error) => {
                 remove_pending(&pending_directory)?;
-
-                Err(error.into())
+                if matches!(error, cargo_ir::Error::ConsumerStopped) {
+                    Err(crate::Error::ConsumerStopped)
+                } else {
+                    Err(error.into())
+                }
             }
         }
     }
@@ -213,6 +243,7 @@ impl Application {
         pending_directory: &Path,
         pending: ResumableCapture,
         disposition: CaptureDisposition,
+        on_event: &mut impl FnMut(CaptureEvent) -> ControlFlow<()>,
     ) -> Result<CaptureSummary> {
         if let Some(summary) = self.store.completed_capture(
             &pending.capture_id,
@@ -225,17 +256,21 @@ impl Application {
             return Ok(summary);
         }
 
-        let bundle = cargo_ir::ingest(&pending.request, pending.compilation)?;
-        let mut summary = self.store.publish(
+        let target = selected_target(spec, &pending.compilation.toolchain.host).to_owned();
+        emit_capture_event(on_event, CaptureEvent::PhaseStarted(CapturePhase::Ingest))?;
+        let mut summary = self.store.publish_stream(
             &pending.capture_id,
             CaptureCacheKey::new(request_key, &pending.analysis_key),
             spec,
-            &bundle,
+            pending.compilation,
             &pending.sources,
-            selected_target(spec, &bundle.toolchain.host),
+            &target,
         )?;
+        let finish =
+            emit_capture_event(on_event, CaptureEvent::PhaseFinished(CapturePhase::Ingest));
         summary.disposition = disposition;
         remove_pending(pending_directory)?;
+        finish?;
 
         Ok(summary)
     }
@@ -247,6 +282,20 @@ impl Application {
     /// Returns an error if the evidence catalog cannot be read.
     pub fn captures(&self) -> Result<Vec<CaptureSummary>> {
         self.store.captures()
+    }
+
+    /// Streams completed captures from newest to oldest.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the catalog is invalid or the consumer stops.
+    pub fn captures_with_events(
+        &self,
+        mut on_capture: impl FnMut(CaptureSummary) -> std::ops::ControlFlow<()>,
+    ) -> Result<StreamCount> {
+        let items = self.store.stream_captures(&mut on_capture)?;
+
+        Ok(StreamCount { items })
     }
 
     /// Returns the size and object counts for this workspace's evidence store.
@@ -302,6 +351,45 @@ impl Application {
         self.store.capture_details(capture_id)
     }
 
+    /// Streams reproducibility metadata and artifact provenance for one completed capture.
+    ///
+    /// The callback runs on the calling thread. Returning [`ControlFlow::Break`] stops the read.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the capture selector or stored metadata is invalid, or the consumer
+    /// stops.
+    pub fn inspect_with_events(
+        &self,
+        capture_id: &CaptureId,
+        mut on_event: impl FnMut(InspectEvent) -> ControlFlow<()>,
+    ) -> Result<InspectSummary> {
+        let metadata = self.store.capture_metadata(capture_id)?;
+        let resolved_id = metadata.summary.id.clone();
+        emit_inspect_event(
+            &mut on_event,
+            InspectEvent::Started {
+                metadata: Box::new(metadata.clone()),
+            },
+        )?;
+        let artifacts = self
+            .store
+            .stream_capture_artifacts(&resolved_id, &mut |artifact| {
+                on_event(InspectEvent::Artifact { artifact })
+            })?;
+        let remark_files = self
+            .store
+            .stream_capture_remark_files(&resolved_id, &mut |remark_file| {
+                on_event(InspectEvent::RemarkFile { remark_file })
+            })?;
+
+        Ok(InspectSummary {
+            capture_id: resolved_id,
+            artifacts,
+            remark_files,
+        })
+    }
+
     /// Finds concrete instances in one completed capture.
     ///
     /// # Errors
@@ -349,6 +437,47 @@ impl Application {
         Ok(view)
     }
 
+    /// Streams one compiler output and optional captured source for one instance.
+    ///
+    /// The callback runs on the calling thread. Returning [`std::ops::ControlFlow::Break`] stops
+    /// the read.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the instance or stored evidence is invalid, or the consumer stops.
+    pub fn show_with_events(
+        &self,
+        instance_id: &InstanceId,
+        output: CompilerOutput,
+        include_source: bool,
+        mut on_event: impl FnMut(ShowEvent) -> std::ops::ControlFlow<()>,
+    ) -> Result<ShowSummary> {
+        let _reader = self.store.lock_evidence_reader()?;
+        let show = self.store.prepare_show(instance_id, output)?;
+        emit_show_event(
+            &mut on_event,
+            ShowEvent::Started {
+                capture_id: show.capture_id.clone(),
+                instance: show.instance.clone(),
+                output,
+            },
+        )?;
+        let has_source = if include_source {
+            self.store.stream_show_source(&show, &mut on_event)?
+        } else {
+            false
+        };
+        let bodies = self.store.stream_show_bodies(&show, &mut on_event)?;
+
+        Ok(ShowSummary {
+            capture_id: show.capture_id,
+            instance: show.instance,
+            output,
+            bodies,
+            source: has_source,
+        })
+    }
+
     /// Loads optimization remarks and optional captured source for one instance.
     ///
     /// # Errors
@@ -388,10 +517,10 @@ impl Application {
         after: &InstanceId,
         output: CompilerOutput,
     ) -> Result<CompareView> {
-        let before_view = self.show(before, output, false)?;
-        let after_view = self.show(after, output, false)?;
-        let before_capture = self.store.capture_details(&before_view.capture_id)?;
-        let after_capture = self.store.capture_details(&after_view.capture_id)?;
+        let (before_result, before_summary) = self.summarize_instance(before, output)?;
+        let (after_result, after_summary) = self.summarize_instance(after, output)?;
+        let before_capture = self.store.capture_details(&before_result.capture_id)?;
+        let after_capture = self.store.capture_details(&after_result.capture_id)?;
         let mut compatibility_differences = Vec::new();
 
         if before_capture.summary.rustc_release != after_capture.summary.rustc_release {
@@ -431,19 +560,34 @@ impl Application {
             compatibility_differences.push("rustc arguments".to_owned());
         }
 
-        let before_summary = BodySetSummary::from_bodies(&before_view.bodies);
-        let after_summary = BodySetSummary::from_bodies(&after_view.bodies);
         let delta = BodySetDelta::between(&before_summary, &after_summary);
 
         Ok(CompareView {
             output,
-            before_instance: before_view.instance,
-            after_instance: after_view.instance,
+            before_instance: before_result.instance,
+            after_instance: after_result.instance,
             compatibility_differences,
             before: before_summary,
             after: after_summary,
             delta,
         })
+    }
+
+    fn summarize_instance(
+        &self,
+        instance_id: &InstanceId,
+        output: CompilerOutput,
+    ) -> Result<(ShowSummary, BodySetSummary)> {
+        let mut body_set = BodySetSummary::empty();
+        let result = self.show_with_events(instance_id, output, false, |event| {
+            if let ShowEvent::BodyFinished { summary } = event {
+                body_set.add_body(&summary);
+            }
+
+            std::ops::ControlFlow::Continue(())
+        })?;
+
+        Ok((result, body_set))
     }
 
     fn build_request(&self, spec: &BuildSpec, analysis_directory: PathBuf) -> BuildRequest {
@@ -478,6 +622,53 @@ impl Application {
             analysis_directory,
         }
     }
+}
+
+fn emit_show_event(
+    on_event: &mut impl FnMut(ShowEvent) -> std::ops::ControlFlow<()>,
+    event: ShowEvent,
+) -> Result<()> {
+    if on_event(event).is_break() {
+        return Err(crate::Error::ConsumerStopped);
+    }
+
+    Ok(())
+}
+
+fn emit_capture_event(
+    on_event: &mut impl FnMut(CaptureEvent) -> ControlFlow<()>,
+    event: CaptureEvent,
+) -> Result<()> {
+    if on_event(event).is_break() {
+        return Err(crate::Error::ConsumerStopped);
+    }
+
+    Ok(())
+}
+
+fn emit_discardable_capture_event(
+    on_event: &mut impl FnMut(CaptureEvent) -> ControlFlow<()>,
+    event: CaptureEvent,
+    pending_directory: &Path,
+) -> Result<()> {
+    if let Err(error) = emit_capture_event(on_event, event) {
+        remove_pending(pending_directory)?;
+
+        return Err(error);
+    }
+
+    Ok(())
+}
+
+fn emit_inspect_event(
+    on_event: &mut impl FnMut(InspectEvent) -> ControlFlow<()>,
+    event: InspectEvent,
+) -> Result<()> {
+    if on_event(event).is_break() {
+        return Err(crate::Error::ConsumerStopped);
+    }
+
+    Ok(())
 }
 
 pub(crate) fn validate_remark_options(options: &RemarkOptions) -> Result<()> {

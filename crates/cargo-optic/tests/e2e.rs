@@ -24,7 +24,7 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         "optic-mvp-app",
         "--release",
         "--format",
-        "json",
+        "jsonl",
     ];
     let first = fixture
         .command(capture_arguments)
@@ -60,7 +60,7 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         "optic-mvp-app",
         "--release",
         "--format",
-        "json",
+        "jsonl",
     ]);
     assert_success(&changed);
     let changed = json(&changed);
@@ -77,7 +77,7 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         "--release",
         "--fresh",
         "--format",
-        "json",
+        "jsonl",
     ]);
     assert_success(&refreshed);
     let refreshed = json(&refreshed);
@@ -101,7 +101,7 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         "--capture",
         capture_prefix,
         "--format",
-        "json",
+        "jsonl",
     ]);
     assert_eq!(ambiguous.status.code(), Some(2));
     let ambiguous = json(&ambiguous);
@@ -134,7 +134,7 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         capture_prefix,
         "optic_mvp_kernel::outlined_sum",
         "--format",
-        "json",
+        "jsonl",
     ]);
     assert_success(&found);
     let found = json(&found);
@@ -164,7 +164,7 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         capture_prefix,
         "optic_mvp_kernel::ReexportedKernel::identity",
         "--format",
-        "json",
+        "jsonl",
     ]);
     assert_success(&reexported);
     let reexported = json(&reexported);
@@ -191,7 +191,7 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         "--limit",
         "1",
         "--format",
-        "json",
+        "jsonl",
     ]);
     assert_success(&filtered);
     let filtered = json(&filtered);
@@ -211,7 +211,7 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         "--limit",
         "1",
         "--format",
-        "json",
+        "jsonl",
     ]);
     assert_success(&limited);
     let limited = json(&limited);
@@ -231,7 +231,7 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         capture_prefix,
         "zz",
         "--format",
-        "json",
+        "jsonl",
     ]);
     assert!(!short_substring.status.success());
     assert!(
@@ -245,7 +245,7 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         capture_prefix,
         "optic_mvp_kernel::GenericKernel",
         "--format",
-        "json",
+        "jsonl",
     ]);
     assert_success(&generic_method);
     let generic_method = json(&generic_method);
@@ -266,9 +266,10 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         generic_method_id,
         "--source",
         "--format",
-        "json",
+        "jsonl",
     ]);
     assert_success(&generic_source);
+    assert_jsonl_stream(&generic_source);
     let generic_source = json(&generic_source);
     assert!(string(&generic_source, "/result/source/text").contains("pub fn new(value: T)"));
 
@@ -278,7 +279,7 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         capture_prefix,
         "inline_add_one::chunk",
         "--format",
-        "json",
+        "jsonl",
     ]);
     assert_success(&nested);
     let nested = json(&nested);
@@ -302,7 +303,7 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         nested_id,
         "--source",
         "--format",
-        "json",
+        "jsonl",
     ]);
     assert_success(&nested_source);
     let nested_source = json(&nested_source);
@@ -323,6 +324,13 @@ fn captures_finds_and_shows_concrete_generic_instances() {
                 .is_some_and(|name| name.contains("u64"))
         })
         .expect("the fixture creates a u64 instance");
+    let optimized_availability = instance["availability"]
+        .as_array()
+        .expect("the instance reports output availability")
+        .iter()
+        .find(|availability| availability["output"] == "llvm")
+        .expect("optimized LLVM availability is present");
+    assert_eq!(optimized_availability["definitions"], 1);
     let instance = instance["id"].as_str().expect("instances have string IDs");
     let instance_prefix = shortest_unique_prefix(instance, &instance_id_refs);
     let instance_display = displayed_id(instance, &instance_id_refs);
@@ -374,7 +382,7 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         "--instance",
         instance_prefix,
         "--format",
-        "json",
+        "jsonl",
         "--color",
         "always",
     ]);
@@ -388,7 +396,7 @@ fn captures_finds_and_shows_concrete_generic_instances() {
     let bodies = shown["result"]["bodies"]
         .as_array()
         .expect("show returns a body array");
-    assert!(!bodies.is_empty());
+    assert_eq!(bodies.len(), 1);
     assert!(bodies.iter().all(|body| body["stage"] == "llvm-optimized"));
     assert!(bodies.iter().all(|body| {
         body["text"]
@@ -402,15 +410,17 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         "--output",
         "llvm-pre-opt",
         "--format",
-        "json",
+        "jsonl",
     ]);
     assert_success(&pre_optimization);
     let pre_optimization = json(&pre_optimization);
     assert_eq!(pre_optimization["result"]["output"], "llvm-pre-opt");
+    let pre_optimization_bodies = pre_optimization["result"]["bodies"]
+        .as_array()
+        .expect("show returns a body array");
+    assert_eq!(pre_optimization_bodies.len(), 1);
     assert!(
-        pre_optimization["result"]["bodies"]
-            .as_array()
-            .expect("show returns a body array")
+        pre_optimization_bodies
             .iter()
             .all(|body| body["stage"] == "llvm-pre-optimization")
     );
@@ -421,7 +431,7 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         instance_prefix,
         "--source",
         "--format",
-        "json",
+        "jsonl",
     ]);
     assert_success(&with_source);
     let with_source = json(&with_source);
@@ -436,7 +446,7 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         "--instance",
         instance_prefix,
         "--format",
-        "json",
+        "jsonl",
     ]);
     assert!(!redundant_capture.status.success());
     assert!(
@@ -444,11 +454,11 @@ fn captures_finds_and_shows_concrete_generic_instances() {
             .contains("--instance cannot be combined with --capture")
     );
 
-    let failed = fixture.run(["capture", "-p", "missing-package", "--format", "json"]);
+    let failed = fixture.run(["capture", "-p", "missing-package", "--format", "jsonl"]);
     assert!(!failed.status.success());
     assert_eq!(json(&failed)["error"]["code"], "operation_failed");
 
-    let captures = fixture.run(["captures", "--format", "json"]);
+    let captures = fixture.run(["captures", "--format", "jsonl"]);
     assert_success(&captures);
     assert_eq!(
         json(&captures)["result"]
@@ -458,7 +468,7 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         3
     );
 
-    let details = fixture.run(["inspect", "--capture", capture, "--format", "json"]);
+    let details = fixture.run(["inspect", "--capture", capture, "--format", "jsonl"]);
     assert_success(&details);
     let details = json(&details);
     let compiler = cargo_ir::inspect_workspace_toolchain(&fixture.root)
@@ -520,7 +530,7 @@ fn captures_finds_and_shows_concrete_generic_instances() {
     ));
 
     let comparison = fixture.run([
-        "compare", "--before", instance, "--after", instance, "--format", "json",
+        "compare", "--before", instance, "--after", instance, "--format", "jsonl",
     ]);
     assert_success(&comparison);
     let comparison = json(&comparison);
@@ -532,10 +542,10 @@ fn captures_finds_and_shows_concrete_generic_instances() {
             .is_empty()
     );
 
-    let status = fixture.run(["status", "--format", "json"]);
+    let status = fixture.run(["status", "--format", "jsonl"]);
     assert_success(&status);
     assert_eq!(json(&status)["result"]["captures"], 3);
-    let verify = fixture.run(["verify", "--format", "json"]);
+    let verify = fixture.run(["verify", "--format", "jsonl"]);
     assert_success(&verify);
     assert!(
         json(&verify)["result"]["verified_blobs"]
@@ -543,12 +553,12 @@ fn captures_finds_and_shows_concrete_generic_instances() {
             .is_some_and(|count| count > 0)
     );
 
-    let removed = fixture.run(["remove", "--capture", first_capture, "--format", "json"]);
+    let removed = fixture.run(["remove", "--capture", first_capture, "--format", "jsonl"]);
     assert_success(&removed);
     assert_eq!(json(&removed)["result"]["capture_id"], first_capture);
-    let gc = fixture.run(["gc", "--format", "json"]);
+    let gc = fixture.run(["gc", "--format", "jsonl"]);
     assert_success(&gc);
-    let status = fixture.run(["status", "--format", "json"]);
+    let status = fixture.run(["status", "--format", "jsonl"]);
     assert_success(&status);
     assert_eq!(json(&status)["result"]["captures"], 2);
     assert!(fixture.work_is_empty());
@@ -568,7 +578,7 @@ fn captures_finds_and_shows_concrete_generic_instances() {
         .expect("the test can create an unsupported store version");
     drop(connection);
 
-    let clean = fixture.run(["clean", "--format", "json"]);
+    let clean = fixture.run(["clean", "--format", "jsonl"]);
     assert_success(&clean);
     assert_eq!(json(&clean)["result"]["removed"], true);
     assert_eq!(
@@ -587,7 +597,7 @@ fn captures_finds_and_shows_concrete_generic_instances() {
     );
     assert!(fixture.root.join("target").is_dir());
 
-    let clean_again = fixture.run(["clean", "--format", "json"]);
+    let clean_again = fixture.run(["clean", "--format", "jsonl"]);
     assert_success(&clean_again);
     assert_eq!(json(&clean_again)["result"]["removed"], false);
 }
@@ -609,7 +619,7 @@ fn captures_and_reports_optimization_remark_state() {
         "--limit",
         "1",
         "--format",
-        "json",
+        "jsonl",
     ]);
     assert_success(&shown);
     let shown = json(&shown);
@@ -636,7 +646,7 @@ fn captures_and_reports_optimization_remark_state() {
         "--limit",
         "1",
         "--format",
-        "json",
+        "jsonl",
     ]);
     assert_success(&stored);
     let stored = json(&stored);
@@ -649,7 +659,7 @@ fn captures_and_reports_optimization_remark_state() {
         .expect("the test can recount captures");
     assert_eq!(captures_after, captures_before);
 
-    let inspected = fixture.run(["inspect", "--capture", capture_id, "--format", "json"]);
+    let inspected = fixture.run(["inspect", "--capture", capture_id, "--format", "jsonl"]);
     assert_success(&inspected);
     assert!(json(&inspected)["result"]["remark_files"].is_array());
 }
@@ -670,10 +680,16 @@ fn invalid_remark_filters_do_not_capture() {
         "--pass",
         "",
         "--format",
-        "json",
+        "jsonl",
     ]);
 
     assert!(!rejected.status.success());
+    assert_eq!(
+        jsonl_events(&rejected)
+            .last()
+            .expect("the rejected show has a terminal event")["command"],
+        "show"
+    );
     assert!(
         string(&json(&rejected), "/error/message")
             .contains("remark pass must not be empty, got an empty pass")
@@ -697,7 +713,7 @@ fn resumes_retained_ingestion_before_cargo_even_with_fresh() {
     let failed = fixture.run(capture_fresh_arguments());
     assert!(!failed.status.success());
     assert!(string(&json(&failed), "/error/message").contains("test capture publication failure"));
-    let retained = json(&fixture.run(["status", "--format", "json"]));
+    let retained = json(&fixture.run(["status", "--format", "jsonl"]));
     assert_eq!(retained["result"]["pending"], 1);
     catalog
         .execute("DROP TRIGGER fail_capture_publication", [])
@@ -706,7 +722,7 @@ fn resumes_retained_ingestion_before_cargo_even_with_fresh() {
     let resumed = fixture.run(capture_fresh_arguments());
     assert_success(&resumed);
     assert_eq!(json(&resumed)["result"]["disposition"], "resumed");
-    let completed = json(&fixture.run(["status", "--format", "json"]));
+    let completed = json(&fixture.run(["status", "--format", "jsonl"]));
     assert_eq!(completed["result"]["pending"], 0);
 }
 
@@ -741,7 +757,7 @@ fn cargo_observed_reuse_tracks_non_rust_and_environment_inputs() {
         "optic-mvp-app",
         "--release",
         "--format",
-        "json",
+        "jsonl",
     ];
     let first = fixture.run(arguments);
     assert_success(&first);
@@ -775,10 +791,10 @@ fn cargo_observed_reuse_tracks_non_rust_and_environment_inputs() {
 }
 
 #[test]
-fn malformed_arguments_use_the_json_error_contract() {
+fn malformed_arguments_use_the_json_lines_error_contract() {
     for format in [
-        ["--format", "json"].as_slice(),
-        ["--format=json"].as_slice(),
+        ["--format", "jsonl"].as_slice(),
+        ["--format=jsonl"].as_slice(),
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_cargo-optic"))
             .arg("optic")
@@ -790,7 +806,7 @@ fn malformed_arguments_use_the_json_error_contract() {
         assert_eq!(output.status.code(), Some(2));
         assert!(output.stderr.is_empty());
         let output = json(&output);
-        assert_eq!(output["version"], 3);
+        assert_eq!(output["version"], 1);
         assert_eq!(output["ok"], false);
         assert_eq!(output["error"]["code"], "invalid_arguments");
     }
@@ -807,14 +823,98 @@ fn rustc_arguments_require_the_experiment_profile() {
         "optic-mvp-app",
         "--rustc-arg=-Ctarget-cpu=native",
         "--format",
-        "json",
+        "jsonl",
     ]);
 
     assert!(!output.status.success());
+    assert_eq!(
+        jsonl_events(&output)
+            .last()
+            .expect("the rejected capture has a terminal event")["command"],
+        "capture"
+    );
     assert!(
         string(&json(&output), "/error/message")
             .contains("--rustc-arg requires --evidence-profile experiment")
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn closed_json_lines_output_stops_an_active_capture() {
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    let fixture = Fixture::new();
+    let wrapper = fixture.root.join("slow-wrapper.sh");
+    fs::write(
+        &wrapper,
+        concat!(
+            "#!/bin/sh\n",
+            "crate=\n",
+            "previous=\n",
+            "for argument do\n",
+            "  if [ \"$previous\" = --crate-name ]; then crate=$argument; break; fi\n",
+            "  previous=$argument\n",
+            "done\n",
+            "if [ \"$crate\" != optic_mvp_app ]; then exec \"$@\"; fi\n",
+            "iteration=0\n",
+            "while [ $iteration -lt 100 ]; do\n",
+            "  printf 'slow wrapper is active\\n' >&2\n",
+            "  sleep 0.1\n",
+            "  iteration=$((iteration + 1))\n",
+            "done\n",
+            "exec \"$@\"\n",
+        ),
+    )
+    .expect("the test can write the slow compiler wrapper");
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))
+        .expect("the test can make the slow compiler wrapper executable");
+    let mut child = fixture
+        .command([
+            "capture",
+            "-p",
+            "optic-mvp-app",
+            "--bin",
+            "optic-mvp-app",
+            "--release",
+            "--fresh",
+            "--format",
+            "jsonl",
+        ])
+        .env("RUSTC_WRAPPER", &wrapper)
+        .spawn()
+        .expect("the cancellable capture starts");
+    let stdout = child
+        .stdout
+        .take()
+        .expect("the fixture command pipes standard output");
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        let bytes = reader
+            .read_line(&mut line)
+            .expect("the test can read a JSON Lines event");
+        assert_ne!(bytes, 0, "the capture reaches compiler execution");
+        let event = serde_json::from_str::<Value>(&line).expect("the progress event is valid JSON");
+        if event["data"]["message"] == "compiler capture started" {
+            break;
+        }
+    }
+
+    let cancellation_started = Instant::now();
+    drop(reader);
+    let output = child
+        .wait_with_output()
+        .expect("the cancelled capture is reaped");
+
+    assert_success(&output);
+    assert!(cancellation_started.elapsed() < Duration::from_secs(3));
+    let status = json(&fixture.run(["status", "--format", "jsonl"]));
+    assert_eq!(status["result"]["pending"], 0);
 }
 
 #[test]
@@ -836,7 +936,7 @@ fn captures_source_from_feature_selected_path_dependencies() {
             "--source",
             "--fresh",
             "--format",
-            "json",
+            "jsonl",
         ];
         arguments.extend_from_slice(feature_arguments);
         let output = fixture
@@ -850,7 +950,12 @@ fn captures_source_from_feature_selected_path_dependencies() {
             string(&result, "/result/source/text")
                 .contains("pub fn optional_source<T>(value: T) -> T")
         );
-        assert!(String::from_utf8_lossy(&output.stderr).contains("streamed fixture warning"));
+        assert!(
+            output
+                .stdout
+                .windows(b"streamed fixture warning".len())
+                .any(|window| { window == b"streamed fixture warning" })
+        );
     }
 }
 
@@ -867,7 +972,7 @@ fn comparison_reports_effective_rustflags() {
         "--release",
         "--fresh",
         "--format",
-        "json",
+        "jsonl",
     ];
     let before = fixture.run(arguments);
     assert_success(&before);
@@ -888,7 +993,7 @@ fn comparison_reports_effective_rustflags() {
         "--after",
         after_instance,
         "--format",
-        "json",
+        "jsonl",
     ]);
     assert_success(&comparison);
     let comparison = json(&comparison);
@@ -945,7 +1050,7 @@ fn resolves_rustc_from_the_manifest_workspace() {
             "--release",
             "--fresh",
             "--format",
-            "json",
+            "jsonl",
         ])
         .current_dir(&caller)
         .env("RUSTC", &rustc_proxy)
@@ -1022,7 +1127,7 @@ fn preserves_compiler_wrappers_and_reuses_dependency_artifacts() {
             "--release",
             "--fresh",
             "--format",
-            "json",
+            "jsonl",
         ])
         .env("RUSTC_WRAPPER", &global_wrapper)
         .env("RUSTC_WORKSPACE_WRAPPER", &workspace_wrapper)
@@ -1082,7 +1187,7 @@ fn scopes_unstable_access_to_the_selected_target() {
             "--release",
             "--fresh",
             "--format",
-            "json",
+            "jsonl",
         ])
         .env("RUSTC_BOOTSTRAP", "1")
         .env("RUSTC_WRAPPER", &wrapper)
@@ -1134,7 +1239,7 @@ fn rejects_non_utf8_compiler_arguments_without_panicking() {
         "--capture",
         string(&capture, "/result/id"),
         "--format",
-        "json",
+        "jsonl",
     ]);
     assert_success(&details);
     let details = json(&details);
@@ -1250,7 +1355,7 @@ fn capture_fresh_arguments() -> [&'static str; 10] {
         "--release",
         "--fresh",
         "--format",
-        "json",
+        "jsonl",
         "--locked",
     ]
 }
@@ -1296,7 +1401,186 @@ fn assert_success(output: &Output) {
 
 #[track_caller]
 fn json(output: &Output) -> Value {
-    serde_json::from_slice(&output.stdout).expect("command JSON output is valid")
+    let events = jsonl_events(output);
+    let terminal = events
+        .last()
+        .expect("JSON Lines output contains a terminal event");
+    if terminal["event"] == "error" {
+        return serde_json::json!({
+            "version": terminal["version"],
+            "ok": false,
+            "error": terminal["data"],
+        });
+    }
+    if terminal["command"] == "captures" {
+        let captures = events
+            .iter()
+            .filter(|event| event["event"] == "item")
+            .map(|event| event["data"].clone())
+            .collect::<Vec<_>>();
+
+        return serde_json::json!({
+            "version": terminal["version"],
+            "ok": true,
+            "result": captures,
+        });
+    }
+    if terminal["command"] == "inspect" {
+        let started = events
+            .iter()
+            .find(|event| event["data"]["kind"] == "started")
+            .expect("a streamed inspection starts with metadata");
+        let mut result = started["data"]["metadata"].clone();
+        let result = result
+            .as_object_mut()
+            .expect("inspection metadata is a JSON object");
+        result.insert(
+            "artifacts".to_owned(),
+            Value::Array(
+                events
+                    .iter()
+                    .filter(|event| event["data"]["kind"] == "artifact")
+                    .map(|event| event["data"]["artifact"].clone())
+                    .collect(),
+            ),
+        );
+        result.insert(
+            "remark_files".to_owned(),
+            Value::Array(
+                events
+                    .iter()
+                    .filter(|event| event["data"]["kind"] == "remark-file")
+                    .map(|event| event["data"]["remark_file"].clone())
+                    .collect(),
+            ),
+        );
+
+        return serde_json::json!({
+            "version": terminal["version"],
+            "ok": true,
+            "result": result,
+        });
+    }
+    let streamed_show = events
+        .iter()
+        .any(|event| event["data"]["kind"] == "started");
+    if terminal["command"] != "show" || !streamed_show {
+        return serde_json::json!({
+            "version": terminal["version"],
+            "ok": true,
+            "result": terminal["data"],
+        });
+    }
+
+    collected_show(&events)
+}
+
+#[track_caller]
+fn jsonl_events(output: &Output) -> Vec<Value> {
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("each JSON Lines event is valid"))
+        .collect()
+}
+
+#[track_caller]
+fn assert_jsonl_stream(output: &Output) {
+    assert!(
+        output.stderr.is_empty(),
+        "JSON Lines output must not use stderr, got:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let events = jsonl_events(output);
+    assert!(!events.is_empty(), "a JSON Lines stream has events");
+
+    for pair in events.windows(2) {
+        let before = pair[0]["sequence"]
+            .as_u64()
+            .expect("an event has a sequence number");
+        let after = pair[1]["sequence"]
+            .as_u64()
+            .expect("an event has a sequence number");
+        assert!(before < after, "event sequence numbers increase");
+    }
+
+    let terminals = events
+        .iter()
+        .filter(|event| matches!(event["event"].as_str(), Some("complete" | "error")))
+        .count();
+    assert_eq!(terminals, 1, "a stream has one terminal event");
+    assert!(
+        matches!(
+            events.last().and_then(|event| event["event"].as_str()),
+            Some("complete" | "error")
+        ),
+        "the terminal event is last",
+    );
+}
+
+fn collected_show(events: &[Value]) -> Value {
+    let started = events
+        .iter()
+        .find(|event| event["data"]["kind"] == "started")
+        .expect("a streamed show starts with metadata");
+    let mut source = None;
+    let mut source_text = String::new();
+    let mut bodies = Vec::new();
+    let mut body = None;
+
+    for event in events {
+        let data = &event["data"];
+        match data["kind"].as_str() {
+            Some("source-started") => {
+                source = Some(serde_json::json!({
+                    "path": data["path"],
+                    "start_line": data["start_line"],
+                    "text": "",
+                }));
+            }
+            Some("source-chunk") => {
+                source_text.push_str(data["text"].as_str().expect("a source chunk contains text"))
+            }
+            Some("body-started") => {
+                body = Some(serde_json::json!({
+                    "stage": data["stage"],
+                    "module": data["module"],
+                    "symbol": data["symbol"],
+                    "text": "",
+                    "summary": null,
+                }));
+            }
+            Some("body-chunk") => {
+                let body = body.as_mut().expect("a body chunk follows its header");
+                let mut text = body["text"]
+                    .as_str()
+                    .expect("the collected body text is a string")
+                    .to_owned();
+                text.push_str(data["text"].as_str().expect("an LLVM chunk contains text"));
+                body["text"] = Value::String(text);
+            }
+            Some("body-finished") => {
+                let mut completed = body.take().expect("a body summary follows its body");
+                completed["summary"] = data["summary"].clone();
+                bodies.push(completed);
+            }
+            _ => {}
+        }
+    }
+    if let Some(source) = &mut source {
+        source["text"] = Value::String(source_text);
+    }
+
+    serde_json::json!({
+        "version": started["version"],
+        "ok": true,
+        "result": {
+            "capture_id": started["data"]["capture_id"],
+            "instance": started["data"]["instance"],
+            "output": started["data"]["output"],
+            "source": source,
+            "bodies": bodies,
+        },
+    })
 }
 
 #[track_caller]
@@ -1330,7 +1614,7 @@ fn stored_instance_ids(fixture: &Fixture, capture_id: &str) -> Vec<String> {
         "--limit",
         "500",
         "--format",
-        "json",
+        "jsonl",
     ]);
     assert_success(&output);
     let output = json(&output);

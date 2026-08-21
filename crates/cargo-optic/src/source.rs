@@ -5,7 +5,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::env;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{Read, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -72,6 +73,14 @@ pub(crate) struct StoredSource {
     pub(crate) bytes: Vec<u8>,
 }
 
+pub(crate) struct SourceItemRange {
+    pub(crate) definition: Range<usize>,
+
+    pub(crate) item: Range<usize>,
+
+    pub(crate) start_line: usize,
+}
+
 impl SourceBaseline {
     pub(crate) fn capture(
         workspace_root: &Path,
@@ -86,11 +95,8 @@ impl SourceBaseline {
         let mut entries = Vec::with_capacity(paths.len());
         let mut source_digests = BTreeMap::new();
         for (index, path) in paths.iter().enumerate() {
-            let bytes = fs::read(path).map_err(|source| Error::filesystem("read", path, source))?;
-            let digest = blake3::hash(&bytes);
             let snapshot = source_directory.join(format!("{index:08}.rs"));
-            fs::write(&snapshot, bytes)
-                .map_err(|source| Error::filesystem("write", &snapshot, source))?;
+            let digest = copy_and_hash(path, &snapshot)?;
             entries.push(SourceEntry {
                 path: path.clone(),
                 snapshot,
@@ -104,10 +110,7 @@ impl SourceBaseline {
                 let digest = if let Some(digest) = source_digests.get(&path) {
                     *digest
                 } else {
-                    let bytes = fs::read(&path)
-                        .map_err(|source| Error::filesystem("read", &path, source))?;
-
-                    blake3::hash(&bytes)
+                    hash_file(&path)?
                 };
 
                 Ok(CacheInput { path, digest })
@@ -122,17 +125,19 @@ impl SourceBaseline {
 
     pub(crate) fn validate(&self) -> Result<()> {
         for entry in &self.cache_inputs {
-            let bytes = match fs::read(&entry.path) {
-                Ok(bytes) => bytes,
-                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            let digest = match hash_file(&entry.path) {
+                Ok(digest) => digest,
+                Err(Error::Filesystem { source, .. })
+                    if source.kind() == std::io::ErrorKind::NotFound =>
+                {
                     return Err(Error::InputChanged {
                         path: entry.path.clone(),
                     });
                 }
-                Err(source) => return Err(Error::filesystem("read", &entry.path, source)),
+                Err(error) => return Err(error),
             };
 
-            if blake3::hash(&bytes) != entry.digest {
+            if digest != entry.digest {
                 return Err(Error::InputChanged {
                     path: entry.path.clone(),
                 });
@@ -147,12 +152,9 @@ impl SourceBaseline {
             .entries
             .iter()
             .map(|entry| {
-                let bytes = fs::read(&entry.snapshot)
-                    .map_err(|source| Error::filesystem("read", &entry.snapshot, source))?;
-
                 Ok(PendingSourceEntry {
                     path: entry.path.clone(),
-                    digest: blake3::hash(&bytes).to_hex().to_string(),
+                    digest: hash_file(&entry.snapshot)?.to_hex().to_string(),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -222,9 +224,7 @@ impl SourceBaseline {
         for (index, entry) in pending.entries.iter().enumerate() {
             let digest = parse_digest(&entry.digest, marker_path)?;
             let snapshot = source_directory.join(format!("{index:08}.rs"));
-            let bytes = fs::read(&snapshot)
-                .map_err(|source| Error::filesystem("read", &snapshot, source))?;
-            if blake3::hash(&bytes) != digest {
+            if hash_file(&snapshot)? != digest {
                 return Err(Error::InvalidPendingEvidence {
                     path: marker_path.to_owned(),
                     message: format!("source snapshot digest does not match for index {index}"),
@@ -254,6 +254,49 @@ impl SourceBaseline {
 
         Ok(baseline)
     }
+}
+
+fn copy_and_hash(source: &Path, destination: &Path) -> Result<blake3::Hash> {
+    let mut input = File::open(source).map_err(|error| Error::filesystem("open", source, error))?;
+    let mut output = File::create(destination)
+        .map_err(|error| Error::filesystem("create", destination, error))?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0_u8; 64 * 1024];
+
+    loop {
+        let bytes = input
+            .read(&mut buffer)
+            .map_err(|error| Error::filesystem("read", source, error))?;
+        if bytes == 0 {
+            break;
+        }
+
+        hasher.update(&buffer[..bytes]);
+        output
+            .write_all(&buffer[..bytes])
+            .map_err(|error| Error::filesystem("write", destination, error))?;
+    }
+
+    Ok(hasher.finalize())
+}
+
+fn hash_file(path: &Path) -> Result<blake3::Hash> {
+    let mut file = File::open(path).map_err(|source| Error::filesystem("open", path, source))?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0_u8; 64 * 1024];
+
+    loop {
+        let bytes = file
+            .read(&mut buffer)
+            .map_err(|source| Error::filesystem("read", path, source))?;
+        if bytes == 0 {
+            break;
+        }
+
+        hasher.update(&buffer[..bytes]);
+    }
+
+    Ok(hasher.finalize())
 }
 
 struct SourcePaths {
@@ -451,6 +494,49 @@ pub(crate) fn find_item_at(location: &SourceLocation, source: &StoredSource) -> 
         start_line,
         text,
     })
+}
+
+pub(crate) fn source_item_ranges(path: &Path) -> Result<Vec<SourceItemRange>> {
+    let bytes = fs::read(path).map_err(|source| Error::filesystem("read", path, source))?;
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return Ok(Vec::new());
+    };
+    let Ok(file) = syn::parse_file(text) else {
+        return Ok(Vec::new());
+    };
+    let mut visitor = ItemVisitor::default();
+    visitor.visit_file(&file);
+    let line_starts = line_starts(text);
+    let ranges = visitor
+        .spans
+        .into_iter()
+        .filter_map(|span| {
+            let start_line = span.item.start().line;
+            let end_line = span.item.end().line;
+            let start = *line_starts.get(start_line.checked_sub(1)?)?;
+            let end = line_starts.get(end_line).copied().unwrap_or(text.len());
+
+            Some(SourceItemRange {
+                definition: span.definition,
+                item: start..end,
+                start_line,
+            })
+        })
+        .collect();
+
+    Ok(ranges)
+}
+
+fn line_starts(text: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+
+    for (index, byte) in text.bytes().enumerate() {
+        if byte == b'\n' {
+            starts.push(index + 1);
+        }
+    }
+
+    starts
 }
 
 fn included_entry(entry: &DirEntry) -> bool {

@@ -95,8 +95,8 @@ cargo optic show optic_mvp_optional_kernel::optional_source \
   --source
 ```
 
-Cargo progress and compiler warnings use standard error. The final Optic result uses standard
-output. This separation also applies to `--format json`.
+Cargo progress and compiler warnings use standard error in text mode. The final Optic result uses
+standard output. `--format jsonl` writes all typed events to standard output.
 
 ## Select a different compiler output
 

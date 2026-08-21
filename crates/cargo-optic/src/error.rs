@@ -47,6 +47,10 @@ pub enum Error {
         message: String,
     },
 
+    /// A streaming consumer requested that the current operation stop.
+    #[error("streaming consumer stopped the operation")]
+    ConsumerStopped,
+
     /// Cargo did not invoke rustc and no matching verified evidence exists.
     #[error("compiler evidence is unavailable: {message}")]
     EvidenceUnavailable {

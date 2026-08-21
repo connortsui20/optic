@@ -79,30 +79,34 @@ The default command shows only optimized LLVM IR. Use `--output llvm-pre-opt` to
 pre-optimization LLVM IR. Use `--output remarks` to capture and show optimization remarks. The
 source is absent unless you add `--source`.
 
-The default format is plain text. Add `--format json` to get a versioned JSON envelope.
+The default format is plain text. Add `--format jsonl` to get versioned JSON Lines events.
 
-Cargo Optic writes Cargo progress and compiler diagnostics to standard error as they arrive. The
-final text or JSON result remains on standard output.
+In text mode, Cargo Optic writes Cargo progress and compiler diagnostics to standard error. It
+writes source, compiler output, and the final result to standard output as they arrive.
+
+In JSON Lines mode, Cargo Optic writes typed progress, diagnostic, data, and terminal events to
+standard output. Each line is one complete JSON value. A successful stream ends with one
+`complete` event. A failed stream ends with one `error` event.
 
 Cargo Optic highlights interface text, Rust source, and LLVM IR when standard output is a terminal.
 Use `--color always` to keep color in redirected output. Use `--color never` to disable color.
 
-The `NO_COLOR` environment variable also disables automatic color. JSON output never contains ANSI
-escape sequences.
+The `NO_COLOR` environment variable also disables automatic color. JSON Lines output never
+contains ANSI escape sequences.
 
 ## Capture and query separately
 
 Use these commands when an agent or another program controls the workflow:
 
 ```console
-cargo optic capture -p my-crate --lib --release --format json
-cargo optic find --capture CAPTURE_ID_PREFIX my_crate::kernel --format json
-cargo optic show --instance INSTANCE_ID_PREFIX --format json
-cargo optic captures --format json
-cargo optic inspect --capture CAPTURE_ID_PREFIX --format json
+cargo optic capture -p my-crate --lib --release --format jsonl
+cargo optic find --capture CAPTURE_ID_PREFIX my_crate::kernel --format jsonl
+cargo optic show --instance INSTANCE_ID_PREFIX --format jsonl
+cargo optic captures --format jsonl
+cargo optic inspect --capture CAPTURE_ID_PREFIX --format jsonl
 ```
 
-Omit `--format json` for an interactive workflow. Plain `find` output prints a complete `show`
+Omit `--format jsonl` for an interactive workflow. Plain `find` output prints a complete `show`
 command after each instance. You do not need to copy an ID into a new command.
 
 Plain `capture` output prints `find` and `show` command templates for the new capture. Replace
@@ -114,11 +118,11 @@ limit is 50 and the maximum is 500.
 
 Lookup first checks exact definition paths, display names, and compiler symbols. A fallback lookup
 matches a case-sensitive literal substring and requires at least three Unicode characters. Results
-report truncation. JSON also reports the match kind, full compiler symbol, and a stable identity
-fingerprint.
+report truncation. JSON Lines output also reports the match kind, full compiler symbol, and a
+stable identity fingerprint.
 
 Plain output shows at least 12 hexadecimal characters for each ID. Color highlights the shortest
-unique prefix and dims the remaining characters. JSON output keeps the full IDs.
+unique prefix and dims the remaining characters. JSON Lines output keeps the full IDs.
 
 Each displayed ID is a valid prefix. Cargo Optic reports an error if a shorter prefix matches more
 than one stored ID.
@@ -127,8 +131,12 @@ Use `--fresh` with `capture` or a build-based `show` command to request new evid
 first tries to resume matching post-compilation evidence. Otherwise, `--fresh` uses a unique Cargo
 fingerprint and invokes rustc for the selected target.
 
-The JSON transport version is 3. Instance results report definitions, declarations, and aliases
-for each LLVM stage. A result does not use one combined `has_body` value.
+The JSON Lines transport version is 1. Every event has a version, sequence number, command, event
+name, and typed data. Sequence numbers increase during one process. Text payloads use chunks of at
+most 64 KiB. A diagnostic uses base64 when its bytes are not valid UTF-8.
+
+Instance results report definitions, declarations, and aliases for each LLVM stage. A result does
+not use one combined `has_body` value.
 
 If compilation succeeds but ingestion fails, Cargo Optic retains validated staging evidence. The
 next matching request runs Cargo's freshness check. If fresh, it resumes ingestion without another
@@ -219,11 +227,11 @@ Cargo Optic stores its operation and data locks in `.optic/locks`. These locks r
 There is no current capture and no session state. Each read-only command uses an explicit capture
 or instance ID. An instance ID identifies its capture. Content-addressed blobs hold the evidence.
 
-The current store schema is version 7. Cargo Optic rejects older stores. Run `cargo optic clean`
+The current store schema is version 9. Cargo Optic rejects older stores. Run `cargo optic clean`
 once to replace an older prototype store.
 
-This prototype also uses JSON transport version 3, evidence request version 5, pending marker
-version 1, and compiler manifest protocol version 2. These formats have no compatibility promise.
+This prototype also uses JSON Lines transport version 1, evidence request version 5, pending marker
+version 1, and compiler manifest protocol version 3. These formats have no compatibility promise.
 
 Cargo Optic asks Cargo to evaluate the selected target before it reuses a capture. This design
 includes Cargo-tracked build-script inputs, `include_bytes!` files, and compiler environment
@@ -256,6 +264,12 @@ compilation also run from that workspace.
 
 Cargo output uses bounded streaming. One Cargo JSON message and the retained failure tail can each
 use at most 1 MiB. Cargo Optic drains the child process before it reports a message-limit error.
+If an application consumer stops a capture stream, Cargo Optic stops and reaps Cargo and its
+compiler descendants.
+
+Evidence ingestion reads compiler identities, modules, remarks, and source files incrementally.
+It writes them to a private SQLite staging catalog below the pending capture. The completed capture
+becomes visible only after one successful catalog transaction.
 
 The selected rustc requires matching `rustc-dev` and `llvm-tools` components. Cargo Optic reports a
 specific error when one of these components is absent. It does not install components.

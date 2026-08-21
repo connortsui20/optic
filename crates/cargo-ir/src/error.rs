@@ -48,6 +48,10 @@ pub enum Error {
         message: String,
     },
 
+    /// The output consumer requested that the supervised operation stop.
+    #[error("streaming consumer stopped the operation")]
+    ConsumerStopped,
+
     /// A required value was absent from compiler version output.
     #[error("rustc -vV did not report {field}")]
     MissingToolchainField {

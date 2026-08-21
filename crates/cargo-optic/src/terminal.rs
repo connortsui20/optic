@@ -21,6 +21,18 @@ pub(crate) enum CodeSyntax {
     Llvm,
 }
 
+pub(crate) struct CodeHighlighter {
+    state: Option<HighlightState>,
+}
+
+struct HighlightState {
+    highlighter: HighlightLines<'static>,
+
+    has_input: bool,
+
+    pending_line: String,
+}
+
 pub(crate) struct Terminal {
     color: bool,
 }
@@ -95,11 +107,26 @@ impl Terminal {
     }
 
     pub(crate) fn code(&self, text: &str, syntax: CodeSyntax) -> String {
-        if !self.color || text.is_empty() {
-            return text.to_owned();
-        }
+        let mut highlighter = self.code_highlighter(syntax);
+        let mut output = highlighter.push(text);
+        output.push_str(&highlighter.finish());
 
-        highlight(text, syntax).unwrap_or_else(|| text.to_owned())
+        output
+    }
+
+    pub(crate) fn code_highlighter(&self, syntax: CodeSyntax) -> CodeHighlighter {
+        let state = if self.color {
+            let syntaxes = syntaxes();
+            find_syntax(syntaxes, syntax).map(|syntax| HighlightState {
+                highlighter: HighlightLines::new(syntax, theme()),
+                has_input: false,
+                pending_line: String::new(),
+            })
+        } else {
+            None
+        };
+
+        CodeHighlighter { state }
     }
 
     fn paint(&self, style: Style, text: &str) -> String {
@@ -111,20 +138,59 @@ impl Terminal {
     }
 }
 
-fn highlight(text: &str, syntax: CodeSyntax) -> Option<String> {
-    let syntaxes = SYNTAXES.get_or_init(two_face::syntax::extra_newlines);
-    let syntax = find_syntax(syntaxes, syntax)?;
-    let theme = theme();
-    let mut highlighter = HighlightLines::new(syntax, theme);
-    let mut output = String::with_capacity(text.len());
+impl CodeHighlighter {
+    pub(crate) fn push(&mut self, text: &str) -> String {
+        let Some(state) = &mut self.state else {
+            return text.to_owned();
+        };
+        if text.is_empty() {
+            return String::new();
+        }
+        state.has_input = true;
+        state.pending_line.push_str(text);
+        let Some(last_newline) = state.pending_line.rfind('\n') else {
+            return String::new();
+        };
+        let complete = state
+            .pending_line
+            .drain(..=last_newline)
+            .collect::<String>();
 
-    for line in LinesWithEndings::from(text) {
-        let regions = highlighter.highlight_line(line, syntaxes).ok()?;
-        output.push_str(&as_24_bit_terminal_escaped(&regions, false));
+        state.highlight(&complete).unwrap_or(complete)
     }
-    output.push_str("\x1b[0m");
 
-    Some(output)
+    pub(crate) fn finish(&mut self) -> String {
+        let Some(state) = &mut self.state else {
+            return String::new();
+        };
+        if !state.has_input {
+            return String::new();
+        }
+        state.has_input = false;
+        let pending = std::mem::take(&mut state.pending_line);
+        let mut output = state.highlight(&pending).unwrap_or(pending);
+        output.push_str("\x1b[0m");
+
+        output
+    }
+}
+
+impl HighlightState {
+    fn highlight(&mut self, text: &str) -> Option<String> {
+        let syntaxes = syntaxes();
+        let mut output = String::with_capacity(text.len());
+
+        for line in LinesWithEndings::from(text) {
+            let regions = self.highlighter.highlight_line(line, syntaxes).ok()?;
+            output.push_str(&as_24_bit_terminal_escaped(&regions, false));
+        }
+
+        Some(output)
+    }
+}
+
+fn syntaxes() -> &'static SyntaxSet {
+    SYNTAXES.get_or_init(two_face::syntax::extra_newlines)
 }
 
 fn find_syntax(syntaxes: &SyntaxSet, syntax: CodeSyntax) -> Option<&SyntaxReference> {
@@ -161,5 +227,25 @@ mod tests {
             identifier,
             "\x1b[1m\x1b[93mins_853\x1b[0m\x1b[90md3c84a9f7\x1b[0m"
         );
+    }
+
+    #[test]
+    fn preserves_highlighting_across_partial_lines() {
+        let terminal = Terminal::new(true);
+        let text = "fn example() {\n    /* split\n       comment */\n}\n";
+        let expected = terminal.code(text, CodeSyntax::Rust);
+        let mut highlighter = terminal.code_highlighter(CodeSyntax::Rust);
+        let mut actual = String::new();
+
+        for chunk in [
+            "fn example() {\n    /* sp",
+            "lit\n       com",
+            "ment */\n}\n",
+        ] {
+            actual.push_str(&highlighter.push(chunk));
+        }
+        actual.push_str(&highlighter.finish());
+
+        assert_eq!(actual, expected);
     }
 }

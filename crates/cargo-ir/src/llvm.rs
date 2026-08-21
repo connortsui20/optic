@@ -12,22 +12,44 @@ use rustc_demangle::try_demangle;
 
 use crate::{AliasTarget, BodyRange, Error, LlvmAlias, LlvmDeclaration, Result};
 
+#[cfg(test)]
 pub(crate) struct ModuleIndex {
     pub(crate) bodies: Vec<BodyRange>,
     pub(crate) declarations: Vec<LlvmDeclaration>,
     pub(crate) aliases: Vec<LlvmAlias>,
 }
 
+pub(crate) enum ModuleRecord {
+    Body(BodyRange),
+
+    Declaration(LlvmDeclaration),
+
+    Alias(LlvmAlias),
+}
+
+#[cfg(test)]
 pub(crate) fn scan(path: &Path) -> Result<ModuleIndex> {
+    let mut index = ModuleIndex {
+        bodies: Vec::new(),
+        declarations: Vec::new(),
+        aliases: Vec::new(),
+    };
+    scan_with(path, |record| match record {
+        ModuleRecord::Body(body) => index.bodies.push(body),
+        ModuleRecord::Declaration(declaration) => index.declarations.push(declaration),
+        ModuleRecord::Alias(alias) => index.aliases.push(alias),
+    })?;
+
+    Ok(index)
+}
+
+pub(crate) fn scan_with(path: &Path, mut on_record: impl FnMut(ModuleRecord)) -> Result<()> {
     let file = File::open(path).map_err(|source| Error::Filesystem {
         operation: "open",
         path: path.to_owned(),
         source,
     })?;
     let mut reader = BufReader::new(file);
-    let mut bodies = Vec::new();
-    let mut declarations = Vec::new();
-    let mut aliases = Vec::new();
     let mut line = Vec::new();
     let mut offset = 0_u64;
 
@@ -37,25 +59,25 @@ pub(crate) fn scan(path: &Path) -> Result<ModuleIndex> {
 
         if line.starts_with(b"declare ") {
             let symbol = required_global_name(&line, path, "function declaration")?;
-            declarations.push(LlvmDeclaration {
+            on_record(ModuleRecord::Declaration(LlvmDeclaration {
                 demangled: demangle(&symbol),
                 raw_symbol: symbol,
                 start,
                 end: offset,
-            });
+            }));
 
             continue;
         }
 
         if trim_ascii(&line).starts_with(b"@") && is_alias(&line) {
             let symbol = required_global_name(&line, path, "alias")?;
-            aliases.push(LlvmAlias {
+            on_record(ModuleRecord::Alias(LlvmAlias {
                 demangled: demangle(&symbol),
                 target: alias_target(&line, &symbol),
                 raw_symbol: symbol,
                 start,
                 end: offset,
-            });
+            }));
 
             continue;
         }
@@ -77,19 +99,15 @@ pub(crate) fn scan(path: &Path) -> Result<ModuleIndex> {
             offset += line.len() as u64;
         }
 
-        bodies.push(BodyRange {
+        on_record(ModuleRecord::Body(BodyRange {
             demangled: demangle(&symbol),
             raw_symbol: symbol,
             start,
             end: offset,
-        });
+        }));
     }
 
-    Ok(ModuleIndex {
-        bodies,
-        declarations,
-        aliases,
-    })
+    Ok(())
 }
 
 fn required_global_name(line: &[u8], path: &Path, kind: &str) -> Result<String> {

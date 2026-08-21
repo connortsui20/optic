@@ -5,9 +5,13 @@
 
 use std::collections::VecDeque;
 use std::io::{self, Read};
+use std::ops::ControlFlow;
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread;
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt as _;
 
 use crate::{Error, Result};
 
@@ -99,9 +103,10 @@ enum ReaderMessage {
 pub(crate) fn run(
     command: &mut Command,
     program: &str,
-    on_event: &mut dyn FnMut(CargoProcessEvent),
+    on_event: &mut dyn FnMut(CargoProcessEvent) -> ControlFlow<()>,
 ) -> Result<CargoRun> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    configure_process_tree(command);
 
     let mut child = command.spawn().map_err(|source| Error::StartProcess {
         program: program.to_owned(),
@@ -122,12 +127,20 @@ pub(crate) fn run(
     let mut artifacts = ArtifactSummary::default();
     let mut diagnostics = BoundedTail::new(MAX_FAILURE_DIAGNOSTIC_BYTES);
     let mut output_error = None;
+    let mut consumer_stopped = false;
 
     for message in receiver {
         match message {
             ReaderMessage::Event(event) => {
                 diagnostics.push(event.bytes());
-                on_event(event);
+                if !consumer_stopped && on_event(event).is_break() {
+                    consumer_stopped = true;
+                    if let Err(error) = terminate_process_tree(&mut child) {
+                        output_error.get_or_insert_with(|| {
+                            format!("failed to stop Cargo after consumer cancellation: {error}")
+                        });
+                    }
+                }
             }
             ReaderMessage::Artifact { fresh } => {
                 artifacts.record(fresh);
@@ -163,12 +176,52 @@ pub(crate) fn run(
             message,
         });
     }
+    if consumer_stopped {
+        return Err(Error::ConsumerStopped);
+    }
 
     Ok(CargoRun {
         status,
         artifacts,
         diagnostics,
     })
+}
+
+#[cfg(unix)]
+fn configure_process_tree(command: &mut Command) {
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_process_tree(_command: &mut Command) {}
+
+#[cfg(unix)]
+fn terminate_process_tree(child: &mut std::process::Child) -> io::Result<()> {
+    let process_group = i32::try_from(child.id()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("child process ID must fit in i32, got {}", child.id()),
+        )
+    })?;
+
+    // SAFETY: `configure_process_tree` creates a group whose ID is the spawned Cargo PID. The PID
+    // remains reserved until `child.wait`, so this call cannot target a reused process group.
+    let result = unsafe { libc::killpg(process_group, libc::SIGKILL) };
+    if result == 0 {
+        return Ok(());
+    }
+
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+
+    Err(error)
+}
+
+#[cfg(not(unix))]
+fn terminate_process_tree(child: &mut std::process::Child) -> io::Result<()> {
+    child.kill()
 }
 
 fn read_stdout(mut stdout: impl Read, sender: &SyncSender<ReaderMessage>) {
@@ -355,13 +408,15 @@ impl std::fmt::Display for BoundedTail {
 #[cfg(test)]
 mod tests {
     use std::io::{Cursor, Read};
+    use std::ops::ControlFlow;
     use std::process::Command;
     use std::sync::mpsc::sync_channel;
     use std::thread;
+    use std::time::{Duration, Instant};
 
     use super::{
-        ArtifactSummary, BoundedTail, CHANNEL_CAPACITY, CargoProcessEvent, MAX_CARGO_MESSAGE_BYTES,
-        ReaderMessage, read_stdout,
+        ArtifactSummary, BoundedTail, CHANNEL_CAPACITY, CargoProcessEvent, Error,
+        MAX_CARGO_MESSAGE_BYTES, ReaderMessage, read_stdout,
     };
 
     struct ChunkedReader<'a> {
@@ -478,8 +533,12 @@ mod tests {
         ]);
         let mut events = Vec::new();
 
-        let output = super::run(&mut command, "test Cargo", &mut |event| events.push(event))
-            .expect("the supervised process succeeds");
+        let output = super::run(&mut command, "test Cargo", &mut |event| {
+            events.push(event);
+
+            ControlFlow::Continue(())
+        })
+        .expect("the supervised process succeeds");
 
         assert!(output.status().success());
         assert_eq!(output.fresh_artifact_count(), Some(1));
@@ -487,5 +546,24 @@ mod tests {
             event,
             CargoProcessEvent::Stderr { bytes } if bytes == b"cargo warning\n"
         )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stops_and_reaps_cargo_when_the_consumer_stops() {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "sh -c 'printf \"ready\\n\"; sleep 10'; printf 'done\\n'",
+        ]);
+        let started = Instant::now();
+
+        let error = match super::run(&mut command, "test Cargo", &mut |_| ControlFlow::Break(())) {
+            Ok(_) => panic!("the consumer must stop the process"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, Error::ConsumerStopped));
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }

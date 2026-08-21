@@ -4,26 +4,31 @@
 //! manifest stores source definition paths and raw symbols without exposing rustc types to this
 //! crate.
 
+#[cfg(test)]
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result};
 
-pub(crate) const MANIFEST_NAME: &str = "identity-v2.bin";
+pub(crate) const MANIFEST_NAME: &str = "identity-v3.bin";
 
 const MANIFEST_MAGIC: &[u8; 16] = b"CARGO_OPTIC_ID\0\0";
-const PROTOCOL_VERSION: u32 = 2;
+const PROTOCOL_VERSION: u32 = 3;
+const END_RECORD: u32 = 0;
+const PLACEMENT_RECORD: u32 = 1;
 const MAX_MANIFEST_BYTES: u64 = 256 * 1024 * 1024;
+#[cfg(test)]
 const MAX_INSTANCES: usize = 1_000_000;
+const MAX_PLACEMENTS: usize = 4_000_000;
 const MAX_STRING_BYTES: usize = 1024 * 1024;
-const MAX_CODEGEN_UNITS: usize = 65_536;
 const MAX_ARGUMENTS: usize = 65_536;
 
 /// The source definition from which rustc instantiated a function.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct DefinitionOrigin {
     /// The compiler crate that owns the definition.
     pub crate_name: String,
@@ -36,7 +41,7 @@ pub struct DefinitionOrigin {
 }
 
 /// A half-open source byte range and its human-readable positions.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct SourceSpan {
     /// The compiler source filename after rustc path remapping.
     pub file_name: String,
@@ -95,49 +100,198 @@ pub struct CompilerInstance {
     pub placements: Vec<CodegenUnitPlacement>,
 }
 
+/// One streamed placement record from the rustc identity driver.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CompilerPlacement {
+    /// The definition that rustc instantiated.
+    pub origin: DefinitionOrigin,
+
+    /// The concrete Rust display name, including generic arguments.
+    pub display_name: String,
+
+    /// The exact symbol that rustc gives to LLVM.
+    pub raw_symbol: String,
+
+    /// One codegen-unit placement for this instance.
+    pub placement: CodegenUnitPlacement,
+}
+
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct CompilerManifest {
     pub(crate) rustc_arguments: Vec<String>,
     pub(crate) instances: Vec<CompilerInstance>,
 }
 
+/// A bounded reader for compiler identity placements.
+pub struct CompilerManifestReader {
+    path: PathBuf,
+
+    reader: BufReader<File>,
+
+    rustc_arguments: Vec<String>,
+
+    placement_count: usize,
+
+    finished: bool,
+}
+
+impl CompilerManifestReader {
+    /// Opens and validates the manifest header without reading its placement records.
+    pub fn open(path: &Path, expected_rustc_commit: &str) -> Result<Self> {
+        Self::open_bounded(path, expected_rustc_commit, MAX_MANIFEST_BYTES)
+    }
+
+    fn open_bounded(
+        path: &Path,
+        expected_rustc_commit: &str,
+        maximum_manifest_bytes: u64,
+    ) -> Result<Self> {
+        let file = File::open(path).map_err(|source| Error::Filesystem {
+            operation: "open",
+            path: path.to_owned(),
+            source,
+        })?;
+        let length = file
+            .metadata()
+            .map_err(|source| Error::Filesystem {
+                operation: "read metadata for",
+                path: path.to_owned(),
+                source,
+            })?
+            .len();
+        if length > maximum_manifest_bytes {
+            return Err(invalid_manifest(
+                path,
+                format!("file length exceeds {maximum_manifest_bytes} bytes, got {length}"),
+            ));
+        }
+
+        let mut reader = BufReader::new(file);
+        validate_header(&mut reader, path, expected_rustc_commit)?;
+        let argument_count = read_length_u32(&mut reader, path, "argument count", MAX_ARGUMENTS)?;
+        let mut rustc_arguments = Vec::with_capacity(argument_count);
+
+        for _ in 0..argument_count {
+            rustc_arguments.push(read_string(&mut reader, path, "rustc argument")?);
+        }
+
+        Ok(Self {
+            path: path.to_owned(),
+            reader,
+            rustc_arguments,
+            placement_count: 0,
+            finished: false,
+        })
+    }
+
+    /// Returns the exact selected rustc command arguments from the manifest header.
+    pub fn rustc_arguments(&self) -> &[String] {
+        &self.rustc_arguments
+    }
+
+    /// Reads the next placement record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the next record is invalid or the aggregate placement bound is exceeded.
+    pub fn next_placement(&mut self) -> Result<Option<CompilerPlacement>> {
+        if self.finished {
+            return Ok(None);
+        }
+
+        match read_u32(&mut self.reader, &self.path, "record kind")? {
+            END_RECORD => {
+                validate_end(&mut self.reader, &self.path)?;
+                self.finished = true;
+
+                Ok(None)
+            }
+            PLACEMENT_RECORD => {
+                self.placement_count = self.placement_count.saturating_add(1);
+                if self.placement_count > MAX_PLACEMENTS {
+                    return Err(invalid_manifest(
+                        &self.path,
+                        format!(
+                            "placement count exceeds {MAX_PLACEMENTS}, got {}",
+                            self.placement_count
+                        ),
+                    ));
+                }
+
+                read_placement(&mut self.reader, &self.path).map(Some)
+            }
+            actual => Err(invalid_manifest(
+                &self.path,
+                format!("record kind must be 0 or 1, got {actual}"),
+            )),
+        }
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn read(path: &Path, expected_rustc_commit: &str) -> Result<CompilerManifest> {
     read_bounded(path, expected_rustc_commit, MAX_MANIFEST_BYTES)
 }
 
+#[cfg(test)]
 fn read_bounded(
     path: &Path,
     expected_rustc_commit: &str,
     maximum_manifest_bytes: u64,
 ) -> Result<CompilerManifest> {
-    let file = File::open(path).map_err(|source| Error::Filesystem {
-        operation: "open",
-        path: path.to_owned(),
-        source,
-    })?;
-    let metadata = file.metadata().map_err(|source| Error::Filesystem {
-        operation: "read metadata for",
-        path: path.to_owned(),
-        source,
-    })?;
-    if metadata.len() > maximum_manifest_bytes {
-        return Err(invalid_manifest(
-            path,
-            format!(
-                "file length exceeds {maximum_manifest_bytes} bytes, got {}",
-                metadata.len()
-            ),
-        ));
+    let mut reader =
+        CompilerManifestReader::open_bounded(path, expected_rustc_commit, maximum_manifest_bytes)?;
+    let rustc_arguments = reader.rustc_arguments.clone();
+    let mut instance_index = HashMap::new();
+    let mut instances: Vec<CompilerInstance> = Vec::new();
+
+    while let Some(record) = reader.next_placement()? {
+        let key = (
+            record.origin.clone(),
+            record.display_name.clone(),
+            record.raw_symbol.clone(),
+        );
+        let index = if let Some(index) = instance_index.get(&key) {
+            *index
+        } else {
+            if instances.len() >= MAX_INSTANCES {
+                return Err(invalid_manifest(
+                    path,
+                    format!(
+                        "instance count exceeds {MAX_INSTANCES}, got {}",
+                        instances.len() + 1
+                    ),
+                ));
+            }
+
+            let index = instances.len();
+            instances.push(CompilerInstance {
+                origin: record.origin,
+                display_name: record.display_name,
+                raw_symbol: record.raw_symbol,
+                placements: Vec::new(),
+            });
+            instance_index.insert(key, index);
+            index
+        };
+        instances[index].placements.push(record.placement);
     }
 
-    let mut reader = BufReader::new(file);
+    Ok(CompilerManifest {
+        rustc_arguments,
+        instances,
+    })
+}
+
+fn validate_header(reader: &mut impl Read, path: &Path, expected_rustc_commit: &str) -> Result<()> {
     let mut magic = [0_u8; MANIFEST_MAGIC.len()];
-    read_exact(&mut reader, &mut magic, path, "manifest header")?;
+    read_exact(reader, &mut magic, path, "manifest header")?;
     if &magic != MANIFEST_MAGIC {
         return Err(invalid_manifest(path, "invalid manifest header"));
     }
 
-    let version = read_u32(&mut reader, path, "protocol version")?;
+    let version = read_u32(reader, path, "protocol version")?;
     if version != PROTOCOL_VERSION {
         return Err(invalid_manifest(
             path,
@@ -145,7 +299,7 @@ fn read_bounded(
         ));
     }
 
-    let rustc_commit = read_string(&mut reader, path, "rustc commit")?;
+    let rustc_commit = read_string(reader, path, "rustc commit")?;
     if rustc_commit != expected_rustc_commit {
         return Err(invalid_manifest(
             path,
@@ -155,48 +309,10 @@ fn read_bounded(
         ));
     }
 
-    let argument_count = read_length_u32(&mut reader, path, "argument count", MAX_ARGUMENTS)?;
-    let mut rustc_arguments = Vec::with_capacity(argument_count);
+    Ok(())
+}
 
-    for _ in 0..argument_count {
-        rustc_arguments.push(read_string(&mut reader, path, "rustc argument")?);
-    }
-
-    let instance_count = read_length_u64(&mut reader, path, "instance count", MAX_INSTANCES)?;
-    let mut instances = Vec::with_capacity(instance_count);
-
-    for _ in 0..instance_count {
-        let crate_name = read_string(&mut reader, path, "definition crate")?;
-        let definition_path = read_string(&mut reader, path, "definition path")?;
-        let source = read_optional_source_span(&mut reader, path)?;
-        let display_name = read_string(&mut reader, path, "display name")?;
-        let raw_symbol = read_string(&mut reader, path, "raw symbol")?;
-        let codegen_unit_count =
-            read_length_u32(&mut reader, path, "codegen unit count", MAX_CODEGEN_UNITS)?;
-        let mut placements = Vec::with_capacity(codegen_unit_count);
-
-        for _ in 0..codegen_unit_count {
-            placements.push(CodegenUnitPlacement {
-                codegen_unit: read_string(&mut reader, path, "codegen unit")?,
-                linkage: read_string(&mut reader, path, "codegen unit linkage")?,
-                visibility: read_string(&mut reader, path, "codegen unit visibility")?,
-                local_copy: read_bool_u32(&mut reader, path, "codegen unit local copy")?,
-                size_estimate: read_usize_u64(&mut reader, path, "codegen unit size estimate")?,
-            });
-        }
-
-        instances.push(CompilerInstance {
-            origin: DefinitionOrigin {
-                crate_name,
-                definition_path,
-                source,
-            },
-            display_name,
-            raw_symbol,
-            placements,
-        });
-    }
-
+fn validate_end(reader: &mut impl Read, path: &Path) -> Result<()> {
     let mut trailing = [0_u8; 1];
     let trailing_length = reader
         .read(&mut trailing)
@@ -209,9 +325,30 @@ fn read_bounded(
         return Err(invalid_manifest(path, "manifest contains trailing bytes"));
     }
 
-    Ok(CompilerManifest {
-        rustc_arguments,
-        instances,
+    Ok(())
+}
+
+fn read_placement(reader: &mut impl Read, path: &Path) -> Result<CompilerPlacement> {
+    let origin = DefinitionOrigin {
+        crate_name: read_string(reader, path, "definition crate")?,
+        definition_path: read_string(reader, path, "definition path")?,
+        source: read_optional_source_span(reader, path)?,
+    };
+    let display_name = read_string(reader, path, "display name")?;
+    let raw_symbol = read_string(reader, path, "raw symbol")?;
+    let placement = CodegenUnitPlacement {
+        codegen_unit: read_string(reader, path, "codegen unit")?,
+        linkage: read_string(reader, path, "codegen unit linkage")?,
+        visibility: read_string(reader, path, "codegen unit visibility")?,
+        local_copy: read_bool_u32(reader, path, "codegen unit local copy")?,
+        size_estimate: read_usize_u64(reader, path, "codegen unit size estimate")?,
+    };
+
+    Ok(CompilerPlacement {
+        origin,
+        display_name,
+        raw_symbol,
+        placement,
     })
 }
 
@@ -284,25 +421,6 @@ fn read_length_u32(
     Ok(value)
 }
 
-fn read_length_u64(
-    reader: &mut impl Read,
-    path: &Path,
-    field: &'static str,
-    maximum: usize,
-) -> Result<usize> {
-    let value = read_u64(reader, path, field)?;
-    let value = usize::try_from(value)
-        .map_err(|_| invalid_manifest(path, format!("{field} exceeds usize, got {value}")))?;
-    if value > maximum {
-        return Err(invalid_manifest(
-            path,
-            format!("{field} exceeds {maximum}, got {value}"),
-        ));
-    }
-
-    Ok(value)
-}
-
 fn read_u32(reader: &mut impl Read, path: &Path, field: &'static str) -> Result<u32> {
     let mut bytes = [0_u8; size_of::<u32>()];
     read_exact(reader, &mut bytes, path, field)?;
@@ -339,7 +457,9 @@ fn invalid_manifest(path: &Path, message: impl Into<String>) -> Error {
 mod tests {
     use std::fs;
 
-    use super::{MANIFEST_MAGIC, PROTOCOL_VERSION, read, read_bounded};
+    use super::{
+        END_RECORD, MANIFEST_MAGIC, PLACEMENT_RECORD, PROTOCOL_VERSION, read, read_bounded,
+    };
 
     #[test]
     fn reads_complete_compiler_identities() {
@@ -351,7 +471,7 @@ mod tests {
         push_string(&mut manifest, "commit");
         manifest.extend_from_slice(&1_u32.to_le_bytes());
         push_string(&mut manifest, "rustc");
-        manifest.extend_from_slice(&1_u64.to_le_bytes());
+        manifest.extend_from_slice(&PLACEMENT_RECORD.to_le_bytes());
         push_string(&mut manifest, "example");
         push_string(&mut manifest, "example::kernel");
         manifest.extend_from_slice(&1_u32.to_le_bytes());
@@ -364,12 +484,12 @@ mod tests {
         manifest.extend_from_slice(&16_u64.to_le_bytes());
         push_string(&mut manifest, "example::kernel::<u64>");
         push_string(&mut manifest, "_Rexample");
-        manifest.extend_from_slice(&1_u32.to_le_bytes());
         push_string(&mut manifest, "example-cgu.0");
         push_string(&mut manifest, "External");
         push_string(&mut manifest, "Default");
         manifest.extend_from_slice(&0_u32.to_le_bytes());
         manifest.extend_from_slice(&32_u64.to_le_bytes());
+        manifest.extend_from_slice(&END_RECORD.to_le_bytes());
         fs::write(&path, manifest).expect("the test can write the manifest");
 
         let manifest = read(&path, "commit").expect("the manifest is valid");
@@ -405,7 +525,7 @@ mod tests {
         manifest.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
         push_string(&mut manifest, "other");
         manifest.extend_from_slice(&0_u32.to_le_bytes());
-        manifest.extend_from_slice(&0_u64.to_le_bytes());
+        manifest.extend_from_slice(&END_RECORD.to_le_bytes());
         fs::write(&path, manifest).expect("the test can write the manifest");
 
         let error = read(&path, "expected").expect_err("the commit must match");
@@ -478,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_too_many_instances() {
+    fn rejects_an_unknown_record_kind() {
         let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
         let path = temporary.path().join("identity.bin");
         let mut manifest = Vec::new();
@@ -486,12 +606,16 @@ mod tests {
         manifest.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
         push_string(&mut manifest, "commit");
         manifest.extend_from_slice(&0_u32.to_le_bytes());
-        manifest.extend_from_slice(&1_000_001_u64.to_le_bytes());
+        manifest.extend_from_slice(&2_u32.to_le_bytes());
         fs::write(&path, manifest).expect("the test can write the manifest");
 
-        let error = read(&path, "commit").expect_err("the instance count must be bounded");
+        let error = read(&path, "commit").expect_err("the record kind must be known");
 
-        assert!(error.to_string().contains("instance count exceeds 1000000"));
+        assert!(
+            error
+                .to_string()
+                .contains("record kind must be 0 or 1, got 2")
+        );
     }
 
     #[test]
@@ -503,7 +627,7 @@ mod tests {
         manifest.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
         push_string(&mut manifest, "commit");
         manifest.extend_from_slice(&0_u32.to_le_bytes());
-        manifest.extend_from_slice(&0_u64.to_le_bytes());
+        manifest.extend_from_slice(&END_RECORD.to_le_bytes());
         manifest.push(0);
         fs::write(&path, manifest).expect("the test can write the manifest");
 
@@ -524,7 +648,7 @@ mod tests {
         manifest.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
         push_string(&mut manifest, rustc_commit);
         manifest.extend_from_slice(&0_u32.to_le_bytes());
-        manifest.extend_from_slice(&0_u64.to_le_bytes());
+        manifest.extend_from_slice(&END_RECORD.to_le_bytes());
 
         manifest
     }

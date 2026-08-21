@@ -1,8 +1,8 @@
 //! Implements the human and agent command-line interface.
 //!
-//! Plain text is the default transport for source and LLVM bodies. `--format json` wraps the same
-//! typed application views in a versioned envelope. Read-only commands use explicit capture or
-//! instance IDs and never mutate shared navigation state.
+//! Plain text is the default transport for source and LLVM bodies. `--format jsonl` emits typed,
+//! versioned events. Read-only commands use explicit capture or instance IDs and never mutate
+//! shared navigation state.
 
 use std::env;
 use std::ffi::OsString;
@@ -11,21 +11,24 @@ use std::io::Write as _;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use base64::Engine as _;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use crate::app::validate_remark_options;
-use crate::terminal::{CodeSyntax, Terminal};
+use crate::terminal::{CodeHighlighter, CodeSyntax, Terminal};
 use crate::{
-    Application, BuildSpec, BuildTarget, CachePolicy, CaptureDetails, CaptureId, CaptureProfile,
-    CaptureSummary, CleanSummary, CompareView, CompilerOutput, FindOptions, FindResult, InstanceId,
-    InstanceSummary, RemarkEvidenceState, RemarkKindFilter, RemarkOptions, RemarkShowView,
-    ShowView, UnstableAccessMechanism, UnstableAccessScope,
+    Application, BuildSpec, BuildTarget, CachePolicy, CaptureId, CaptureMetadata, CaptureProfile,
+    CaptureSummary, CleanSummary, CompareView, CompilerOutput, FindOptions, FindResult,
+    InspectEvent, InstanceId, InstanceSummary, RemarkEvidenceState, RemarkKindFilter,
+    RemarkOptions, RemarkShowView, ShowEvent, UnstableAccessMechanism, UnstableAccessScope,
 };
 
 const MINIMUM_DISPLAY_ID_HEX_DIGITS: usize = 12;
-const TRANSPORT_VERSION: u8 = 3;
+const TRANSPORT_VERSION: u8 = 1;
+static EVENT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Runs the Cargo Optic CLI and returns its process exit code.
 #[must_use]
@@ -35,8 +38,8 @@ pub fn run_cli() -> ExitCode {
     let mut cli = match Cli::try_parse_from(arguments) {
         Ok(cli) => cli,
         Err(error) => {
-            if error.use_stderr() && requested_format == Format::Json {
-                return print_json_error("invalid_arguments", &error.to_string());
+            if error.use_stderr() && requested_format == Format::JsonLines {
+                return print_jsonl_error("invalid_arguments", &error.to_string());
             }
 
             let code = if error.use_stderr() { 2 } else { 0 };
@@ -50,6 +53,7 @@ pub fn run_cli() -> ExitCode {
         Err(error) => {
             return print_error(
                 cli.command.format(),
+                cli.command.name(),
                 &format!("failed to read the current directory: {error}"),
             );
         }
@@ -60,31 +64,36 @@ pub fn run_cli() -> ExitCode {
         *path = directory.join(&*path);
     }
     if let Command::Clean { format } = &cli.command {
-        return finish(execute_clean(
-            &directory,
-            cli.manifest_path.as_deref(),
-            *format,
-            cli.color,
-        ));
+        return finish(
+            "clean",
+            execute_clean(&directory, cli.manifest_path.as_deref(), *format, cli.color),
+        );
     }
+    let command = cli.command.name();
     let mut application = match Application::discover(&directory, cli.manifest_path.as_deref()) {
         Ok(application) => application,
-        Err(error) => return print_error(cli.command.format(), &error.to_string()),
+        Err(error) => {
+            return print_error(cli.command.format(), cli.command.name(), &error.to_string());
+        }
     };
 
-    finish(execute(&mut application, cli))
+    finish(command, execute(&mut application, cli))
 }
 
-fn finish(result: Result<Execution, Failure>) -> ExitCode {
+fn finish(command: &'static str, result: Result<Execution, Failure>) -> ExitCode {
     match result {
         Ok(execution) => match write_stdout(&execution.output) {
             Ok(()) => ExitCode::from(execution.code),
             Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
                 ExitCode::from(execution.code)
             }
-            Err(error) => print_error(Format::Text, &format!("failed to write output: {error}")),
+            Err(error) => print_error(
+                Format::Text,
+                command,
+                &format!("failed to write output: {error}"),
+            ),
         },
-        Err(failure) => print_error(failure.format, &failure.message),
+        Err(failure) => print_error(failure.format, command, &failure.message),
     }
 }
 
@@ -121,14 +130,14 @@ enum Command {
         #[command(flatten)]
         build: BuildOptions,
 
-        /// Selects plain text or versioned JSON output.
+        /// Selects plain text or versioned JSON Lines output.
         #[arg(long, value_enum, default_value_t)]
         format: Format,
     },
 
     /// Lists the completed captures in this workspace.
     Captures {
-        /// Selects plain text or versioned JSON output.
+        /// Selects plain text or versioned JSON Lines output.
         #[arg(long, value_enum, default_value_t)]
         format: Format,
     },
@@ -139,14 +148,14 @@ enum Command {
         #[arg(long)]
         capture: CaptureId,
 
-        /// Selects plain text or versioned JSON output.
+        /// Selects plain text or versioned JSON Lines output.
         #[arg(long, value_enum, default_value_t)]
         format: Format,
     },
 
     /// Shows the size and object counts of the evidence store.
     Status {
-        /// Selects plain text or versioned JSON output.
+        /// Selects plain text or versioned JSON Lines output.
         #[arg(long, value_enum, default_value_t)]
         format: Format,
     },
@@ -157,21 +166,21 @@ enum Command {
         #[arg(long)]
         capture: CaptureId,
 
-        /// Selects plain text or versioned JSON output.
+        /// Selects plain text or versioned JSON Lines output.
         #[arg(long, value_enum, default_value_t)]
         format: Format,
     },
 
     /// Removes blobs that no completed capture references.
     Gc {
-        /// Selects plain text or versioned JSON output.
+        /// Selects plain text or versioned JSON Lines output.
         #[arg(long, value_enum, default_value_t)]
         format: Format,
     },
 
     /// Verifies every blob referenced by completed captures.
     Verify {
-        /// Selects plain text or versioned JSON output.
+        /// Selects plain text or versioned JSON Lines output.
         #[arg(long, value_enum, default_value_t)]
         format: Format,
     },
@@ -190,7 +199,7 @@ enum Command {
         #[arg(long, value_enum, default_value_t)]
         output: CompilerOutput,
 
-        /// Selects plain text or versioned JSON output.
+        /// Selects plain text or versioned JSON Lines output.
         #[arg(long, value_enum, default_value_t)]
         format: Format,
     },
@@ -202,7 +211,7 @@ enum Command {
         "It does not remove the Cargo target directory."
     ))]
     Clean {
-        /// Selects plain text or versioned JSON output.
+        /// Selects plain text or versioned JSON Lines output.
         #[arg(long, value_enum, default_value_t)]
         format: Format,
     },
@@ -237,7 +246,7 @@ enum Command {
         )]
         limit: usize,
 
-        /// Selects plain text or versioned JSON output.
+        /// Selects plain text or versioned JSON Lines output.
         #[arg(long, value_enum, default_value_t)]
         format: Format,
     },
@@ -295,7 +304,7 @@ enum Command {
         #[command(flatten)]
         build: BuildOptions,
 
-        /// Selects plain text or versioned JSON output.
+        /// Selects plain text or versioned JSON Lines output.
         #[arg(long, value_enum, default_value_t)]
         format: Format,
     },
@@ -315,6 +324,22 @@ impl Command {
             | Self::Clean { format }
             | Self::Find { format, .. }
             | Self::Show { format, .. } => *format,
+        }
+    }
+
+    const fn name(&self) -> &'static str {
+        match self {
+            Self::Capture { .. } => "capture",
+            Self::Captures { .. } => "captures",
+            Self::Inspect { .. } => "inspect",
+            Self::Status { .. } => "status",
+            Self::Remove { .. } => "remove",
+            Self::Gc { .. } => "gc",
+            Self::Verify { .. } => "verify",
+            Self::Compare { .. } => "compare",
+            Self::Clean { .. } => "clean",
+            Self::Find { .. } => "find",
+            Self::Show { .. } => "show",
         }
     }
 }
@@ -502,22 +527,23 @@ impl std::fmt::Display for ShowOutput {
 enum Format {
     #[default]
     Text,
-    Json,
+    #[value(name = "jsonl")]
+    JsonLines,
 }
 
 impl Format {
     fn from_arguments(arguments: &[OsString]) -> Self {
         let requests_json = arguments.windows(2).any(|arguments| {
-            arguments[0] == "--format" && arguments[1].as_encoded_bytes() == b"json"
+            arguments[0] == "--format" && arguments[1].as_encoded_bytes() == b"jsonl"
         }) || arguments.iter().any(|argument| {
             argument
                 .as_encoded_bytes()
                 .strip_prefix(b"--format=")
-                .is_some_and(|value| value == b"json")
+                .is_some_and(|value| value == b"jsonl")
         });
 
         if requests_json {
-            Self::Json
+            Self::JsonLines
         } else {
             Self::Text
         }
@@ -534,7 +560,7 @@ enum ColorChoice {
 
 impl ColorChoice {
     fn enabled(self, format: Format) -> bool {
-        if format == Format::Json {
+        if format == Format::JsonLines {
             return false;
         }
 
@@ -555,38 +581,183 @@ struct Execution {
     output: String,
 }
 
-#[derive(Serialize)]
-struct SuccessEnvelope<'a, T> {
-    version: u8,
-    ok: bool,
-    result: &'a T,
+struct ShowRenderer<'a, W> {
+    application: &'a Application,
+
+    format: Format,
+
+    terminal: &'a Terminal,
+
+    writer: W,
+
+    code_highlighter: Option<CodeHighlighter>,
+
+    error: Option<io::Error>,
+}
+
+impl<W: io::Write> ShowRenderer<'_, W> {
+    fn emit(&mut self, event: ShowEvent) -> std::ops::ControlFlow<()> {
+        let result = match self.format {
+            Format::Text => self.emit_text(&event),
+            Format::JsonLines => self.emit_jsonl("data", &event),
+        };
+        if let Err(error) = result {
+            self.error = Some(error);
+
+            return std::ops::ControlFlow::Break(());
+        }
+
+        std::ops::ControlFlow::Continue(())
+    }
+
+    fn complete(&mut self, summary: &crate::ShowSummary) -> io::Result<()> {
+        match self.format {
+            Format::Text if summary.bodies == 0 => writeln!(
+                self.writer,
+                "{}",
+                self.terminal
+                    .warning(&format!("No standalone {} body.", summary.output.name()))
+            ),
+            Format::Text => self.writer.flush(),
+            Format::JsonLines => self.emit_jsonl("complete", summary),
+        }
+    }
+
+    fn emit_text(&mut self, event: &ShowEvent) -> io::Result<()> {
+        match event {
+            ShowEvent::Started {
+                capture_id,
+                instance,
+                output,
+            } => {
+                let capture = display_capture_id(self.application, capture_id, Format::Text)
+                    .map_err(io::Error::other)?;
+                let instance_id = display_instance_id(self.application, &instance.id, Format::Text)
+                    .map_err(io::Error::other)?;
+
+                write!(
+                    self.writer,
+                    "{} {}\n{}{}\n{}{}\n{}{}\n",
+                    self.terminal.heading("Function"),
+                    self.terminal.function(&instance.display_name),
+                    self.terminal.label("  Instance  "),
+                    self.terminal
+                        .identifier(&instance_id.text, instance_id.unique_prefix_length,),
+                    self.terminal.label("  Capture   "),
+                    self.terminal
+                        .identifier(&capture.text, capture.unique_prefix_length),
+                    self.terminal.label("  Output    "),
+                    output.title(),
+                )
+            }
+            ShowEvent::SourceStarted { path, start_line } => {
+                writeln!(
+                    self.writer,
+                    "\n{}",
+                    self.terminal
+                        .heading(&format!("Source  {path}:{start_line}"))
+                )?;
+                self.code_highlighter = Some(self.terminal.code_highlighter(CodeSyntax::Rust));
+
+                Ok(())
+            }
+            ShowEvent::SourceChunk { text } => self.emit_code(text),
+            ShowEvent::SourceFinished => self.finish_code(),
+            ShowEvent::BodyStarted { stage, module, .. } => {
+                let output = match stage {
+                    crate::LlvmStage::Optimized => "LLVM (optimized)",
+                    crate::LlvmStage::PreOptimization => "LLVM (pre-optimization)",
+                };
+
+                writeln!(
+                    self.writer,
+                    "\n{}",
+                    self.terminal.heading(&format!("{output}  {module}"))
+                )?;
+                self.code_highlighter = Some(self.terminal.code_highlighter(CodeSyntax::Llvm));
+
+                Ok(())
+            }
+            ShowEvent::BodyChunk { text } => self.emit_code(text),
+            ShowEvent::BodyFinished { .. } => self.finish_code(),
+        }
+    }
+
+    fn emit_code(&mut self, text: &str) -> io::Result<()> {
+        let highlighter = self
+            .code_highlighter
+            .as_mut()
+            .expect("a source or body start event creates the streaming highlighter");
+        let output = highlighter.push(text);
+
+        self.writer.write_all(output.as_bytes())
+    }
+
+    fn finish_code(&mut self) -> io::Result<()> {
+        let mut highlighter = self
+            .code_highlighter
+            .take()
+            .expect("a source or body finish event follows its start event");
+        let output = highlighter.finish();
+
+        self.writer.write_all(output.as_bytes())
+    }
+
+    fn emit_jsonl<T: Serialize>(&mut self, event_name: &'static str, data: &T) -> io::Result<()> {
+        let event = TransportEvent {
+            version: TRANSPORT_VERSION,
+            sequence: next_sequence(),
+            command: "show",
+            event: event_name,
+            data,
+        };
+        serde_json::to_writer(&mut self.writer, &event).map_err(io::Error::other)?;
+        self.writer.write_all(b"\n")?;
+        self.writer.flush()
+    }
 }
 
 #[derive(Serialize)]
-struct SelectionEnvelope<'a, T> {
+struct TransportEvent<'a, T> {
     version: u8,
-    ok: bool,
-    error: SelectionEnvelopeError<'a, T>,
+
+    sequence: u64,
+
+    command: &'static str,
+
+    event: &'static str,
+
+    data: &'a T,
 }
 
 #[derive(Serialize)]
-struct SelectionEnvelopeError<'a, T> {
+struct SelectionError<'a, T> {
     code: &'static str,
-    message: &'static str,
-    result: &'a T,
-}
 
-#[derive(Serialize)]
-struct OperationErrorEnvelope<'a> {
-    version: u8,
-    ok: bool,
-    error: OperationError<'a>,
+    message: &'static str,
+
+    result: &'a T,
 }
 
 #[derive(Serialize)]
 struct OperationError<'a> {
     code: &'static str,
+
     message: &'a str,
+}
+
+#[derive(Serialize)]
+struct ProgressEvent<'a> {
+    message: &'a str,
+}
+
+#[derive(Serialize)]
+struct DiagnosticEvent<'a> {
+    stream: &'static str,
+
+    encoding: &'static str,
+
+    bytes: &'a str,
 }
 
 struct Failure {
@@ -678,7 +849,7 @@ fn execute_clean(
         message: error.to_string(),
     })?;
 
-    success(format, &summary, clean_text(&summary, &terminal))
+    success("clean", format, &summary, clean_text(&summary, &terminal))
 }
 
 fn execute(application: &mut Application, cli: Cli) -> Result<Execution, Failure> {
@@ -688,14 +859,15 @@ fn execute(application: &mut Application, cli: Cli) -> Result<Execution, Failure
     match cli.command {
         Command::Capture { build, format } => {
             let terminal = Terminal::new(color.enabled(format));
-            write_progress("Resolving compiler evidence...");
             let spec = build.to_spec(manifest_path);
-            let summary = application
-                .capture_with_events(&spec, build.cache_policy(), write_cargo_event)
-                .map_err(|error| Failure {
-                    format,
-                    message: error.to_string(),
-                })?;
+            let Some(summary) =
+                capture_with_output(application, &spec, build.cache_policy(), format, "capture")?
+            else {
+                return Ok(Execution {
+                    code: 0,
+                    output: String::new(),
+                });
+            };
             let display_id =
                 display_capture_id(application, &summary.id, format).map_err(|error| Failure {
                     format,
@@ -703,51 +875,15 @@ fn execute(application: &mut Application, cli: Cli) -> Result<Execution, Failure
                 })?;
 
             success(
+                "capture",
                 format,
                 &summary,
                 capture_text(&summary, &display_id, &terminal),
             )
         }
-        Command::Captures { format } => {
-            let terminal = Terminal::new(color.enabled(format));
-            let captures = application.captures().map_err(|error| Failure {
-                format,
-                message: error.to_string(),
-            })?;
-            let display_ids = captures
-                .iter()
-                .map(|capture| display_capture_id(application, &capture.id, format))
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|error| Failure {
-                    format,
-                    message: error.to_string(),
-                })?;
-
-            success(
-                format,
-                &captures,
-                captures_text(&captures, &display_ids, &terminal),
-            )
-        }
+        Command::Captures { format } => execute_captures(application, format, color),
         Command::Inspect { capture, format } => {
-            let terminal = Terminal::new(color.enabled(format));
-            let details = application.inspect(&capture).map_err(|error| Failure {
-                format,
-                message: error.to_string(),
-            })?;
-            let display_id =
-                display_capture_id(application, &details.summary.id, format).map_err(|error| {
-                    Failure {
-                        format,
-                        message: error.to_string(),
-                    }
-                })?;
-
-            success(
-                format,
-                &details,
-                capture_details_text(&details, &display_id, &terminal),
-            )
+            execute_inspect(application, &capture, format, color)
         }
         Command::Status { format } => {
             let status = application.status().map_err(|error| Failure {
@@ -755,6 +891,7 @@ fn execute(application: &mut Application, cli: Cli) -> Result<Execution, Failure
                 message: error.to_string(),
             })?;
             success(
+                "status",
                 format,
                 &status,
                 format!(
@@ -773,6 +910,7 @@ fn execute(application: &mut Application, cli: Cli) -> Result<Execution, Failure
                 message: error.to_string(),
             })?;
             success(
+                "remove",
                 format,
                 &summary,
                 format!(
@@ -787,6 +925,7 @@ fn execute(application: &mut Application, cli: Cli) -> Result<Execution, Failure
                 message: error.to_string(),
             })?;
             success(
+                "gc",
                 format,
                 &summary,
                 format!(
@@ -801,6 +940,7 @@ fn execute(application: &mut Application, cli: Cli) -> Result<Execution, Failure
                 message: error.to_string(),
             })?;
             success(
+                "verify",
                 format,
                 &summary,
                 format!(
@@ -821,7 +961,7 @@ fn execute(application: &mut Application, cli: Cli) -> Result<Execution, Failure
                     format,
                     message: error.to_string(),
                 })?;
-            success(format, &comparison, compare_text(&comparison))
+            success("compare", format, &comparison, compare_text(&comparison))
         }
         Command::Clean { .. } => {
             unreachable!("clean executes before the application opens its store")
@@ -861,6 +1001,7 @@ fn execute(application: &mut Application, cli: Cli) -> Result<Execution, Failure
                 })?;
 
             success(
+                "find",
                 format,
                 &result,
                 find_text(&result, &display_capture, &display_instances, &terminal),
@@ -901,6 +1042,235 @@ fn execute(application: &mut Application, cli: Cli) -> Result<Execution, Failure
             )
         }
     }
+}
+
+fn capture_with_output(
+    application: &mut Application,
+    spec: &BuildSpec,
+    cache_policy: CachePolicy,
+    format: Format,
+    command: &'static str,
+) -> Result<Option<CaptureSummary>, Failure> {
+    if let Err(error) = write_progress(format, command, "Resolving compiler evidence...") {
+        return output_failure(format, error).map(|()| None);
+    }
+
+    let mut output_error = None;
+    let result = application.capture_with_events(spec, cache_policy, |event| {
+        if let Err(error) = write_capture_event(format, command, event) {
+            output_error = Some(error);
+
+            return std::ops::ControlFlow::Break(());
+        }
+
+        std::ops::ControlFlow::Continue(())
+    });
+    if let Some(error) = output_error {
+        return output_failure(format, error).map(|()| None);
+    }
+
+    result.map(Some).map_err(|error| Failure {
+        format,
+        message: error.to_string(),
+    })
+}
+
+fn output_failure(format: Format, error: io::Error) -> Result<(), Failure> {
+    if error.kind() == io::ErrorKind::BrokenPipe {
+        return Ok(());
+    }
+
+    Err(Failure {
+        format,
+        message: format!("failed to write output: {error}"),
+    })
+}
+
+fn execute_inspect(
+    application: &Application,
+    capture: &CaptureId,
+    format: Format,
+    color: ColorChoice,
+) -> Result<Execution, Failure> {
+    let terminal = Terminal::new(color.enabled(format));
+    let mut output_error = None;
+    let mut text_metadata = None;
+    let mut remarks_started = false;
+    let summary = application.inspect_with_events(capture, |event| {
+        let result = match format {
+            Format::JsonLines => write_jsonl_event("inspect", "data", &event),
+            Format::Text => match event {
+                InspectEvent::Started { metadata } => {
+                    let display = display_capture_id(application, &metadata.summary.id, format)
+                        .map_err(io::Error::other);
+                    display.and_then(|display| {
+                        let output = capture_metadata_text(&metadata, &display, &terminal);
+                        text_metadata = Some(metadata);
+
+                        write_stdout(&output)
+                    })
+                }
+                InspectEvent::Artifact { artifact } => write_stdout(&format!(
+                    "    {}  {}  {} definitions, {} declarations, {} aliases\n",
+                    artifact.name,
+                    artifact.compiler_stage,
+                    artifact.definitions,
+                    artifact.declarations,
+                    artifact.aliases,
+                )),
+                InspectEvent::RemarkFile { remark_file } => {
+                    let metadata = text_metadata
+                        .as_ref()
+                        .expect("inspection metadata is emitted before remark files");
+                    let heading = if remarks_started {
+                        String::new()
+                    } else {
+                        format!("  Remarks  {}\n", remark_capture_text(&metadata.summary))
+                    };
+                    remarks_started = true;
+
+                    write_stdout(&format!(
+                        "{heading}    {}  {} records\n",
+                        remark_file.name, remark_file.records
+                    ))
+                }
+            },
+        };
+        if let Err(error) = result {
+            output_error = Some(error);
+
+            return std::ops::ControlFlow::Break(());
+        }
+
+        std::ops::ControlFlow::Continue(())
+    });
+    if let Some(error) = output_error {
+        if error.kind() == io::ErrorKind::BrokenPipe {
+            return Ok(Execution {
+                code: 0,
+                output: String::new(),
+            });
+        }
+
+        return Err(Failure {
+            format,
+            message: format!("failed to write output: {error}"),
+        });
+    }
+    let summary = summary.map_err(|error| Failure {
+        format,
+        message: error.to_string(),
+    })?;
+    match format {
+        Format::JsonLines => {
+            write_jsonl_event("inspect", "complete", &summary).map_err(|error| Failure {
+                format,
+                message: format!("failed to write output: {error}"),
+            })?;
+        }
+        Format::Text if !remarks_started => {
+            let metadata = text_metadata
+                .as_ref()
+                .expect("a completed inspection contains metadata");
+            write_stdout(&format!(
+                "  Remarks  {}\n",
+                remark_capture_text(&metadata.summary)
+            ))
+            .map_err(|error| Failure {
+                format,
+                message: format!("failed to write output: {error}"),
+            })?;
+        }
+        Format::Text => {}
+    }
+
+    Ok(Execution {
+        code: 0,
+        output: String::new(),
+    })
+}
+
+fn execute_captures(
+    application: &Application,
+    format: Format,
+    color: ColorChoice,
+) -> Result<Execution, Failure> {
+    let terminal = Terminal::new(color.enabled(format));
+    let mut first = true;
+    let mut output_error = None;
+    let summary = application.captures_with_events(|capture| {
+        let result = match format {
+            Format::JsonLines => write_jsonl_event("captures", "item", &capture),
+            Format::Text => {
+                let display =
+                    display_capture_id(application, &capture.id, format).map_err(io::Error::other);
+                display.and_then(|display| {
+                    let heading = if first {
+                        format!("{}\n", terminal.heading("Captures"))
+                    } else {
+                        String::new()
+                    };
+                    first = false;
+                    write_stdout(&format!(
+                        "{heading}{}  {}  {}  {:?}  {} instances, {} artifacts, {}\n",
+                        terminal.identifier(&display.text, display.unique_prefix_length),
+                        capture.rustc_release,
+                        capture.target,
+                        capture.capture_profile,
+                        capture.instance_count,
+                        capture.module_count,
+                        remark_capture_text(&capture),
+                    ))
+                })
+            }
+        };
+        if let Err(error) = result {
+            output_error = Some(error);
+
+            return std::ops::ControlFlow::Break(());
+        }
+
+        std::ops::ControlFlow::Continue(())
+    });
+    if let Some(error) = output_error {
+        if error.kind() == io::ErrorKind::BrokenPipe {
+            return Ok(Execution {
+                code: 0,
+                output: String::new(),
+            });
+        }
+
+        return Err(Failure {
+            format,
+            message: format!("failed to write output: {error}"),
+        });
+    }
+    let summary = summary.map_err(|error| Failure {
+        format,
+        message: error.to_string(),
+    })?;
+    match format {
+        Format::Text if summary.items == 0 => {
+            write_stdout(&format!("{}\n", terminal.warning("No captures."))).map_err(|error| {
+                Failure {
+                    format,
+                    message: format!("failed to write output: {error}"),
+                }
+            })?;
+        }
+        Format::Text => {}
+        Format::JsonLines => {
+            write_jsonl_event("captures", "complete", &summary).map_err(|error| Failure {
+                format,
+                message: format!("failed to write output: {error}"),
+            })?;
+        }
+    }
+
+    Ok(Execution {
+        code: 0,
+        output: String::new(),
+    })
 }
 
 fn execute_show(application: &mut Application, request: ShowRequest) -> Result<Execution, Failure> {
@@ -990,18 +1360,20 @@ fn execute_show(application: &mut Application, request: ShowRequest) -> Result<E
 
         capture
     } else {
-        write_progress("Resolving compiler evidence...");
         let mut spec = build.to_spec(manifest_path);
         if output == ShowOutput::Remarks {
             spec.capture_remarks = true;
         }
-        application
-            .capture_with_events(&spec, build.cache_policy(), write_cargo_event)
-            .map_err(|error| Failure {
-                format,
-                message: error.to_string(),
-            })?
-            .id
+        let Some(summary) =
+            capture_with_output(application, &spec, build.cache_policy(), format, "show")?
+        else {
+            return Ok(Execution {
+                code: 0,
+                output: String::new(),
+            });
+        };
+
+        summary.id
     };
     let result = application
         .find(&capture, &FindOptions::new(query))
@@ -1082,28 +1454,45 @@ fn show_selected(
     terminal: &Terminal,
 ) -> Result<Execution, Failure> {
     if let Some(compiler_output) = output.compiler_output() {
-        let view = application
-            .show(instance, compiler_output, include_source)
-            .map_err(|error| Failure {
-                format,
-                message: error.to_string(),
-            })?;
-        let display_capture =
-            display_capture_id(application, &view.capture_id, format).map_err(|error| Failure {
-                format,
-                message: error.to_string(),
-            })?;
-        let display_instance = display_instance_id(application, &view.instance.id, format)
-            .map_err(|error| Failure {
-                format,
-                message: error.to_string(),
-            })?;
-
-        return success(
+        let stdout = io::stdout();
+        let mut renderer = ShowRenderer {
+            application,
             format,
-            &view,
-            show_text(&view, &display_capture, &display_instance, terminal),
-        );
+            terminal,
+            writer: stdout.lock(),
+            code_highlighter: None,
+            error: None,
+        };
+        let summary =
+            application.show_with_events(instance, compiler_output, include_source, |event| {
+                renderer.emit(event)
+            });
+        if let Some(error) = renderer.error.take() {
+            if error.kind() == io::ErrorKind::BrokenPipe {
+                return Ok(Execution {
+                    code: 0,
+                    output: String::new(),
+                });
+            }
+
+            return Err(Failure {
+                format,
+                message: format!("failed to write output: {error}"),
+            });
+        }
+        let summary = summary.map_err(|error| Failure {
+            format,
+            message: error.to_string(),
+        })?;
+        renderer.complete(&summary).map_err(|error| Failure {
+            format,
+            message: format!("failed to write output: {error}"),
+        })?;
+
+        return Ok(Execution {
+            code: 0,
+            output: String::new(),
+        });
     }
 
     let view = application
@@ -1124,6 +1513,7 @@ fn show_selected(
         })?;
 
     success(
+        "show",
         format,
         &view,
         remark_show_text(&view, &display_capture, &display_instance, terminal),
@@ -1155,7 +1545,7 @@ fn display_capture_id(
                 unique_prefix.as_str(),
             ))
         }
-        Format::Json => Ok(DisplayIdentifier::full(capture_id.as_str())),
+        Format::JsonLines => Ok(DisplayIdentifier::full(capture_id.as_str())),
     }
 }
 
@@ -1173,21 +1563,28 @@ fn display_instance_id(
                 unique_prefix.as_str(),
             ))
         }
-        Format::Json => Ok(DisplayIdentifier::full(instance_id.as_str())),
+        Format::JsonLines => Ok(DisplayIdentifier::full(instance_id.as_str())),
     }
 }
 
-fn success<T: Serialize>(format: Format, result: &T, text: String) -> Result<Execution, Failure> {
+fn success<T: Serialize>(
+    command: &'static str,
+    format: Format,
+    result: &T,
+    text: String,
+) -> Result<Execution, Failure> {
     let output = match format {
         Format::Text => text,
-        Format::Json => {
-            let envelope = SuccessEnvelope {
+        Format::JsonLines => {
+            let event = TransportEvent {
                 version: TRANSPORT_VERSION,
-                ok: true,
-                result,
+                sequence: next_sequence(),
+                command,
+                event: "complete",
+                data: result,
             };
 
-            json_output(format, &envelope)?
+            jsonl_output(format, &event)?
         }
     };
 
@@ -1202,48 +1599,54 @@ fn selection<T: Serialize>(
 ) -> Result<Execution, Failure> {
     let output = match format {
         Format::Text => text,
-        Format::Json => {
-            let envelope = SelectionEnvelope {
+        Format::JsonLines => {
+            let error = SelectionError {
+                code: failure.code(),
+                message: "the query must match exactly one compiler instance",
+                result,
+            };
+            let event = TransportEvent {
                 version: TRANSPORT_VERSION,
-                ok: false,
-                error: SelectionEnvelopeError {
-                    code: failure.code(),
-                    message: "the query must match exactly one compiler instance",
-                    result,
-                },
+                sequence: next_sequence(),
+                command: "show",
+                event: "error",
+                data: &error,
             };
 
-            json_output(format, &envelope)?
+            jsonl_output(format, &event)?
         }
     };
 
     Ok(Execution { code: 2, output })
 }
 
-fn json_output<T: Serialize>(format: Format, value: &T) -> Result<String, Failure> {
-    let mut output = serde_json::to_string_pretty(value).map_err(|error| Failure {
+fn jsonl_output<T: Serialize>(format: Format, value: &T) -> Result<String, Failure> {
+    let mut output = serde_json::to_string(value).map_err(|error| Failure {
         format,
-        message: format!("failed to encode JSON output: {error}"),
+        message: format!("failed to encode JSON Lines output: {error}"),
     })?;
     output.push('\n');
 
     Ok(output)
 }
 
-fn print_error(format: Format, message: &str) -> ExitCode {
+fn print_error(format: Format, command: &'static str, message: &str) -> ExitCode {
     let _ = match format {
         Format::Text => write_stderr(&format!("error: {message}\n")),
-        Format::Json => {
-            let envelope = OperationErrorEnvelope {
-                version: TRANSPORT_VERSION,
-                ok: false,
-                error: OperationError {
-                    code: "operation_failed",
-                    message,
-                },
+        Format::JsonLines => {
+            let error = OperationError {
+                code: "operation_failed",
+                message,
             };
-            let output = serde_json::to_string_pretty(&envelope)
-                .expect("operation error envelopes contain only strings and primitive values");
+            let event = TransportEvent {
+                version: TRANSPORT_VERSION,
+                sequence: next_sequence(),
+                command,
+                event: "error",
+                data: &error,
+            };
+            let output = serde_json::to_string(&event)
+                .expect("operation error events contain only strings and primitive values");
 
             write_stdout(&format!("{output}\n"))
         }
@@ -1252,14 +1655,17 @@ fn print_error(format: Format, message: &str) -> ExitCode {
     ExitCode::FAILURE
 }
 
-fn print_json_error(code: &'static str, message: &str) -> ExitCode {
-    let envelope = OperationErrorEnvelope {
+fn print_jsonl_error(code: &'static str, message: &str) -> ExitCode {
+    let error = OperationError { code, message };
+    let event = TransportEvent {
         version: TRANSPORT_VERSION,
-        ok: false,
-        error: OperationError { code, message },
+        sequence: next_sequence(),
+        command: "unknown",
+        event: "error",
+        data: &error,
     };
-    let output = serde_json::to_string_pretty(&envelope)
-        .expect("operation error envelopes contain only strings and primitive values");
+    let output = serde_json::to_string(&event)
+        .expect("operation error events contain only strings and primitive values");
     let _ = write_stdout(&format!("{output}\n"));
 
     ExitCode::from(2)
@@ -1293,12 +1699,114 @@ fn parse_remark_limit(value: &str) -> std::result::Result<usize, String> {
     Ok(limit)
 }
 
-fn write_progress(message: &str) {
-    let _ = write_stderr(&format!("{message}\n"));
+fn next_sequence() -> u64 {
+    EVENT_SEQUENCE.fetch_add(1, Ordering::Relaxed)
 }
 
-fn write_cargo_event(event: crate::CargoProcessEvent) {
-    let _ = io::stderr().lock().write_all(event.bytes());
+fn write_progress(format: Format, command: &'static str, message: &str) -> io::Result<()> {
+    match format {
+        Format::Text => write_stderr(&format!("{message}\n")),
+        Format::JsonLines => write_jsonl_event(command, "progress", &ProgressEvent { message }),
+    }
+}
+
+fn write_cargo_event(
+    format: Format,
+    command: &'static str,
+    event: crate::CargoProcessEvent,
+) -> io::Result<()> {
+    if format == Format::Text {
+        return io::stderr().lock().write_all(event.bytes());
+    }
+
+    let stream = match &event {
+        crate::CargoProcessEvent::CompilerDiagnostic { .. } => "compiler-diagnostic",
+        crate::CargoProcessEvent::Stdout { .. } => "cargo-stdout",
+        crate::CargoProcessEvent::Stderr { .. } => "cargo-stderr",
+    };
+    let bytes = event.bytes();
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        let mut start = 0;
+
+        while start < text.len() {
+            let mut end = (start + crate::TEXT_CHUNK_BYTES).min(text.len());
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            write_jsonl_event(
+                command,
+                "diagnostic",
+                &DiagnosticEvent {
+                    stream,
+                    encoding: "utf-8",
+                    bytes: &text[start..end],
+                },
+            )?;
+            start = end;
+        }
+
+        return Ok(());
+    }
+
+    for bytes in bytes.chunks(48 * 1024) {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        write_jsonl_event(
+            command,
+            "diagnostic",
+            &DiagnosticEvent {
+                stream,
+                encoding: "base64",
+                bytes: &encoded,
+            },
+        )?;
+    }
+
+    Ok(())
+}
+
+fn write_capture_event(
+    format: Format,
+    command: &'static str,
+    event: crate::CaptureEvent,
+) -> io::Result<()> {
+    match event {
+        crate::CaptureEvent::PhaseStarted(phase) => {
+            let message = format!("{} started", capture_phase_name(phase));
+            write_progress(format, command, &message)
+        }
+        crate::CaptureEvent::PhaseFinished(phase) => {
+            let message = format!("{} finished", capture_phase_name(phase));
+            write_progress(format, command, &message)
+        }
+        crate::CaptureEvent::Cargo(event) => write_cargo_event(format, command, event),
+    }
+}
+
+const fn capture_phase_name(phase: crate::CapturePhase) -> &'static str {
+    match phase {
+        crate::CapturePhase::Source => "source snapshot",
+        crate::CapturePhase::Compile => "compiler capture",
+        crate::CapturePhase::Ingest => "evidence ingestion",
+    }
+}
+
+fn write_jsonl_event<T: Serialize>(
+    command: &'static str,
+    event_name: &'static str,
+    data: &T,
+) -> io::Result<()> {
+    let event = TransportEvent {
+        version: TRANSPORT_VERSION,
+        sequence: next_sequence(),
+        command,
+        event: event_name,
+        data,
+    };
+    let stdout = io::stdout();
+    let mut writer = stdout.lock();
+    serde_json::to_writer(&mut writer, &event).map_err(io::Error::other)?;
+    writer.write_all(b"\n")?;
+    writer.flush()
 }
 
 fn write_stdout(output: &str) -> io::Result<()> {
@@ -1371,36 +1879,8 @@ fn clean_text(summary: &CleanSummary, terminal: &Terminal) -> String {
     }
 }
 
-fn captures_text(
-    captures: &[CaptureSummary],
-    display_ids: &[DisplayIdentifier],
-    terminal: &Terminal,
-) -> String {
-    if captures.is_empty() {
-        return format!("{}\n", terminal.warning("No captures."));
-    }
-
-    let mut output = format!("{}\n", terminal.heading("Captures"));
-    for (capture, display_id) in captures.iter().zip(display_ids) {
-        writeln!(
-            output,
-            "{}  {}  {}  {:?}  {} instances, {} artifacts, {}",
-            terminal.identifier(&display_id.text, display_id.unique_prefix_length),
-            capture.rustc_release,
-            capture.target,
-            capture.capture_profile,
-            capture.instance_count,
-            capture.module_count,
-            remark_capture_text(capture),
-        )
-        .expect("writing capture text to a String cannot fail");
-    }
-
-    output
-}
-
-fn capture_details_text(
-    details: &CaptureDetails,
+fn capture_metadata_text(
+    metadata: &CaptureMetadata,
     display_id: &DisplayIdentifier,
     terminal: &Terminal,
 ) -> String {
@@ -1421,19 +1901,19 @@ fn capture_details_text(
         ),
         terminal.heading("Capture details"),
         terminal.identifier(&display_id.text, display_id.unique_prefix_length),
-        details.summary.capture_profile,
-        details.summary.target,
-        details.compiler.rustc.display(),
-        details.compiler.release,
-        details.compiler.commit_hash,
-        details.compiler.host,
-        details.compiler.llvm_version,
-        details.compiler.sysroot.display(),
-        details.compiler.llvm_dis.display(),
-        details.cargo.program,
-        details.cargo.arguments.join(" "),
+        metadata.summary.capture_profile,
+        metadata.summary.target,
+        metadata.compiler.rustc.display(),
+        metadata.compiler.release,
+        metadata.compiler.commit_hash,
+        metadata.compiler.host,
+        metadata.compiler.llvm_version,
+        metadata.compiler.sysroot.display(),
+        metadata.compiler.llvm_dis.display(),
+        metadata.cargo.program,
+        metadata.cargo.arguments.join(" "),
     );
-    if let Some(rustc) = &details.rustc {
+    if let Some(rustc) = &metadata.rustc {
         writeln!(
             output,
             "  rustc    {} {}",
@@ -1442,7 +1922,7 @@ fn capture_details_text(
         )
         .expect("writing capture details to a String cannot fail");
     }
-    let authorized_scopes = details
+    let authorized_scopes = metadata
         .unstable_access
         .authorized_scopes
         .iter()
@@ -1452,39 +1932,16 @@ fn capture_details_text(
     writeln!(
         output,
         "  Unstable  {} (authorized: {})",
-        unstable_access_mechanism_name(details.unstable_access.mechanism),
+        unstable_access_mechanism_name(metadata.unstable_access.mechanism),
         authorized_scopes,
     )
     .expect("writing capture details to a String cannot fail");
     writeln!(
         output,
         "  Artifacts  {} ({} instances)",
-        details.artifacts.len(),
-        details.summary.instance_count
+        metadata.summary.module_count, metadata.summary.instance_count
     )
     .expect("writing capture details to a String cannot fail");
-    for artifact in &details.artifacts {
-        writeln!(
-            output,
-            "    {}  {}  {} definitions, {} declarations, {} aliases",
-            artifact.name,
-            artifact.compiler_stage,
-            artifact.definitions,
-            artifact.declarations,
-            artifact.aliases,
-        )
-        .expect("writing capture details to a String cannot fail");
-    }
-    writeln!(
-        output,
-        "  Remarks  {}",
-        remark_capture_text(&details.summary)
-    )
-    .expect("writing capture details to a String cannot fail");
-    for file in &details.remark_files {
-        writeln!(output, "    {}  {} records", file.name, file.records)
-            .expect("writing capture details to a String cannot fail");
-    }
 
     output
 }
@@ -1790,58 +2247,6 @@ fn shell_quoted(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-fn show_text(
-    view: &ShowView,
-    display_capture: &DisplayIdentifier,
-    display_instance: &DisplayIdentifier,
-    terminal: &Terminal,
-) -> String {
-    let state = if view.bodies.is_empty() {
-        terminal.warning(&format!("no standalone {} body", view.output.name()))
-    } else {
-        terminal.positive("standalone body")
-    };
-    let mut output = format!(
-        "{} {}\n{}{}\n{}{}\n{}{}\n{}{}\n",
-        terminal.heading("Function"),
-        terminal.function(&view.instance.display_name),
-        terminal.label("  Instance  "),
-        terminal.identifier(
-            &display_instance.text,
-            display_instance.unique_prefix_length,
-        ),
-        terminal.label("  Capture   "),
-        terminal.identifier(&display_capture.text, display_capture.unique_prefix_length),
-        terminal.label("  Output    "),
-        view.output.title(),
-        terminal.label("  State     "),
-        state,
-    );
-
-    if let Some(source) = &view.source {
-        let heading = format!("Source  {}:{}", source.path, source.start_line);
-        push_code_section(
-            &mut output,
-            terminal,
-            &heading,
-            &source.text,
-            CodeSyntax::Rust,
-        );
-    }
-    for body in &view.bodies {
-        let heading = format!("{}  {}", view.output.title(), body.module);
-        push_code_section(
-            &mut output,
-            terminal,
-            &heading,
-            &body.text,
-            CodeSyntax::Llvm,
-        );
-    }
-
-    output
-}
-
 fn remark_show_text(
     view: &RemarkShowView,
     display_capture: &DisplayIdentifier,
@@ -2123,7 +2528,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn reports_non_utf8_json_paths_as_errors() {
+    fn reports_non_utf8_json_lines_paths_as_errors() {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
         use std::path::PathBuf;
@@ -2136,7 +2541,7 @@ mod tests {
             removed: true,
         };
 
-        assert!(success(Format::Json, &summary, String::new()).is_err());
+        assert!(success("clean", Format::JsonLines, &summary, String::new()).is_err());
     }
 
     fn instance_summary(

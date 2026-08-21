@@ -136,6 +136,22 @@ pub fn parse_optimization_remarks(
     path: impl AsRef<Path>,
     limits: RemarkParseLimits,
 ) -> Result<Vec<OptimizationRemark>> {
+    let mut records = Vec::new();
+    parse_optimization_remarks_with(path, limits, |record| records.push(record))?;
+
+    Ok(records)
+}
+
+/// Parses one remark file and reports each bounded document as soon as it is complete.
+///
+/// # Errors
+///
+/// Returns an error if the file or any document exceeds its bound or contains invalid data.
+pub fn parse_optimization_remarks_with(
+    path: impl AsRef<Path>,
+    limits: RemarkParseLimits,
+    mut on_record: impl FnMut(OptimizationRemark),
+) -> Result<()> {
     let path = path.as_ref();
     let file = File::open(path).map_err(|source| Error::Filesystem {
         operation: "open",
@@ -162,7 +178,7 @@ pub fn parse_optimization_remarks(
 
     let bounded_file = file.take(limits.max_file_bytes.saturating_add(1));
     let mut reader = BufReader::new(bounded_file);
-    let mut parser = RemarkStreamParser::new(path, limits);
+    let mut parser = RemarkStreamParser::new(path, limits, &mut on_record);
     let mut line = Vec::new();
 
     loop {
@@ -185,24 +201,30 @@ pub fn parse_optimization_remarks(
     parser.finish()
 }
 
-struct RemarkStreamParser<'a> {
+struct RemarkStreamParser<'a, 'b> {
     path: &'a Path,
     limits: RemarkParseLimits,
     total_bytes: u64,
     saw_document: bool,
     document: Vec<u8>,
-    records: Vec<OptimizationRemark>,
+    record_count: usize,
+    on_record: &'b mut dyn FnMut(OptimizationRemark),
 }
 
-impl<'a> RemarkStreamParser<'a> {
-    fn new(path: &'a Path, limits: RemarkParseLimits) -> Self {
+impl<'a, 'b> RemarkStreamParser<'a, 'b> {
+    fn new(
+        path: &'a Path,
+        limits: RemarkParseLimits,
+        on_record: &'b mut dyn FnMut(OptimizationRemark),
+    ) -> Self {
         Self {
             path,
             limits,
             total_bytes: 0,
             saw_document: false,
             document: Vec::new(),
-            records: Vec::new(),
+            record_count: 0,
+            on_record,
         }
     }
 
@@ -275,13 +297,13 @@ impl<'a> RemarkStreamParser<'a> {
     }
 
     fn finish_document(&mut self) -> Result<()> {
-        if self.records.len() >= self.limits.max_records {
+        if self.record_count >= self.limits.max_records {
             return Err(invalid_remarks(
                 self.path,
                 format!(
                     "record count exceeds {}, got {}",
                     self.limits.max_records,
-                    self.records.len() + 1
+                    self.record_count + 1
                 ),
             ));
         }
@@ -291,23 +313,24 @@ impl<'a> RemarkStreamParser<'a> {
                 self.path,
                 format!(
                     "document {} is invalid YAML: {source}",
-                    self.records.len() + 1
+                    self.record_count + 1
                 ),
             )
         })?;
         let record = parse_document(self.path, value, self.limits)?;
 
-        self.records.push(record);
+        (self.on_record)(record);
+        self.record_count += 1;
         self.document.clear();
         Ok(())
     }
 
-    fn finish(mut self) -> Result<Vec<OptimizationRemark>> {
+    fn finish(mut self) -> Result<()> {
         if !self.document.is_empty() {
             self.finish_document()?;
         }
 
-        Ok(self.records)
+        Ok(())
     }
 }
 

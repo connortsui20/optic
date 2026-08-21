@@ -10,7 +10,6 @@ extern crate rustc_interface;
 extern crate rustc_middle;
 extern crate rustc_span;
 
-use std::collections::HashMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
@@ -25,7 +24,9 @@ use rustc_middle::ty::TyCtxt;
 use rustc_middle::ty::print::with_no_trimmed_paths;
 
 const MANIFEST_MAGIC: &[u8; 16] = b"CARGO_OPTIC_ID\0\0";
-const PROTOCOL_VERSION: u32 = 2;
+const PROTOCOL_VERSION: u32 = 3;
+const PLACEMENT_RECORD: u32 = 1;
+const END_RECORD: u32 = 0;
 const MANIFEST_PATH_ENV: &str = "OPTIC_IDENTITY_MANIFEST";
 const ORIGINAL_WRAPPER_ENV: &str = "OPTIC_ORIGINAL_RUSTC_WRAPPER";
 const RUSTC_COMMIT_ENV: &str = "OPTIC_RUSTC_COMMIT";
@@ -36,9 +37,10 @@ const DRIVER_INNER_ENV: &str = "OPTIC_RUSTC_DRIVER_INNER";
 const FRESHNESS_CHECK_ENV: &str = "OPTIC_FRESHNESS_CHECK";
 const FRESHNESS_STALE_DIAGNOSTIC: &str = "cargo-optic selected target is not fresh";
 
-#[derive(Default)]
 struct IdentityCallbacks {
-    identities: Vec<CompilerIdentity>,
+    manifest: ManifestWriter,
+
+    error: Option<io::Error>,
 }
 
 struct CompilerIdentity {
@@ -47,7 +49,6 @@ struct CompilerIdentity {
     source: Option<SourceSpan>,
     display_name: String,
     raw_symbol: String,
-    placements: Vec<CodegenUnitPlacement>,
 }
 
 struct CodegenUnitPlacement {
@@ -71,55 +72,37 @@ struct SourceSpan {
 impl Callbacks for IdentityCallbacks {
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
         let partitions = tcx.collect_and_partition_mono_items(());
-        let mut identities = HashMap::new();
 
         for codegen_unit in partitions.codegen_units {
             for (mono_item, data) in codegen_unit.items_in_deterministic_order(tcx) {
                 let MonoItem::Fn(instance) = mono_item else {
                     continue;
                 };
-                let identity = identities.entry(instance).or_insert_with(|| {
-                    let def_id = instance.def_id();
-
-                    CompilerIdentity {
-                        definition_crate: tcx.crate_name(def_id.krate).to_string(),
-                        definition_path: tcx.def_path_str(def_id),
-                        source: source_span(tcx, tcx.def_span(def_id)),
-                        display_name: with_no_trimmed_paths!(
-                            tcx.def_path_str_with_args(def_id, instance.args)
-                        ),
-                        raw_symbol: tcx.symbol_name(instance).name.to_owned(),
-                        placements: Vec::new(),
-                    }
-                });
-                identity.placements.push(CodegenUnitPlacement {
+                let def_id = instance.def_id();
+                let identity = CompilerIdentity {
+                    definition_crate: tcx.crate_name(def_id.krate).to_string(),
+                    definition_path: tcx.def_path_str(def_id),
+                    source: source_span(tcx, tcx.def_span(def_id)),
+                    display_name: with_no_trimmed_paths!(
+                        tcx.def_path_str_with_args(def_id, instance.args)
+                    ),
+                    raw_symbol: tcx.symbol_name(instance).name.to_owned(),
+                };
+                let placement = CodegenUnitPlacement {
                     codegen_unit: codegen_unit.name().to_string(),
                     linkage: format!("{:?}", data.linkage),
                     visibility: format!("{:?}", data.visibility),
                     local_copy: data.inlined,
                     size_estimate: data.size_estimate,
-                });
+                };
+
+                if let Err(error) = self.manifest.write_placement(&identity, &placement) {
+                    self.error = Some(error);
+
+                    return Compilation::Stop;
+                }
             }
         }
-
-        self.identities = identities.into_values().collect();
-        self.identities.sort_by(|left, right| {
-            left.definition_path
-                .cmp(&right.definition_path)
-                .then_with(|| left.display_name.cmp(&right.display_name))
-                .then_with(|| left.raw_symbol.cmp(&right.raw_symbol))
-                .then_with(|| {
-                    left.placements
-                        .iter()
-                        .map(|placement| &placement.codegen_unit)
-                        .cmp(
-                            right
-                                .placements
-                                .iter()
-                                .map(|placement| &placement.codegen_unit),
-                        )
-                })
-        });
 
         Compilation::Continue
     }
@@ -195,14 +178,6 @@ fn run_driver() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let mut callbacks = IdentityCallbacks::default();
-    let exit_code = rustc_driver::catch_with_exit_code(|| {
-        rustc_driver::run_compiler(&arguments, &mut callbacks);
-    });
-    if exit_code != ExitCode::SUCCESS {
-        return exit_code;
-    }
-
     let manifest_path = match env::var_os(MANIFEST_PATH_ENV) {
         Some(path) => PathBuf::from(path),
         None => {
@@ -211,12 +186,32 @@ fn run_driver() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match write_manifest(
-        &manifest_path,
-        &rustc_commit,
-        &arguments,
-        callbacks.identities.iter(),
-    ) {
+    let manifest = match ManifestWriter::create(&manifest_path, &rustc_commit, &arguments) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            eprintln!("failed to create {}: {error}", manifest_path.display());
+
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut callbacks = IdentityCallbacks {
+        manifest,
+        error: None,
+    };
+    let exit_code = rustc_driver::catch_with_exit_code(|| {
+        rustc_driver::run_compiler(&arguments, &mut callbacks);
+    });
+    if exit_code != ExitCode::SUCCESS {
+        return exit_code;
+    }
+
+    if let Some(error) = callbacks.error {
+        eprintln!("failed to write {}: {error}", manifest_path.display());
+
+        return ExitCode::FAILURE;
+    }
+
+    match callbacks.manifest.finish() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("failed to write {}: {error}", manifest_path.display());
@@ -358,46 +353,60 @@ fn execute(mut command: Command) -> ExitCode {
     }
 }
 
-fn write_manifest<'a>(
-    path: &Path,
-    rustc_commit: &str,
-    rustc_arguments: &[String],
-    identities: impl ExactSizeIterator<Item = &'a CompilerIdentity>,
-) -> io::Result<()> {
-    let temporary_path = path.with_extension("tmp");
-    let mut file = File::create(&temporary_path)?;
-    file.write_all(MANIFEST_MAGIC)?;
-    file.write_all(&PROTOCOL_VERSION.to_le_bytes())?;
-    write_string(&mut file, rustc_commit)?;
-    write_u32(&mut file, rustc_arguments.len())?;
+struct ManifestWriter {
+    path: PathBuf,
 
-    for argument in rustc_arguments {
-        write_string(&mut file, argument)?;
-    }
+    temporary_path: PathBuf,
 
-    write_u64(&mut file, identities.len())?;
+    file: File,
+}
 
-    for identity in identities {
-        write_string(&mut file, &identity.definition_crate)?;
-        write_string(&mut file, &identity.definition_path)?;
-        write_optional_source_span(&mut file, identity.source.as_ref())?;
-        write_string(&mut file, &identity.display_name)?;
-        write_string(&mut file, &identity.raw_symbol)?;
-        write_u32(&mut file, identity.placements.len())?;
+impl ManifestWriter {
+    fn create(path: &Path, rustc_commit: &str, rustc_arguments: &[String]) -> io::Result<Self> {
+        let temporary_path = path.with_extension("tmp");
+        let mut file = File::create(&temporary_path)?;
+        file.write_all(MANIFEST_MAGIC)?;
+        file.write_all(&PROTOCOL_VERSION.to_le_bytes())?;
+        write_string(&mut file, rustc_commit)?;
+        write_u32(&mut file, rustc_arguments.len())?;
 
-        for placement in &identity.placements {
-            write_string(&mut file, &placement.codegen_unit)?;
-            write_string(&mut file, &placement.linkage)?;
-            write_string(&mut file, &placement.visibility)?;
-            write_u32(&mut file, usize::from(placement.local_copy))?;
-            write_u64(&mut file, placement.size_estimate)?;
+        for argument in rustc_arguments {
+            write_string(&mut file, argument)?;
         }
+
+        Ok(Self {
+            path: path.to_owned(),
+            temporary_path,
+            file,
+        })
     }
 
-    file.sync_all()?;
-    // Windows requires the file handle to close before an atomic rename.
-    drop(file);
-    fs::rename(temporary_path, path)
+    fn write_placement(
+        &mut self,
+        identity: &CompilerIdentity,
+        placement: &CodegenUnitPlacement,
+    ) -> io::Result<()> {
+        write_u32(&mut self.file, PLACEMENT_RECORD as usize)?;
+        write_string(&mut self.file, &identity.definition_crate)?;
+        write_string(&mut self.file, &identity.definition_path)?;
+        write_optional_source_span(&mut self.file, identity.source.as_ref())?;
+        write_string(&mut self.file, &identity.display_name)?;
+        write_string(&mut self.file, &identity.raw_symbol)?;
+        write_string(&mut self.file, &placement.codegen_unit)?;
+        write_string(&mut self.file, &placement.linkage)?;
+        write_string(&mut self.file, &placement.visibility)?;
+        write_u32(&mut self.file, usize::from(placement.local_copy))?;
+        write_u64(&mut self.file, placement.size_estimate)
+    }
+
+    fn finish(mut self) -> io::Result<()> {
+        write_u32(&mut self.file, END_RECORD as usize)?;
+        self.file.sync_all()?;
+
+        // Windows requires the file handle to close before an atomic rename.
+        drop(self.file);
+        fs::rename(self.temporary_path, self.path)
+    }
 }
 
 fn write_optional_source_span(file: &mut File, source: Option<&SourceSpan>) -> io::Result<()> {

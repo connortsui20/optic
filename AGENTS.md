@@ -20,7 +20,7 @@ Read [README.md](README.md) before you change the product behavior. Use the
 - The `--output llvm-pre-opt` option selects LLVM IR from before optimization.
 - The `--output remarks` option captures or shows LLVM optimization remarks.
 - Plain text is the default format for humans and agents.
-- The `--format json` option provides a versioned transport format for programs.
+- The `--format jsonl` option provides versioned JSON Lines events for programs.
 - An ambiguous query prints complete `show --instance` commands.
 
 ## Persistent state
@@ -35,7 +35,7 @@ Read [README.md](README.md) before you change the product behavior. Use the
 - An instance ID identifies its capture, so `show --instance` does not need a capture ID.
 - New IDs contain random UUIDv4 suffixes.
 - Text output shows at least 12 hexadecimal characters and highlights the shortest unique prefix.
-- The schema version is 7. Older stores require `cargo optic clean`.
+- The schema version is 9. Older stores require `cargo optic clean`.
 - Failed post-compilation ingestion can leave validated evidence below `.optic/store/pending`.
 - A matching request validates Cargo freshness before it resumes retained ingestion.
 
@@ -56,8 +56,11 @@ selected-target compilation. It does not require a user-supplied `RUSTC_BOOTSTRA
 
 Cargo Optic does not enable unstable access for dependencies, build scripts, or compiler probes.
 
-Cargo progress and compiler diagnostics stream to standard error. The final text or JSON result
-uses standard output. One Cargo JSON message and the retained failure tail each have a 1 MiB limit.
+Text-mode Cargo progress and compiler diagnostics stream to standard error. Text results use
+standard output. JSON Lines events use standard output. One Cargo JSON message and the retained
+failure tail each have a 1 MiB limit.
+
+If a capture consumer stops, Cargo Optic terminates and reaps Cargo and its compiler descendants.
 
 The selected target uses saved-temporary arguments and has a separate Cargo fingerprint. Cargo
 checks this fingerprint before Optic reuses evidence.
@@ -69,7 +72,7 @@ rustc driver records compiler identities for the selected target.
 ## Code map
 
 - `crates/cargo-optic/src/app.rs` coordinates capture, cache reuse, lookup, and source display.
-- `crates/cargo-optic/src/cli.rs` owns command validation and text or JSON output.
+- `crates/cargo-optic/src/cli.rs` owns command validation and text or JSON Lines output.
 - `crates/cargo-optic/src/store.rs` owns SQLite, IDs, locks, lifecycle operations, and blobs.
 - `crates/cargo-optic/src/source.rs` snapshots build inputs and finds source items.
 - `crates/cargo-optic/src/pending.rs` validates recoverable post-compilation evidence.
@@ -86,7 +89,8 @@ rustc driver records compiler identities for the selected target.
 - Keep large LLVM modules on disk. Store byte ranges instead of parsed modules.
 - Treat IDs as opaque values. Do not expose SQLite row IDs or artifact paths.
 - Return an error for invalid user or stored data. Reserve panics for internal invariants.
-- Preserve the existing plain-text and versioned JSON contracts unless the user requests a break.
+- Preserve the existing plain-text and versioned JSON Lines contracts unless the user requests a
+  break.
 
 ## Validation
 
