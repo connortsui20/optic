@@ -39,7 +39,7 @@ pub struct RemarkParseLimits {
 impl Default for RemarkParseLimits {
     fn default() -> Self {
         Self {
-            max_file_bytes: 256 * 1024 * 1024,
+            max_file_bytes: 512 * 1024 * 1024,
             max_document_bytes: 4 * 1024 * 1024,
             max_records: 1_000_000,
             max_string_bytes: 64 * 1024,

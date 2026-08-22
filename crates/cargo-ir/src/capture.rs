@@ -30,8 +30,8 @@ use crate::{
 
 const REMARKS_DIRECTORY_NAME: &str = "remarks";
 const MAX_REMARK_FILES: usize = 4_096;
-const MAX_REMARK_BYTES: u64 = 256 * 1024 * 1024;
-const MAX_REMARK_RECORDS: usize = 1_000_000;
+const MAX_REMARK_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const MAX_REMARK_RECORDS: usize = 5_000_000;
 const MAX_DISASSEMBLER_DIAGNOSTIC_BYTES: usize = 1024 * 1024;
 
 /// The byte range of one LLVM function definition.
@@ -1374,6 +1374,16 @@ Args:
                 .to_string()
                 .contains("aggregate record count exceeds 1, got 2")
         );
+    }
+
+    #[test]
+    fn default_remark_limits_cover_the_observed_large_capture() {
+        let limits = RemarkCollectionLimits::default();
+
+        assert!(limits.max_files >= 17);
+        assert!(limits.max_bytes >= 3_164_926_664);
+        assert!(limits.max_records >= 3_628_751);
+        assert!(limits.parse.max_file_bytes >= 488_286_865);
     }
 
     #[test]
