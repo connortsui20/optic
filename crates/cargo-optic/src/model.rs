@@ -54,6 +54,16 @@ pub enum CachePolicy {
     Refresh,
 }
 
+/// Controls cache reuse and retained storage for one capture request.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CaptureOptions {
+    /// Controls whether matching completed evidence can be reused.
+    pub cache_policy: CachePolicy,
+
+    /// Overrides the workspace retained-byte limit for this request.
+    pub maximum_store_bytes: Option<u64>,
+}
+
 /// One compiler output that an inspection command can show.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
@@ -439,11 +449,61 @@ pub struct StoreStatus {
     /// Total blob bytes on disk.
     pub blob_bytes: u64,
 
+    /// Blob bytes referenced by completed captures.
+    pub referenced_blob_bytes: u64,
+
+    /// Blob bytes that explicit garbage collection can reclaim.
+    pub unreferenced_blob_bytes: u64,
+
     /// Recoverable compiler runs awaiting evidence ingestion.
     pub pending: usize,
 
     /// Total bytes retained below pending compiler runs.
     pub pending_bytes: u64,
+
+    /// Total bytes retained below `.optic/store`.
+    pub retained_bytes: u64,
+
+    /// Bytes currently available on the store filesystem.
+    pub available_bytes: u64,
+
+    /// The effective retained-byte limit for new captures.
+    pub maximum_bytes: u64,
+
+    /// The filesystem space that new captures must leave available.
+    pub minimum_available_bytes: u64,
+}
+
+/// One recoverable compiler run that awaits evidence ingestion.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PendingSummary {
+    /// The opaque pending-capture identifier.
+    pub id: crate::PendingId,
+
+    /// The capture identifier reserved for successful publication.
+    pub capture_id: CaptureId,
+
+    /// The build request that produced the retained evidence.
+    pub request: BuildSpec,
+
+    /// The exact rustc release that produced the retained evidence.
+    pub rustc_release: String,
+
+    /// The embedded LLVM version that produced the retained evidence.
+    pub llvm_version: String,
+
+    /// The bytes retained for this compiler run.
+    pub retained_bytes: u64,
+}
+
+/// The result of removing one pending compiler run.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PendingRemoveSummary {
+    /// The full removed pending-capture identifier.
+    pub id: crate::PendingId,
+
+    /// The retained bytes removed with the pending capture.
+    pub removed_bytes: u64,
 }
 
 /// The result of removing one immutable capture.

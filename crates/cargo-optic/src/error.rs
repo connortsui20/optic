@@ -6,7 +6,7 @@ use std::io;
 use std::path::PathBuf;
 use std::time::SystemTimeError;
 
-use crate::{CaptureId, InstanceId};
+use crate::{CaptureId, InstanceId, PendingId};
 
 /// An Optic application failure.
 #[derive(Debug, thiserror::Error)]
@@ -70,6 +70,13 @@ pub enum Error {
     UnknownInstance {
         /// The unmatched instance ID or prefix.
         instance_id: InstanceId,
+    },
+
+    /// No retained pending capture matches the requested full ID or prefix.
+    #[error("pending capture ID must match one retained compiler run, got {pending_id}")]
+    UnknownPending {
+        /// The unmatched pending-capture ID or prefix.
+        pending_id: PendingId,
     },
 
     /// An ID prefix matches more than one stored ID.
@@ -144,6 +151,25 @@ pub enum Error {
 
         /// The explicitly opened `.optic` directory.
         path: PathBuf,
+    },
+
+    /// The evidence store cannot accept another capture within its configured limits.
+    #[error(
+        "evidence store has {retained_bytes} retained bytes with a {maximum_bytes}-byte limit, \
+         and {available_bytes} available bytes with a {minimum_available_bytes}-byte reserve"
+    )]
+    StoreBudgetExceeded {
+        /// Bytes currently retained below `.optic/store`.
+        retained_bytes: u64,
+
+        /// The effective retained-byte limit.
+        maximum_bytes: u64,
+
+        /// Bytes currently available on the store filesystem.
+        available_bytes: u64,
+
+        /// The required available-space reserve.
+        minimum_available_bytes: u64,
     },
 
     /// Evidence from the previous store layout exists at the `.optic` root.

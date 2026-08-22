@@ -20,10 +20,11 @@ use serde::Serialize;
 use crate::app::validate_remark_options;
 use crate::terminal::{CodeHighlighter, CodeSyntax, Terminal};
 use crate::{
-    Application, BuildSpec, BuildTarget, CachePolicy, CaptureId, CaptureMetadata, CaptureProfile,
-    CaptureSummary, CleanSummary, CompareView, CompilerOutput, FindOptions, FindResult,
-    InspectEvent, InstanceId, InstanceSummary, RemarkEvidenceState, RemarkKindFilter,
-    RemarkOptions, RemarkShowView, ShowEvent, UnstableAccessMechanism, UnstableAccessScope,
+    Application, BuildSpec, BuildTarget, CachePolicy, CaptureId, CaptureMetadata, CaptureOptions,
+    CaptureProfile, CaptureSummary, CleanSummary, CompareView, CompilerOutput, FindOptions,
+    FindResult, InspectEvent, InstanceId, InstanceSummary, PendingId, PendingRemoveSummary,
+    PendingSummary, RemarkEvidenceState, RemarkKindFilter, RemarkOptions, RemarkShowView,
+    ShowEvent, UnstableAccessMechanism, UnstableAccessScope,
 };
 
 const MINIMUM_DISPLAY_ID_HEX_DIGITS: usize = 12;
@@ -195,6 +196,17 @@ enum Command {
         format: Format,
     },
 
+    /// Lists, inspects, or removes retained compiler runs awaiting ingestion.
+    Pending {
+        /// Selects one pending-capture operation. Omitting it lists retained runs.
+        #[command(subcommand)]
+        action: Option<PendingCommand>,
+
+        /// Selects plain text or versioned JSON Lines output.
+        #[arg(long, global = true, value_enum, default_value_t)]
+        format: Format,
+    },
+
     /// Removes one capture and retains shared blobs until garbage collection.
     Remove {
         /// Selects a capture by its full ID or a unique prefix.
@@ -353,6 +365,21 @@ enum Command {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum PendingCommand {
+    /// Shows one retained compiler run.
+    Inspect {
+        /// Selects a pending capture by its full ID or a unique prefix.
+        pending_id: PendingId,
+    },
+
+    /// Removes one retained compiler run without changing completed captures.
+    Remove {
+        /// Selects a pending capture by its full ID or a unique prefix.
+        pending_id: PendingId,
+    },
+}
+
 impl Command {
     const fn format(&self) -> Format {
         match self {
@@ -360,6 +387,7 @@ impl Command {
             | Self::Captures { format }
             | Self::Inspect { format, .. }
             | Self::Status { format }
+            | Self::Pending { format, .. }
             | Self::Remove { format, .. }
             | Self::Gc { format }
             | Self::Verify { format }
@@ -376,6 +404,7 @@ impl Command {
             Self::Captures { .. } => "captures",
             Self::Inspect { .. } => "inspect",
             Self::Status { .. } => "status",
+            Self::Pending { .. } => "pending",
             Self::Remove { .. } => "remove",
             Self::Gc { .. } => "gc",
             Self::Verify { .. } => "verify",
@@ -419,6 +448,10 @@ fn validate_optic_selection(cli: &Cli) -> std::result::Result<(), String> {
         Command::Captures { .. }
         | Command::Inspect { .. }
         | Command::Status { .. }
+        | Command::Pending {
+            action: None | Some(PendingCommand::Inspect { .. }),
+            ..
+        }
         | Command::Verify { .. }
         | Command::Compare { .. }
         | Command::Find { .. } => Ok(()),
@@ -444,6 +477,10 @@ struct BuildOptions {
     /// Requests new compiler evidence after pending-ingestion recovery.
     #[arg(long)]
     fresh: bool,
+
+    /// Overrides the retained evidence limit for this capture.
+    #[arg(long, value_name = "BYTES", value_parser = parse_store_limit)]
+    max_store_bytes: Option<u64>,
 
     /// Selects one Cargo package.
     #[arg(short = 'p', long = "package")]
@@ -528,6 +565,13 @@ impl BuildOptions {
         }
     }
 
+    const fn capture_options(&self) -> CaptureOptions {
+        CaptureOptions {
+            cache_policy: self.cache_policy(),
+            maximum_store_bytes: self.max_store_bytes,
+        }
+    }
+
     fn to_spec(&self, manifest_path: Option<PathBuf>) -> BuildSpec {
         let target = if self.lib {
             Some(BuildTarget::Library)
@@ -567,6 +611,7 @@ impl BuildOptions {
     fn has_build_selection(&self) -> bool {
         self.package.is_some()
             || self.fresh
+            || self.max_store_bytes.is_some()
             || self.lib
             || self.bin.is_some()
             || self.bench.is_some()
@@ -875,6 +920,16 @@ enum SelectionFailure {
     Ambiguous,
 }
 
+struct SelectionOptions<'a> {
+    optic_dir: Option<&'a Path>,
+
+    output: ShowOutput,
+
+    remark_options: &'a RemarkOptions,
+
+    include_source: bool,
+}
+
 impl SelectionFailure {
     const fn code(self) -> &'static str {
         match self {
@@ -1003,8 +1058,13 @@ fn execute(application: &mut Application, cli: Cli) -> Result<Execution, Failure
         Command::Capture { build, format } => {
             let terminal = Terminal::new(color.enabled(format));
             let spec = build.to_spec(manifest_path);
-            let Some(summary) =
-                capture_with_output(application, &spec, build.cache_policy(), format, "capture")?
+            let Some(summary) = capture_with_output(
+                application,
+                &spec,
+                build.capture_options(),
+                format,
+                "capture",
+            )?
             else {
                 return Ok(Execution {
                     code: 0,
@@ -1038,15 +1098,25 @@ fn execute(application: &mut Application, cli: Cli) -> Result<Execution, Failure
                 format,
                 &status,
                 format!(
-                    "{} captures, {} blobs, {} bytes, {} pending captures, {} pending bytes\n",
+                    concat!(
+                        "{} captures, {} blobs ({} referenced bytes, {} reclaimable bytes), ",
+                        "{} pending captures ({} bytes), {} retained of {} bytes, ",
+                        "{} bytes available ({}-byte reserve)\n"
+                    ),
                     status.captures,
                     status.blobs,
-                    status.blob_bytes,
+                    status.referenced_blob_bytes,
+                    status.unreferenced_blob_bytes,
                     status.pending,
-                    status.pending_bytes
+                    status.pending_bytes,
+                    status.retained_bytes,
+                    status.maximum_bytes,
+                    status.available_bytes,
+                    status.minimum_available_bytes,
                 ),
             )
         }
+        Command::Pending { action, format } => execute_pending(application, action, format, color),
         Command::Remove { capture, format } => {
             let summary = application.remove(&capture).map_err(|error| Failure {
                 format,
@@ -1189,10 +1259,72 @@ fn execute(application: &mut Application, cli: Cli) -> Result<Execution, Failure
     }
 }
 
+fn execute_pending(
+    application: &mut Application,
+    action: Option<PendingCommand>,
+    format: Format,
+    color: ColorChoice,
+) -> Result<Execution, Failure> {
+    let terminal = Terminal::new(color.enabled(format));
+
+    match action {
+        None => {
+            let summaries = application.pending().map_err(|error| Failure {
+                format,
+                message: error.to_string(),
+            })?;
+            let text =
+                pending_list_text(application, &summaries, format, &terminal).map_err(|error| {
+                    Failure {
+                        format,
+                        message: error.to_string(),
+                    }
+                })?;
+
+            success("pending", format, &summaries, text)
+        }
+        Some(PendingCommand::Inspect { pending_id }) => {
+            let summary = application
+                .inspect_pending(&pending_id)
+                .map_err(|error| Failure {
+                    format,
+                    message: error.to_string(),
+                })?;
+            let display =
+                display_pending_id(application, &summary.id, format).map_err(|error| Failure {
+                    format,
+                    message: error.to_string(),
+                })?;
+
+            success(
+                "pending",
+                format,
+                &summary,
+                pending_summary_text(&summary, &display, &terminal),
+            )
+        }
+        Some(PendingCommand::Remove { pending_id }) => {
+            let summary = application
+                .remove_pending(&pending_id)
+                .map_err(|error| Failure {
+                    format,
+                    message: error.to_string(),
+                })?;
+
+            success(
+                "pending",
+                format,
+                &summary,
+                pending_remove_text(&summary, &terminal),
+            )
+        }
+    }
+}
+
 fn capture_with_output(
     application: &mut Application,
     spec: &BuildSpec,
-    cache_policy: CachePolicy,
+    options: CaptureOptions,
     format: Format,
     command: &'static str,
 ) -> Result<Option<CaptureSummary>, Failure> {
@@ -1201,7 +1333,7 @@ fn capture_with_output(
     }
 
     let mut output_error = None;
-    let result = application.capture_with_events(spec, cache_policy, |event| {
+    let result = application.capture_with_options_and_events(spec, options, |event| {
         if let Err(error) = write_capture_event(format, command, event) {
             output_error = Some(error);
 
@@ -1510,7 +1642,7 @@ fn execute_show(application: &mut Application, request: ShowRequest) -> Result<E
             spec.capture_remarks = true;
         }
         let Some(summary) =
-            capture_with_output(application, &spec, build.cache_policy(), format, "show")?
+            capture_with_output(application, &spec, build.capture_options(), format, "show")?
         else {
             return Ok(Execution {
                 code: 0,
@@ -1569,10 +1701,12 @@ fn select_and_show(
             result,
             &display_capture,
             &display_instances,
-            application.explicit_optic_dir(),
-            output,
-            remark_options,
-            include_source,
+            SelectionOptions {
+                optic_dir: application.explicit_optic_dir(),
+                output,
+                remark_options,
+                include_source,
+            },
             terminal,
         );
 
@@ -1713,6 +1847,24 @@ fn display_instance_id(
     }
 }
 
+fn display_pending_id(
+    application: &Application,
+    pending_id: &PendingId,
+    format: Format,
+) -> crate::Result<DisplayIdentifier> {
+    match format {
+        Format::Text => {
+            let unique_prefix = application.unique_pending_prefix(pending_id)?;
+
+            Ok(DisplayIdentifier::new(
+                pending_id.as_str(),
+                unique_prefix.as_str(),
+            ))
+        }
+        Format::JsonLines => Ok(DisplayIdentifier::full(pending_id.as_str())),
+    }
+}
+
 fn success<T: Serialize>(
     command: &'static str,
     format: Format,
@@ -1815,6 +1967,10 @@ fn print_jsonl_error(code: &'static str, message: &str) -> ExitCode {
     let _ = write_stdout(&format!("{output}\n"));
 
     ExitCode::from(2)
+}
+
+fn parse_store_limit(value: &str) -> std::result::Result<u64, String> {
+    crate::config::parse_byte_size(value).map_err(|error| error.to_string())
 }
 
 fn parse_find_limit(value: &str) -> std::result::Result<usize, String> {
@@ -2022,6 +2178,104 @@ fn clean_text(summary: &CleanSummary, terminal: &Terminal) -> String {
             terminal.warning("No stored Optic evidence exists"),
             summary.path.display(),
         )
+    }
+}
+
+fn pending_list_text(
+    application: &Application,
+    summaries: &[PendingSummary],
+    format: Format,
+    terminal: &Terminal,
+) -> crate::Result<String> {
+    if format == Format::JsonLines {
+        return Ok(String::new());
+    }
+    if summaries.is_empty() {
+        return Ok(format!("{}\n", terminal.warning("No pending captures.")));
+    }
+
+    let mut output = format!("{}\n", terminal.heading("Pending captures"));
+    for summary in summaries {
+        let display = display_pending_id(application, &summary.id, format)?;
+        writeln!(
+            output,
+            "{}  {} bytes  {}  {}  {}",
+            terminal.identifier(&display.text, display.unique_prefix_length),
+            summary.retained_bytes,
+            summary
+                .request
+                .package
+                .as_deref()
+                .unwrap_or("Cargo default"),
+            pending_target_text(summary.request.target.as_ref()),
+            summary.request.profile.as_deref().unwrap_or("dev"),
+        )
+        .expect("writing pending-capture text to a String cannot fail");
+    }
+
+    Ok(output)
+}
+
+fn pending_summary_text(
+    summary: &PendingSummary,
+    display_id: &DisplayIdentifier,
+    terminal: &Terminal,
+) -> String {
+    let remarks = if summary.request.capture_remarks {
+        "requested"
+    } else {
+        "not requested"
+    };
+
+    format!(
+        concat!(
+            "{}\n",
+            "  Pending   {}\n",
+            "  Capture   {}\n",
+            "  Bytes     {}\n",
+            "  Package   {}\n",
+            "  Target    {}\n",
+            "  Profile   {}\n",
+            "  Evidence  {:?}\n",
+            "  Remarks   {}\n",
+            "  Toolchain rustc {} · LLVM {}\n",
+        ),
+        terminal.heading("Pending capture"),
+        terminal.identifier(&display_id.text, display_id.unique_prefix_length),
+        summary.capture_id,
+        summary.retained_bytes,
+        summary
+            .request
+            .package
+            .as_deref()
+            .unwrap_or("Cargo default"),
+        pending_target_text(summary.request.target.as_ref()),
+        summary.request.profile.as_deref().unwrap_or("dev"),
+        summary.request.capture_profile,
+        remarks,
+        summary.rustc_release,
+        summary.llvm_version,
+    )
+}
+
+fn pending_remove_text(summary: &PendingRemoveSummary, terminal: &Terminal) -> String {
+    let display = DisplayIdentifier::full(summary.id.as_str());
+
+    format!(
+        "{} {} ({} bytes).\n",
+        terminal.positive("Removed pending capture"),
+        terminal.identifier(&display.text, display.unique_prefix_length),
+        summary.removed_bytes,
+    )
+}
+
+fn pending_target_text(target: Option<&BuildTarget>) -> String {
+    match target {
+        None => "Cargo default".to_owned(),
+        Some(BuildTarget::Library) => "library".to_owned(),
+        Some(BuildTarget::Binary(name)) => format!("binary {name}"),
+        Some(BuildTarget::Benchmark(name)) => format!("benchmark {name}"),
+        Some(BuildTarget::Example(name)) => format!("example {name}"),
     }
 }
 
@@ -2301,10 +2555,7 @@ fn selection_text(
     result: &FindResult,
     display_capture: &DisplayIdentifier,
     display_instances: &[DisplayIdentifier],
-    optic_dir: Option<&Path>,
-    selected_output: ShowOutput,
-    remark_options: &RemarkOptions,
-    include_source: bool,
+    options: SelectionOptions<'_>,
     terminal: &Terminal,
 ) -> String {
     let failure = if result.instances.is_empty() {
@@ -2338,10 +2589,10 @@ fn selection_text(
             show_command(
                 terminal,
                 display_id,
-                optic_dir,
-                selected_output,
-                (selected_output == ShowOutput::Remarks).then_some(remark_options),
-                include_source,
+                options.optic_dir,
+                options.output,
+                (options.output == ShowOutput::Remarks).then_some(options.remark_options),
+                options.include_source,
             )
         )
         .expect("writing selection text to a String cannot fail");
@@ -2545,7 +2796,7 @@ mod tests {
     use clap::Parser as _;
 
     use super::{
-        Cli, Command, DisplayIdentifier, ShowOutput, find_text, show_command,
+        Cli, Command, DisplayIdentifier, PendingCommand, ShowOutput, find_text, show_command,
         validate_optic_selection,
     };
     use crate::{
@@ -2621,6 +2872,21 @@ mod tests {
     }
 
     #[test]
+    fn parses_binary_storage_limits_for_capture_commands() {
+        let cli = Cli::try_parse_from(["cargo optic", "capture", "--max-store-bytes", "2GiB"])
+            .expect("capture accepts a binary storage limit");
+
+        assert!(matches!(
+            cli.command,
+            Command::Capture { build, .. }
+                if build.max_store_bytes == Some(2 * 1024 * 1024 * 1024)
+        ));
+        assert!(
+            Cli::try_parse_from(["cargo optic", "capture", "--max-store-bytes", "2GB",]).is_err()
+        );
+    }
+
+    #[test]
     fn parses_foreign_store_selections() {
         let cli = Cli::try_parse_from([
             "cargo optic",
@@ -2655,10 +2921,63 @@ mod tests {
     }
 
     #[test]
+    fn parses_pending_lifecycle_commands() {
+        let list = Cli::try_parse_from(["cargo optic", "pending"])
+            .expect("pending without an action lists retained captures");
+        assert!(matches!(
+            list.command,
+            Command::Pending { action: None, .. }
+        ));
+
+        let inspect = Cli::try_parse_from([
+            "cargo optic",
+            "--optic-dir",
+            "/tmp/.optic",
+            "pending",
+            "inspect",
+            "pen_0",
+            "--format",
+            "jsonl",
+        ])
+        .expect("pending inspect accepts a foreign store and unique prefix");
+        assert!(validate_optic_selection(&inspect).is_ok());
+        assert!(matches!(
+            inspect.command,
+            Command::Pending {
+                action: Some(PendingCommand::Inspect { .. }),
+                ..
+            }
+        ));
+
+        let remove = Cli::try_parse_from([
+            "cargo optic",
+            "pending",
+            "remove",
+            "pen_0123456789abcdef0123456789abcdef",
+        ])
+        .expect("pending remove accepts a complete ID");
+        assert!(matches!(
+            remove.command,
+            Command::Pending {
+                action: Some(PendingCommand::Remove { .. }),
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn rejects_mutating_and_build_based_foreign_commands() {
         for arguments in [
             vec!["cargo optic", "--optic-dir", "/tmp/.optic", "capture"],
             vec!["cargo optic", "--optic-dir", "/tmp/.optic", "gc"],
+            vec![
+                "cargo optic",
+                "--optic-dir",
+                "/tmp/.optic",
+                "pending",
+                "remove",
+                "pen_0",
+            ],
             vec![
                 "cargo optic",
                 "--optic-dir",

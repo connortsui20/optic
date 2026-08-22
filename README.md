@@ -141,7 +141,8 @@ not use one combined `has_body` value.
 If compilation succeeds but ingestion fails, Cargo Optic retains validated staging evidence. The
 next matching request runs Cargo's freshness check. If fresh, it resumes ingestion without another
 selected-target compilation. `status` reports the pending capture count and total retained bytes.
-`clean` removes this pending evidence.
+Use `pending` to list retained runs, `pending inspect ID` to inspect one, and `pending remove ID` to
+discard one. `clean` removes all pending evidence with the rest of the store.
 
 ## Capture optimization remarks
 
@@ -188,16 +189,51 @@ The compatibility result checks the compiler commit, host, environment, wrapper 
 effective rustc arguments. It ignores Optic arguments that only collect evidence. The structural
 counts are not performance measurements.
 
+Use `--optic-dir PATH` to read completed or pending evidence from another workspace without Cargo
+discovery or store mutation. The path must name an existing `.optic` directory with the same store
+schema. This is useful for another worktree of the same project.
+
+```console
+cargo optic --optic-dir ../other-worktree/.optic captures
+cargo optic --optic-dir ../other-worktree/.optic show --instance INSTANCE_ID
+```
+
+A comparison can select each store independently:
+
+```console
+cargo optic compare \
+  --before OLD_INSTANCE_ID --before-optic-dir ../old/.optic \
+  --after NEW_INSTANCE_ID --after-optic-dir ../new/.optic
+```
+
 ## Manage stored evidence
 
 Use these commands to inspect and manage the store:
 
 ```console
 cargo optic status
+cargo optic pending
 cargo optic verify
 cargo optic remove --capture CAPTURE_ID_PREFIX
 cargo optic gc
 ```
+
+`status` separates referenced and reclaimable blob bytes. It also reports total retained bytes,
+the effective limit, available filesystem space, and the required free-space reserve.
+
+The default retained limit is the smaller of 32 GiB and 25 percent of filesystem capacity. The
+default free-space reserve is the smaller of 10 GiB and 5 percent of capacity. Set a workspace
+limit in `.optic/config.toml`:
+
+```toml
+[store]
+max_bytes = "64GiB"
+```
+
+Use `--max-store-bytes 8GiB` on `capture` or a build-based `show` command for a one-command
+override. Cargo Optic checks the policy before compilation, while it publishes blobs, and at
+bounded intervals during ingestion. Completed evidence remains readable when a store is over its
+limit.
 
 The `remove` command removes one catalog capture. Shared blobs remain until `gc` removes all
 unreferenced blobs. The `verify` command reads each referenced blob and checks its BLAKE3 digest.
@@ -212,9 +248,8 @@ The command removes only `.optic/store`. It preserves `.optic/locks` and other e
 `.optic`. It does not remove the Cargo `target` directory. The command succeeds when `.optic/store`
 does not exist.
 
-The `.optic` root is reserved for durable workspace state. A future release can add
-`.optic/config.toml` without changing the `clean` contract. Cargo Optic does not create
-`.optic.lock` in the workspace root.
+The `.optic` root is reserved for durable workspace state. `clean` preserves `.optic/config.toml`.
+Cargo Optic does not create `.optic.lock` in the workspace root.
 
 ## Persistent state
 
@@ -226,8 +261,10 @@ Cargo Optic stores its operation and data locks in `.optic/locks`. These locks r
 
 There is no current capture and no session state. Each read-only command uses an explicit capture
 or instance ID. An instance ID identifies its capture. Content-addressed blobs hold the evidence.
+Blob names remain the BLAKE3 digest of their uncompressed content. Schema 10 stores every blob as
+one zstd level-3 frame and decompresses logical byte ranges transparently.
 
-The current store schema is version 9. Cargo Optic rejects older stores. Run `cargo optic clean`
+The current store schema is version 10. Cargo Optic rejects older stores. Run `cargo optic clean`
 once to replace an older prototype store.
 
 This prototype also uses JSON Lines transport version 1, evidence request version 5, pending marker

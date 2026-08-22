@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -19,17 +19,22 @@ use rusqlite::types::Type;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use walkdir::WalkDir;
 
+use crate::pending::PendingCapture;
 use crate::source::{SourceBaseline, StoredSource};
 use crate::{
     ArtifactSummary, BodyView, BuildSpec, CaptureDetails, CaptureDisposition, CaptureId,
     CaptureMetadata, CaptureProfile, CaptureSummary, CommandView, CompilerOutput,
     CompilerProvenance, EnvironmentView, Error, FindMatchKind, FindOptions, FindResult, GcSummary,
-    InstanceId, InstanceSummary, OutputAvailability, RemarkCaptureSummary, RemarkEvidenceState,
-    RemarkFileSummary, RemarkKindFilter, RemarkOptions, RemarkShowView, RemarkView, RemoveSummary,
-    Result, ShowEvent, ShowView, SourceLocation, StoreStatus, TEXT_CHUNK_BYTES, VerifySummary,
+    InstanceId, InstanceSummary, OutputAvailability, PendingId, PendingRemoveSummary,
+    PendingSummary, RemarkCaptureSummary, RemarkEvidenceState, RemarkFileSummary, RemarkKindFilter,
+    RemarkOptions, RemarkShowView, RemarkView, RemoveSummary, Result, ShowEvent, ShowView,
+    SourceLocation, StoreStatus, TEXT_CHUNK_BYTES, VerifySummary,
 };
 
-const STORE_VERSION: u32 = 9;
+const STORE_VERSION: u32 = 10;
+// Level 3 reduced the observed 319 MB LLVM module to 36 MB while encoding above 2 GB/s.
+const BLOB_COMPRESSION_LEVEL: i32 = 3;
+const STORAGE_BUDGET_EVENT_INTERVAL: usize = 100_000;
 
 #[derive(Clone, Debug)]
 pub(crate) struct AnalysisKey(String);
@@ -97,7 +102,23 @@ impl<'a> CaptureCacheKey<'a> {
     }
 }
 
+pub(crate) struct CapturePublication<'a> {
+    pub(crate) capture_id: &'a CaptureId,
+
+    pub(crate) cache_key: CaptureCacheKey<'a>,
+
+    pub(crate) spec: &'a BuildSpec,
+
+    pub(crate) sources: &'a SourceBaseline,
+
+    pub(crate) target: &'a str,
+
+    pub(crate) maximum_store_bytes: Option<u64>,
+}
+
 pub(crate) struct Store {
+    optic: PathBuf,
+
     root: PathBuf,
 
     locks: PathBuf,
@@ -184,6 +205,7 @@ impl Store {
         initialize_schema(&mut connection)?;
 
         Ok(Self {
+            optic,
             root,
             locks,
             blobs,
@@ -213,6 +235,7 @@ impl Store {
         validate_schema(&connection)?;
 
         Ok(Self {
+            optic: optic.to_owned(),
             root,
             locks,
             blobs,
@@ -288,13 +311,17 @@ impl Store {
 
     pub(crate) fn publish_stream(
         &mut self,
-        capture_id: &CaptureId,
-        cache_key: CaptureCacheKey<'_>,
-        spec: &BuildSpec,
         compilation: CompiledCapture,
-        sources: &SourceBaseline,
-        target: &str,
+        publication: CapturePublication<'_>,
     ) -> Result<CaptureSummary> {
+        let CapturePublication {
+            capture_id,
+            cache_key,
+            spec,
+            sources,
+            target,
+            maximum_store_bytes,
+        } = publication;
         let analysis_directory = compilation.invocation.request.analysis_directory.clone();
         let staging_path = analysis_directory
             .parent()
@@ -310,7 +337,7 @@ impl Store {
                     return;
                 }
 
-                if let Err(error) = staging.push(self, event) {
+                if let Err(error) = staging.push(self, event, maximum_store_bytes) {
                     staging_error = Some(error);
                 }
             },
@@ -325,10 +352,11 @@ impl Store {
         }
 
         for source in &sources.entries {
-            staging.push_source(self, source)?;
+            staging.push_source(self, source, maximum_store_bytes)?;
         }
 
         let staged = staging.finish()?;
+        self.ensure_storage_budget(maximum_store_bytes)?;
         self.commit_staged_capture(capture_id, cache_key, spec, &metadata, target, staged)?;
 
         self.capture_summary(capture_id, CaptureDisposition::Captured)
@@ -544,15 +572,110 @@ impl Store {
                 integer_from_row(row, 0)
             })?;
         let blobs = self.blob_entries()?;
+        let referenced = self.referenced_blob_digests()?;
+        let referenced_blob_bytes = blobs
+            .iter()
+            .filter(|blob| referenced.contains(&blob.digest))
+            .map(|blob| blob.bytes)
+            .sum();
+        let unreferenced_blob_bytes = blobs
+            .iter()
+            .filter(|blob| !referenced.contains(&blob.digest))
+            .map(|blob| blob.bytes)
+            .sum();
 
         let (pending, pending_bytes) = pending_entries(&self.pending)?;
+        let retained_bytes = directory_bytes(&self.root)?;
+        let (available_bytes, policy) = self.storage_policy(None)?;
 
         Ok(StoreStatus {
             captures,
             blobs: blobs.len(),
             blob_bytes: blobs.iter().map(|blob| blob.bytes).sum(),
+            referenced_blob_bytes,
+            unreferenced_blob_bytes,
             pending,
             pending_bytes,
+            retained_bytes,
+            available_bytes,
+            maximum_bytes: policy.maximum_bytes,
+            minimum_available_bytes: policy.available_space_reserve,
+        })
+    }
+
+    pub(crate) fn ensure_storage_budget(&self, command_maximum_bytes: Option<u64>) -> Result<()> {
+        let retained_bytes = directory_bytes(&self.root)?;
+        let (available_bytes, policy) = self.storage_policy(command_maximum_bytes)?;
+        if retained_bytes < policy.maximum_bytes && available_bytes > policy.available_space_reserve
+        {
+            return Ok(());
+        }
+
+        Err(Error::StoreBudgetExceeded {
+            retained_bytes,
+            maximum_bytes: policy.maximum_bytes,
+            available_bytes,
+            minimum_available_bytes: policy.available_space_reserve,
+        })
+    }
+
+    fn storage_policy(
+        &self,
+        command_maximum_bytes: Option<u64>,
+    ) -> Result<(u64, crate::config::StorePolicy)> {
+        let filesystem_bytes = fs2::total_space(&self.root).map_err(|source| {
+            Error::filesystem("read filesystem capacity for", &self.root, source)
+        })?;
+        let available_bytes = fs2::available_space(&self.root)
+            .map_err(|source| Error::filesystem("read available space for", &self.root, source))?;
+        let policy =
+            crate::config::load_store_policy(&self.optic, command_maximum_bytes, filesystem_bytes)?;
+
+        Ok((available_bytes, policy))
+    }
+
+    pub(crate) fn pending(&self) -> Result<Vec<PendingSummary>> {
+        Ok(self
+            .pending_entries()?
+            .into_iter()
+            .map(|entry| entry.summary)
+            .collect())
+    }
+
+    pub(crate) fn pending_summary(&self, pending_id: &PendingId) -> Result<PendingSummary> {
+        Ok(self.resolve_pending(pending_id)?.summary)
+    }
+
+    pub(crate) fn unique_pending_prefix(&self, pending_id: &PendingId) -> Result<PendingId> {
+        let entries = self.pending_entries()?;
+        let index = entries
+            .binary_search_by(|entry| entry.summary.id.as_str().cmp(pending_id.as_str()))
+            .map_err(|_| Error::UnknownPending {
+                pending_id: pending_id.clone(),
+            })?;
+        let previous = index
+            .checked_sub(1)
+            .map(|index| entries[index].summary.id.as_str());
+        let next = entries
+            .get(index + 1)
+            .map(|entry| entry.summary.id.as_str());
+        let length = unique_prefix_length(pending_id.as_str(), previous, next);
+
+        Ok(pending_id.as_str()[..length]
+            .parse()
+            .expect("the pending prefix comes from a validated pending-capture ID"))
+    }
+
+    pub(crate) fn remove_pending(&self, pending_id: &PendingId) -> Result<PendingRemoveSummary> {
+        self.require_writable("remove pending evidence")?;
+        let entry = self.resolve_pending(pending_id)?;
+        fs::remove_dir_all(&entry.path)
+            .map_err(|source| Error::filesystem("remove", &entry.path, source))?;
+        sync_directory(&self.pending)?;
+
+        Ok(PendingRemoveSummary {
+            id: entry.summary.id,
+            removed_bytes: entry.summary.retained_bytes,
         })
     }
 
@@ -1069,11 +1192,21 @@ impl Store {
             .transpose()
     }
 
+    #[cfg(test)]
     fn publish_blob(&self, source: &Path) -> Result<String> {
+        self.publish_blob_with_limit(source, None)
+    }
+
+    fn publish_blob_with_limit(
+        &self,
+        source: &Path,
+        maximum_store_bytes: Option<u64>,
+    ) -> Result<String> {
+        self.ensure_storage_budget(maximum_store_bytes)?;
         let temporary = self
             .blobs
             .join(format!(".{}.tmp", uuid::Uuid::now_v7().simple()));
-        let expected_digest = match copy_and_hash_file(source, &temporary) {
+        let expected_digest = match compress_and_hash_file(source, &temporary) {
             Ok(digest) => digest,
             Err(error) => {
                 let _ = fs::remove_file(&temporary);
@@ -1091,6 +1224,11 @@ impl Store {
             result?;
 
             return Ok(digest);
+        }
+        if let Err(error) = self.ensure_storage_budget(maximum_store_bytes) {
+            let _ = fs::remove_file(&temporary);
+
+            return Err(error);
         }
 
         let parent = destination
@@ -1306,6 +1444,58 @@ impl Store {
         }
     }
 
+    fn resolve_pending(&self, prefix: &PendingId) -> Result<PendingEntry> {
+        let mut candidates = self
+            .pending_entries()?
+            .into_iter()
+            .filter(|entry| entry.summary.id.as_str().starts_with(prefix.as_str()));
+        let Some(candidate) = candidates.next() else {
+            return Err(Error::UnknownPending {
+                pending_id: prefix.clone(),
+            });
+        };
+        let Some(other) = candidates.next() else {
+            return Ok(candidate);
+        };
+
+        Err(ambiguous_identifier(
+            "pending capture",
+            prefix.as_str(),
+            &[
+                candidate.summary.id.to_string(),
+                other.summary.id.to_string(),
+            ],
+        ))
+    }
+
+    fn pending_entries(&self) -> Result<Vec<PendingEntry>> {
+        let directories = fs::read_dir(&self.pending)
+            .map_err(|source| Error::filesystem("read", &self.pending, source))?;
+        let mut entries = Vec::new();
+
+        for directory in directories {
+            let directory =
+                directory.map_err(|source| Error::filesystem("read", &self.pending, source))?;
+            let path = directory.path();
+            if !directory
+                .file_type()
+                .map_err(|source| Error::filesystem("read metadata for", &path, source))?
+                .is_dir()
+                || !PendingCapture::exists(&path)
+            {
+                continue;
+            }
+
+            entries.push(PendingEntry {
+                summary: PendingCapture::summary(&path)?,
+                path,
+            });
+        }
+        entries.sort_by(|left, right| left.summary.id.cmp(&right.summary.id));
+
+        Ok(entries)
+    }
+
     fn resolve_instance(&self, prefix: &InstanceId) -> Result<ResolvedInstance> {
         let mut statement = self.connection.prepare(
             "SELECT capture_id, id FROM instances
@@ -1490,11 +1680,11 @@ impl Store {
 
     fn read_blob(&self, digest: &str) -> Result<Vec<u8>> {
         let (path, expected) = self.verified_blob_path(digest)?;
-        let mut file =
-            File::open(&path).map_err(|source| Error::filesystem("open", &path, source))?;
+        let mut decoder = blob_decoder(&path)?;
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
-            .map_err(|source| Error::filesystem("read", &path, source))?;
+        decoder
+            .read_to_end(&mut bytes)
+            .map_err(|source| invalid_blob("decompress", &path, source))?;
 
         verify_digest(&path, expected, blake3::hash(&bytes))?;
 
@@ -1502,53 +1692,14 @@ impl Store {
     }
 
     fn read_blob_range(&self, digest: &str, start: i64, end: i64) -> Result<String> {
-        let (path, _) = self.verified_blob_path(digest)?;
-        let start = u64::try_from(start).map_err(|_| Error::InvalidRange {
-            path: path.clone(),
-            start: 0,
-            end: 0,
-        })?;
-        let end = u64::try_from(end).map_err(|_| Error::InvalidRange {
-            path: path.clone(),
-            start,
-            end: 0,
-        })?;
-        let length_u64 = end.checked_sub(start).ok_or_else(|| Error::InvalidRange {
-            path: path.clone(),
-            start,
-            end,
-        })?;
-        let length = usize::try_from(length_u64).map_err(|_| Error::InvalidRange {
-            path: path.clone(),
-            start,
-            end,
-        })?;
-        let mut file =
-            File::open(&path).map_err(|source| Error::filesystem("open", &path, source))?;
-        let file_length = file
-            .metadata()
-            .map_err(|source| Error::filesystem("read metadata for", &path, source))?
-            .len();
-        if end > file_length {
-            return Err(Error::InvalidRange { path, start, end });
-        }
-        file.seek(SeekFrom::Start(start))
-            .map_err(|source| Error::filesystem("seek", &path, source))?;
-        let mut bytes = Vec::with_capacity(length);
-        file.take(length_u64)
-            .read_to_end(&mut bytes)
-            .map_err(|source| Error::filesystem("read", &path, source))?;
-        if bytes.len() != length {
-            return Err(Error::InvalidRange { path, start, end });
-        }
+        let mut text = String::new();
+        self.read_blob_range_with(digest, start, end, |chunk| {
+            text.push_str(&chunk);
 
-        String::from_utf8(bytes).map_err(|source| {
-            Error::filesystem(
-                "decode UTF-8 from",
-                &path,
-                io::Error::new(io::ErrorKind::InvalidData, source),
-            )
-        })
+            Ok(())
+        })?;
+
+        Ok(text)
     }
 
     fn read_blob_range_with(
@@ -1575,19 +1726,13 @@ impl Store {
             start,
             end,
         })?;
-        let mut file =
-            File::open(&path).map_err(|source| Error::filesystem("open", &path, source))?;
-        if end
-            > file
-                .metadata()
-                .map_err(|source| Error::filesystem("read metadata for", &path, source))?
-                .len()
-        {
+        let mut decoder = blob_decoder(&path)?;
+        let skipped = io::copy(&mut decoder.by_ref().take(start), &mut io::sink())
+            .map_err(|source| invalid_blob("decompress", &path, source))?;
+        if skipped != start {
             return Err(Error::InvalidRange { path, start, end });
         }
-        file.seek(SeekFrom::Start(start))
-            .map_err(|source| Error::filesystem("seek", &path, source))?;
-        let mut reader = file.take(length);
+        let mut reader = decoder.take(length);
         let mut buffer = vec![0_u8; TEXT_CHUNK_BYTES - 4];
         let mut pending = Vec::with_capacity(TEXT_CHUNK_BYTES);
         let mut read_bytes = 0_u64;
@@ -1595,7 +1740,7 @@ impl Store {
         loop {
             let bytes = reader
                 .read(&mut buffer)
-                .map_err(|source| Error::filesystem("read", &path, source))?;
+                .map_err(|source| invalid_blob("decompress", &path, source))?;
             if bytes == 0 {
                 break;
             }
@@ -1626,14 +1771,30 @@ impl Store {
     }
 }
 
-fn copy_and_hash_file(source: &Path, destination: &Path) -> Result<blake3::Hash> {
+fn compress_and_hash_file(source: &Path, destination: &Path) -> Result<blake3::Hash> {
     let mut source_file =
         File::open(source).map_err(|error| Error::filesystem("open", source, error))?;
-    let mut destination_file = OpenOptions::new()
+    let source_bytes = source_file
+        .metadata()
+        .map_err(|error| Error::filesystem("read metadata for", source, error))?
+        .len();
+    let destination_file = OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(destination)
         .map_err(|error| Error::filesystem("create", destination, error))?;
+    let mut encoder =
+        zstd::stream::write::Encoder::new(destination_file, BLOB_COMPRESSION_LEVEL)
+            .map_err(|error| Error::filesystem("create compressor for", destination, error))?;
+    encoder
+        .include_checksum(true)
+        .map_err(|error| Error::filesystem("configure compressor for", destination, error))?;
+    encoder
+        .include_contentsize(true)
+        .map_err(|error| Error::filesystem("configure compressor for", destination, error))?;
+    encoder
+        .set_pledged_src_size(Some(source_bytes))
+        .map_err(|error| Error::filesystem("configure compressor for", destination, error))?;
     let mut hasher = blake3::Hasher::new();
     let mut buffer = vec![0_u8; 64 * 1024];
 
@@ -1646,11 +1807,14 @@ fn copy_and_hash_file(source: &Path, destination: &Path) -> Result<blake3::Hash>
             break;
         }
 
-        destination_file
+        encoder
             .write_all(&buffer[..length])
-            .map_err(|error| Error::filesystem("write", destination, error))?;
+            .map_err(|error| Error::filesystem("compress", destination, error))?;
         hasher.update(&buffer[..length]);
     }
+    let destination_file = encoder
+        .finish()
+        .map_err(|error| Error::filesystem("finish compressing", destination, error))?;
 
     destination_file
         .sync_all()
@@ -1660,14 +1824,14 @@ fn copy_and_hash_file(source: &Path, destination: &Path) -> Result<blake3::Hash>
 }
 
 fn verify_file_digest(path: &Path, expected: blake3::Hash) -> Result<()> {
-    let mut file = File::open(path).map_err(|source| Error::filesystem("open", path, source))?;
+    let mut decoder = blob_decoder(path)?;
     let mut hasher = blake3::Hasher::new();
     let mut buffer = vec![0_u8; 64 * 1024];
 
     loop {
-        let length = file
+        let length = decoder
             .read(&mut buffer)
-            .map_err(|source| Error::filesystem("read", path, source))?;
+            .map_err(|source| invalid_blob("decompress", path, source))?;
 
         if length == 0 {
             break;
@@ -1677,6 +1841,21 @@ fn verify_file_digest(path: &Path, expected: blake3::Hash) -> Result<()> {
     }
 
     verify_digest(path, expected, hasher.finalize())
+}
+
+fn blob_decoder(path: &Path) -> Result<zstd::stream::read::Decoder<'static, BufReader<File>>> {
+    let file = File::open(path).map_err(|source| Error::filesystem("open", path, source))?;
+
+    zstd::stream::read::Decoder::new(file)
+        .map_err(|source| invalid_blob("create decompressor for", path, source))
+}
+
+fn invalid_blob(operation: &'static str, path: &Path, source: io::Error) -> Error {
+    Error::filesystem(
+        operation,
+        path,
+        io::Error::new(io::ErrorKind::InvalidData, source),
+    )
 }
 
 fn verify_digest(path: &Path, expected: blake3::Hash, actual: blake3::Hash) -> Result<()> {
@@ -1879,6 +2058,12 @@ struct BlobEntry {
     bytes: u64,
 }
 
+struct PendingEntry {
+    path: PathBuf,
+
+    summary: PendingSummary,
+}
+
 struct StagedCapture {
     path: PathBuf,
 
@@ -1887,6 +2072,8 @@ struct StagedCapture {
     current_module: Option<String>,
 
     current_remark_file: Option<StagedRemarkFile>,
+
+    events_since_budget_check: usize,
 }
 
 struct StagedRemarkFile {
@@ -2021,17 +2208,33 @@ impl StagedCapture {
             connection,
             current_module: None,
             current_remark_file: None,
+            events_since_budget_check: 0,
         })
     }
 
-    fn push(&mut self, store: &Store, event: EvidenceEvent) -> Result<()> {
+    fn push(
+        &mut self,
+        store: &Store,
+        event: EvidenceEvent,
+        maximum_store_bytes: Option<u64>,
+    ) -> Result<()> {
+        self.events_since_budget_check += 1;
+        if self.events_since_budget_check == STORAGE_BUDGET_EVENT_INTERVAL {
+            store.ensure_storage_budget(maximum_store_bytes)?;
+            self.events_since_budget_check = 0;
+        }
+
         match event {
             EvidenceEvent::Placement { record } => self.push_placement(record),
-            EvidenceEvent::ModuleStarted { module } => self.start_module(store, module),
+            EvidenceEvent::ModuleStarted { module } => {
+                self.start_module(store, module, maximum_store_bytes)
+            }
             EvidenceEvent::Body { body } => self.push_body(body),
             EvidenceEvent::Declaration { declaration } => self.push_declaration(declaration),
             EvidenceEvent::Alias { alias } => self.push_alias(alias),
-            EvidenceEvent::RemarkFileStarted { file } => self.start_remark_file(store, file),
+            EvidenceEvent::RemarkFileStarted { file } => {
+                self.start_remark_file(store, file, maximum_store_bytes)
+            }
             EvidenceEvent::Remark { remark } => self.push_remark(remark),
         }
     }
@@ -2108,10 +2311,16 @@ impl StagedCapture {
         Ok(())
     }
 
-    fn start_module(&mut self, store: &Store, module: cargo_ir::ModuleStart) -> Result<()> {
+    fn start_module(
+        &mut self,
+        store: &Store,
+        module: cargo_ir::ModuleStart,
+        maximum_store_bytes: Option<u64>,
+    ) -> Result<()> {
         let module_id = format!("mod_{}", uuid::Uuid::now_v7().simple());
-        let bitcode_blob = store.publish_blob(&module.bitcode_path)?;
-        let text_blob = store.publish_blob(&module.text_path)?;
+        let bitcode_blob =
+            store.publish_blob_with_limit(&module.bitcode_path, maximum_store_bytes)?;
+        let text_blob = store.publish_blob_with_limit(&module.text_path, maximum_store_bytes)?;
         self.connection.execute(
             "INSERT INTO modules(
                  id, name, stage, compiler_stage, codegen_unit, lto, capture_method,
@@ -2191,9 +2400,14 @@ impl StagedCapture {
         Ok(())
     }
 
-    fn start_remark_file(&mut self, store: &Store, file: cargo_ir::RemarkFileStart) -> Result<()> {
+    fn start_remark_file(
+        &mut self,
+        store: &Store,
+        file: cargo_ir::RemarkFileStart,
+        maximum_store_bytes: Option<u64>,
+    ) -> Result<()> {
         let id = format!("remfile_{}", uuid::Uuid::now_v7().simple());
-        let blob = store.publish_blob(&file.raw_path)?;
+        let blob = store.publish_blob_with_limit(&file.raw_path, maximum_store_bytes)?;
         self.connection.execute(
             "INSERT INTO remark_files(id, name, blob) VALUES (?1, ?2, ?3)",
             params![id, file.name, blob],
@@ -2251,8 +2465,13 @@ impl StagedCapture {
         Ok(())
     }
 
-    fn push_source(&mut self, store: &Store, source: &crate::source::SourceEntry) -> Result<()> {
-        let blob = store.publish_blob(&source.snapshot)?;
+    fn push_source(
+        &mut self,
+        store: &Store,
+        source: &crate::source::SourceEntry,
+        maximum_store_bytes: Option<u64>,
+    ) -> Result<()> {
+        let blob = store.publish_blob_with_limit(&source.snapshot, maximum_store_bytes)?;
         let source_path = source.path.to_string_lossy();
         self.connection.execute(
             "INSERT INTO sources(path, blob) VALUES (?1, ?2)",
@@ -3152,26 +3371,37 @@ fn validate_request_key(value: &str) -> Result<()> {
 
 fn pending_entries(root: &Path) -> Result<(usize, u64)> {
     let mut pending = 0;
+
+    for entry in WalkDir::new(root).min_depth(1) {
+        let entry = entry.map_err(|source| Error::filesystem("walk", root, source.into()))?;
+        if entry.file_type().is_file() && entry.file_name() == "pending.json" {
+            pending += 1;
+        }
+    }
+
+    Ok((pending, directory_bytes(root)?))
+}
+
+fn directory_bytes(root: &Path) -> Result<u64> {
     let mut bytes = 0_u64;
 
     for entry in WalkDir::new(root).min_depth(1) {
         let entry = entry.map_err(|source| Error::filesystem("walk", root, source.into()))?;
-        if entry.file_type().is_file() {
-            bytes = bytes.saturating_add(
-                entry
-                    .metadata()
-                    .map_err(|source| {
-                        Error::filesystem("read metadata for", entry.path(), source.into())
-                    })?
-                    .len(),
-            );
-            if entry.file_name() == "pending.json" {
-                pending += 1;
-            }
+        if !entry.file_type().is_file() {
+            continue;
         }
+
+        bytes = bytes.saturating_add(
+            entry
+                .metadata()
+                .map_err(|source| {
+                    Error::filesystem("read metadata for", entry.path(), source.into())
+                })?
+                .len(),
+        );
     }
 
-    Ok((pending, bytes))
+    Ok(bytes)
 }
 
 fn artifact_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactSummary> {
@@ -3503,9 +3733,12 @@ mod tests {
     use std::collections::HashMap;
     use std::fs::{self, OpenOptions};
     use std::io;
+    use std::path::PathBuf;
 
     use cargo_ir::{
-        ArtifactProvenance, BodyRange, CaptureMethod, CompilerInstance, DefinitionOrigin, LtoScope,
+        ArtifactProvenance, BodyRange, CaptureInvocation, CaptureMethod, CommandInvocation,
+        CompiledCapture, CompilerInstance, DefinitionOrigin, LtoScope, Toolchain, UnstableAccess,
+        UnstableAccessMechanism,
     };
     use fs2::FileExt as _;
     use rusqlite::Connection;
@@ -3517,9 +3750,83 @@ mod tests {
         update_streamed_availability,
     };
     use crate::{
-        CaptureDisposition, CaptureId, CompilerOutput, Error, FindMatchKind, FindOptions,
-        InstanceId, RemarkEvidenceState, RemarkKindFilter, RemarkOptions,
+        BuildSpec, CaptureDisposition, CaptureId, CompilerOutput, Error, FindMatchKind,
+        FindOptions, InstanceId, PendingId, RemarkEvidenceState, RemarkKindFilter, RemarkOptions,
     };
+
+    fn write_pending_capture(store: &Store, request_key: &str, capture_id: &str) -> PendingId {
+        let directory = store.pending.join(request_key);
+        fs::create_dir(&directory).expect("the test can create a pending-capture directory");
+        let request = cargo_ir::BuildRequest {
+            workspace_root: PathBuf::from("workspace"),
+            manifest_path: None,
+            package: None,
+            target: None,
+            profile: None,
+            features: Vec::new(),
+            all_features: false,
+            no_default_features: false,
+            target_triple: None,
+            locked: false,
+            offline: false,
+            frozen: false,
+            capture_profile: cargo_ir::CaptureProfile::Faithful,
+            capture_remarks: false,
+            analysis_directory: PathBuf::from("analysis"),
+        };
+        let compilation = CompiledCapture {
+            invocation: CaptureInvocation {
+                request,
+                cargo: CommandInvocation {
+                    program: "cargo".to_owned(),
+                    arguments: Vec::new(),
+                },
+                rustc: None,
+                wrapper_chain: Vec::new(),
+                environment: Vec::new(),
+                injected_rustc_arguments: Vec::new(),
+                unstable_access: UnstableAccess {
+                    mechanism: UnstableAccessMechanism::RustcBootstrap,
+                    authorized_scopes: Vec::new(),
+                },
+            },
+            toolchain: Toolchain {
+                rustc: PathBuf::from("rustc"),
+                release: "test-rustc".to_owned(),
+                commit_hash: "0".repeat(40),
+                host: "test-host".to_owned(),
+                llvm_version: "test-llvm".to_owned(),
+                sysroot: PathBuf::from("sysroot"),
+                rustc_private_lib: PathBuf::from("rustc-private"),
+                llvm_dis: PathBuf::from("llvm-dis"),
+                rustup_toolchain: None,
+            },
+        };
+        let marker = serde_json::json!({
+            "version": 1,
+            "request_key": request_key,
+            "capture_id": capture_id,
+            "analysis_key": "2".repeat(32),
+            "spec": BuildSpec::default(),
+            "compilation": compilation,
+            "sources": {
+                "entries": [],
+                "cache_inputs": [],
+            },
+        });
+        fs::write(
+            directory.join("pending.json"),
+            serde_json::to_vec(&marker).expect("the pending marker can be encoded"),
+        )
+        .expect("the test can write a pending marker");
+        fs::write(directory.join("artifact.bc"), b"bitcode")
+            .expect("the test can write a retained artifact");
+        let capture_id = capture_id
+            .parse::<CaptureId>()
+            .expect("the test capture ID is valid");
+
+        PendingId::from_capture(&capture_id)
+    }
 
     #[test]
     fn creates_the_store_below_the_retained_optic_root() {
@@ -3612,6 +3919,141 @@ mod tests {
 
         assert_eq!(status.pending, 1);
         assert_eq!(status.pending_bytes, 13);
+        assert!(status.retained_bytes >= status.pending_bytes);
+        assert!(status.available_bytes > status.minimum_available_bytes);
+        assert!(status.maximum_bytes > 0);
+    }
+
+    #[test]
+    fn status_separates_referenced_and_reclaimable_blob_bytes() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let store = Store::open(temporary.path()).expect("the test can open a store");
+        let source = temporary.path().join("source.ll");
+        fs::write(&source, "define void @kernel() {}\n".repeat(100))
+            .expect("the test can write source evidence");
+        let digest = store
+            .publish_blob(&source)
+            .expect("the store can publish unreferenced evidence");
+        let blob_bytes = fs::metadata(store.blob_path(&digest))
+            .expect("the compressed blob has metadata")
+            .len();
+
+        let status = store.status().expect("the test can read store status");
+
+        assert_eq!(status.blobs, 1);
+        assert_eq!(status.blob_bytes, blob_bytes);
+        assert_eq!(status.referenced_blob_bytes, 0);
+        assert_eq!(status.unreferenced_blob_bytes, blob_bytes);
+        assert!(status.retained_bytes >= blob_bytes);
+    }
+
+    #[test]
+    fn rejects_new_evidence_at_the_command_storage_limit() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let store = Store::open(temporary.path()).expect("the test can open a store");
+
+        assert!(matches!(
+            store.ensure_storage_budget(Some(0)),
+            Err(Error::StoreBudgetExceeded {
+                maximum_bytes: 0,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn lists_inspects_and_removes_pending_captures_by_prefix() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let store = Store::open(temporary.path()).expect("the test can open a store");
+        let first = write_pending_capture(
+            &store,
+            &"0".repeat(64),
+            "cap_00000000000000000000000000000000",
+        );
+        let second = write_pending_capture(
+            &store,
+            &"1".repeat(64),
+            "cap_01000000000000000000000000000000",
+        );
+
+        let pending = store.pending().expect("the pending captures can be listed");
+        let inspected = store
+            .pending_summary(&"pen_00".parse().expect("the pending prefix is valid"))
+            .expect("the unique pending prefix resolves");
+        let unique = store
+            .unique_pending_prefix(&first)
+            .expect("the full pending ID has a unique prefix");
+        let removed = store
+            .remove_pending(&"pen_00".parse().expect("the pending prefix is valid"))
+            .expect("the pending capture can be removed");
+
+        assert_eq!(
+            pending
+                .iter()
+                .map(|summary| &summary.id)
+                .collect::<Vec<_>>(),
+            vec![&first, &second]
+        );
+        assert_eq!(inspected.id, first);
+        assert_eq!(unique.to_string(), "pen_00");
+        assert_eq!(removed.id, first);
+        assert_eq!(removed.removed_bytes, inspected.retained_bytes);
+        assert_eq!(
+            store
+                .pending()
+                .expect("the remaining pending capture can be listed")
+                .into_iter()
+                .map(|summary| summary.id)
+                .collect::<Vec<_>>(),
+            vec![second]
+        );
+    }
+
+    #[test]
+    fn rejects_ambiguous_unknown_and_read_only_pending_removal() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let store = Store::open(temporary.path()).expect("the test can open a store");
+        write_pending_capture(
+            &store,
+            &"0".repeat(64),
+            "cap_00000000000000000000000000000000",
+        );
+        let retained = write_pending_capture(
+            &store,
+            &"1".repeat(64),
+            "cap_01000000000000000000000000000000",
+        );
+
+        assert!(matches!(
+            store.pending_summary(&"pen_0".parse().expect("the pending prefix is valid")),
+            Err(Error::AmbiguousIdentifier {
+                kind: "pending capture",
+                ..
+            })
+        ));
+        assert!(matches!(
+            store.pending_summary(&"pen_f".parse().expect("the pending prefix is valid")),
+            Err(Error::UnknownPending { .. })
+        ));
+
+        drop(store);
+        let optic_dir = temporary.path().join(".optic");
+        let read_only = Store::open_read_only(&optic_dir).expect("the store can open read-only");
+
+        assert_eq!(
+            read_only
+                .pending_summary(&retained)
+                .expect("pending inspection is read-only")
+                .id,
+            retained
+        );
+        assert!(matches!(
+            read_only.remove_pending(&retained),
+            Err(Error::ReadOnlyStore {
+                operation: "remove pending evidence",
+                path,
+            }) if path == optic_dir
+        ));
     }
 
     #[test]
@@ -4378,8 +4820,8 @@ mod tests {
         let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
         let store = Store::open(temporary.path()).expect("the test can open a store");
         let source = temporary.path().join("source.ll");
-        let contents = b"define void @kernel() {}\n";
-        fs::write(&source, contents).expect("the test can write source evidence");
+        let contents = "define void @kernel() {}\n".repeat(1_000);
+        fs::write(&source, &contents).expect("the test can write source evidence");
 
         let digest = store
             .publish_blob(&source)
@@ -4389,11 +4831,19 @@ mod tests {
             .expect("the store can verify and reuse the published evidence");
         let destination = store.blob_path(&digest);
 
-        assert_eq!(digest, blake3::hash(contents).to_hex().as_str());
+        assert_eq!(digest, blake3::hash(contents.as_bytes()).to_hex().as_str());
         assert_eq!(reused_digest, digest);
         assert_eq!(
-            fs::read(destination).expect("the test can read the published evidence"),
-            contents
+            store
+                .read_blob(&digest)
+                .expect("the store can decompress the published evidence"),
+            contents.as_bytes()
+        );
+        assert!(
+            fs::metadata(destination)
+                .expect("the compressed blob has metadata")
+                .len()
+                < contents.len() as u64
         );
         assert!(temporary_blob_paths(&store).is_empty());
     }
@@ -4427,10 +4877,7 @@ mod tests {
             .expect("the test can corrupt the published evidence");
 
         assert_invalid_data(store.read_blob(&digest));
-        assert!(matches!(
-            store.read_blob_range(&digest, 0, 8),
-            Err(Error::InvalidRange { .. })
-        ));
+        assert_invalid_data(store.read_blob_range(&digest, 0, 8));
     }
 
     #[test]
@@ -4473,6 +4920,62 @@ mod tests {
                 .all(|chunk| chunk.len() <= crate::TEXT_CHUNK_BYTES)
         );
         assert_eq!(chunks.concat(), contents);
+    }
+
+    #[test]
+    fn reads_a_nonzero_logical_range_from_a_compressed_blob() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let store = Store::open(temporary.path()).expect("the test can open a store");
+        let source = temporary.path().join("source.ll");
+        let contents = "prefix\ndefine i32 @kernel() { ret i32 42 }\nsuffix\n";
+        fs::write(&source, contents).expect("the test can write source evidence");
+        let digest = store
+            .publish_blob(&source)
+            .expect("the store can publish source evidence");
+        let start = contents.find("define").expect("the body has a start") as i64;
+        let end = contents.find("\nsuffix").expect("the body has an end") as i64;
+
+        assert_eq!(
+            store
+                .read_blob_range(&digest, start, end)
+                .expect("the store can read a logical byte range"),
+            "define i32 @kernel() { ret i32 42 }"
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_and_bit_flipped_compressed_blobs() {
+        for corrupt in ["truncate", "bit flip"] {
+            let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+            let store = Store::open(temporary.path()).expect("the test can open a store");
+            let source = temporary.path().join("source.ll");
+            fs::write(&source, "define void @kernel() {}\n".repeat(1_000))
+                .expect("the test can write source evidence");
+            let digest = store
+                .publish_blob(&source)
+                .expect("the store can publish source evidence");
+            let path = store.blob_path(&digest);
+
+            if corrupt == "truncate" {
+                let file = OpenOptions::new()
+                    .write(true)
+                    .open(&path)
+                    .expect("the test can open the blob");
+                let length = file
+                    .metadata()
+                    .expect("the compressed blob has metadata")
+                    .len();
+                file.set_len(length - 1)
+                    .expect("the test can truncate the blob");
+            } else {
+                let mut bytes = fs::read(&path).expect("the test can read the blob");
+                let middle = bytes.len() / 2;
+                bytes[middle] ^= 0x80;
+                fs::write(&path, bytes).expect("the test can corrupt the blob");
+            }
+
+            assert_invalid_data(store.read_blob(&digest));
+        }
     }
 
     #[test]

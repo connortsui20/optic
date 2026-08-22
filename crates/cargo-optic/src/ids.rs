@@ -22,10 +22,6 @@ macro_rules! identifier {
         pub struct $name(String);
 
         impl $name {
-            pub(crate) fn new() -> Self {
-                Self(format!(concat!($prefix, "_{}"), Uuid::new_v4().simple()))
-            }
-
             pub(crate) fn as_str(&self) -> &str {
                 &self.0
             }
@@ -97,6 +93,13 @@ identifier!(
     "capture",
     "An immutable capture ID or its unique prefix."
 );
+
+impl CaptureId {
+    pub(crate) fn new() -> Self {
+        Self(random_identifier("cap"))
+    }
+}
+
 identifier!(
     InstanceId,
     "ins",
@@ -104,9 +107,37 @@ identifier!(
     "A concrete compiler-instance ID or its unique prefix."
 );
 
+impl InstanceId {
+    pub(crate) fn new() -> Self {
+        Self(random_identifier("ins"))
+    }
+}
+
+identifier!(
+    PendingId,
+    "pen",
+    "pending capture",
+    "A retained pending-capture ID or its unique prefix."
+);
+
+fn random_identifier(prefix: &str) -> String {
+    format!("{prefix}_{}", Uuid::new_v4().simple())
+}
+
+impl PendingId {
+    pub(crate) fn from_capture(capture_id: &CaptureId) -> Self {
+        let suffix = capture_id
+            .as_str()
+            .strip_prefix("cap_")
+            .expect("capture IDs are validated before pending IDs are derived");
+
+        Self(format!("pen_{suffix}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CaptureId, InstanceId};
+    use super::{CaptureId, InstanceId, PendingId};
 
     #[test]
     fn accepts_full_ids_and_short_prefixes() {
@@ -116,6 +147,7 @@ mod tests {
                 .parse::<InstanceId>()
                 .is_ok()
         );
+        assert!("pen_0123".parse::<PendingId>().is_ok());
     }
 
     #[test]
@@ -127,5 +159,18 @@ mod tests {
                 .is_err()
         );
         assert!("ins_01xz".parse::<InstanceId>().is_err());
+        assert!("pen_".parse::<PendingId>().is_err());
+    }
+
+    #[test]
+    fn derives_a_pending_id_from_a_capture_id() {
+        let capture = "cap_0123456789abcdef0123456789abcdef"
+            .parse::<CaptureId>()
+            .expect("the capture ID is valid");
+
+        assert_eq!(
+            PendingId::from_capture(&capture).to_string(),
+            "pen_0123456789abcdef0123456789abcdef"
+        );
     }
 }

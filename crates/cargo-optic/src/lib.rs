@@ -13,6 +13,8 @@ pub use call_site::{CallSiteDelta, CallSiteSummary};
 mod cli;
 pub use cli::run_cli;
 
+mod config;
+
 mod error;
 pub use error::{Error, Result};
 
@@ -23,7 +25,7 @@ pub use events::{
 };
 
 mod ids;
-pub use ids::{CaptureId, InstanceId};
+pub use ids::{CaptureId, InstanceId, PendingId};
 
 mod model;
 pub use cargo_ir::{
@@ -32,12 +34,13 @@ pub use cargo_ir::{
 };
 pub use model::{
     ArtifactSummary, BodySetDelta, BodySetSummary, BodyView, BuildSpec, BuildTarget, CachePolicy,
-    CaptureDetails, CaptureDisposition, CaptureMetadata, CaptureProfile, CaptureSummary,
-    CleanSummary, CommandView, CompareView, CompilerOutput, CompilerProvenance, EnvironmentView,
-    FindMatchKind, FindOptions, FindResult, GcSummary, InstanceSummary, LlvmBodySummary,
-    OutputAvailability, RemarkCaptureSummary, RemarkEvidenceState, RemarkFileSummary,
-    RemarkKindFilter, RemarkOptions, RemarkShowView, RemarkView, RemoveSummary, ShowView,
-    SourceLocation, SourceView, StoreStatus, VerifySummary,
+    CaptureDetails, CaptureDisposition, CaptureMetadata, CaptureOptions, CaptureProfile,
+    CaptureSummary, CleanSummary, CommandView, CompareView, CompilerOutput, CompilerProvenance,
+    EnvironmentView, FindMatchKind, FindOptions, FindResult, GcSummary, InstanceSummary,
+    LlvmBodySummary, OutputAvailability, PendingRemoveSummary, PendingSummary,
+    RemarkCaptureSummary, RemarkEvidenceState, RemarkFileSummary, RemarkKindFilter, RemarkOptions,
+    RemarkShowView, RemarkView, RemoveSummary, ShowView, SourceLocation, SourceView, StoreStatus,
+    VerifySummary,
 };
 
 mod pending;

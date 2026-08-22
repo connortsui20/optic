@@ -13,7 +13,7 @@ use walkdir::WalkDir;
 
 use crate::source::{PendingSourceBaseline, SourceBaseline};
 use crate::store::{AnalysisKey, sync_directory};
-use crate::{BuildSpec, CaptureId, Error, Result};
+use crate::{BuildSpec, CaptureId, Error, PendingId, PendingSummary, Result};
 
 const PENDING_VERSION: u32 = 1;
 const MARKER_NAME: &str = "pending.json";
@@ -113,39 +113,11 @@ impl PendingCapture {
         check_cargo_freshness: bool,
     ) -> Result<ResumableCapture> {
         let marker = Self::marker_path(directory);
-        let file =
-            File::open(&marker).map_err(|source| Error::filesystem("open", &marker, source))?;
-        let length = file
-            .metadata()
-            .map_err(|source| Error::filesystem("read metadata for", &marker, source))?
-            .len();
-        if length > MAX_MARKER_BYTES {
-            return Err(Error::InvalidPendingEvidence {
-                path: marker,
-                message: format!(
-                    "pending marker length must be at most {MAX_MARKER_BYTES} bytes, got {length}"
-                ),
-            });
-        }
-        let pending = serde_json::from_reader::<_, Self>(BufReader::new(
-            file.take(MAX_MARKER_BYTES.saturating_add(1)),
-        ))
-        .map_err(|source| Error::InvalidPendingEvidence {
-            path: marker.clone(),
-            message: source.to_string(),
-        })?;
-
-        let analysis_key =
-            AnalysisKey::parse(&pending.analysis_key).map_err(|error| match error {
-                Error::InvalidPendingEvidence { message, .. } => Error::InvalidPendingEvidence {
-                    path: marker.clone(),
-                    message,
-                },
-                error => error,
-            })?;
+        let pending = Self::read(directory)?;
+        let analysis_key = pending.validate_marker(&marker, request_key)?;
         let mut request = request_template.clone();
         request.analysis_directory = directory.join(analysis_key.as_str()).join("analysis");
-        pending.validate(&marker, request_key, spec, &request, toolchain)?;
+        pending.validate_capture(&marker, spec, &request, toolchain)?;
         if check_cargo_freshness && !cargo_ir::check_fresh(&request, toolchain)? {
             return Err(Error::PendingInputsChanged);
         }
@@ -166,14 +138,52 @@ impl PendingCapture {
         })
     }
 
-    fn validate(
-        &self,
-        marker: &Path,
-        request_key: &str,
-        spec: &BuildSpec,
-        request: &cargo_ir::BuildRequest,
-        toolchain: &cargo_ir::Toolchain,
-    ) -> Result<()> {
+    pub(crate) fn summary(directory: &Path) -> Result<PendingSummary> {
+        let marker = Self::marker_path(directory);
+        let request_key = directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| invalid(&marker, "request-key directory name must be UTF-8"))?;
+        let pending = Self::read(directory)?;
+        pending.validate_marker(&marker, request_key)?;
+
+        Ok(PendingSummary {
+            id: PendingId::from_capture(&pending.capture_id),
+            capture_id: pending.capture_id,
+            request: pending.spec,
+            rustc_release: pending.compilation.toolchain.release,
+            llvm_version: pending.compilation.toolchain.llvm_version,
+            retained_bytes: directory_bytes(directory)?,
+        })
+    }
+
+    fn read(directory: &Path) -> Result<Self> {
+        let marker = Self::marker_path(directory);
+        let file =
+            File::open(&marker).map_err(|source| Error::filesystem("open", &marker, source))?;
+        let length = file
+            .metadata()
+            .map_err(|source| Error::filesystem("read metadata for", &marker, source))?
+            .len();
+        if length > MAX_MARKER_BYTES {
+            return Err(Error::InvalidPendingEvidence {
+                path: marker,
+                message: format!(
+                    "pending marker length must be at most {MAX_MARKER_BYTES} bytes, got {length}"
+                ),
+            });
+        }
+
+        serde_json::from_reader(BufReader::new(
+            file.take(MAX_MARKER_BYTES.saturating_add(1)),
+        ))
+        .map_err(|source| Error::InvalidPendingEvidence {
+            path: marker,
+            message: source.to_string(),
+        })
+    }
+
+    fn validate_marker(&self, marker: &Path, request_key: &str) -> Result<AnalysisKey> {
         if self.version != PENDING_VERSION {
             return Err(invalid(
                 marker,
@@ -198,6 +208,23 @@ impl PendingCapture {
                 format!("capture ID must be complete, got {}", self.capture_id),
             ));
         }
+
+        AnalysisKey::parse(&self.analysis_key).map_err(|error| match error {
+            Error::InvalidPendingEvidence { message, .. } => Error::InvalidPendingEvidence {
+                path: marker.to_owned(),
+                message,
+            },
+            error => error,
+        })
+    }
+
+    fn validate_capture(
+        &self,
+        marker: &Path,
+        spec: &BuildSpec,
+        request: &cargo_ir::BuildRequest,
+        toolchain: &cargo_ir::Toolchain,
+    ) -> Result<()> {
         if &self.spec != spec {
             return Err(invalid(
                 marker,
@@ -224,6 +251,28 @@ impl PendingCapture {
             )
         })
     }
+}
+
+fn directory_bytes(root: &Path) -> Result<u64> {
+    let mut bytes = 0_u64;
+
+    for entry in WalkDir::new(root) {
+        let entry = entry.map_err(|source| Error::filesystem("walk", root, source.into()))?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        bytes = bytes.saturating_add(
+            entry
+                .metadata()
+                .map_err(|source| {
+                    Error::filesystem("read metadata for", entry.path(), source.into())
+                })?
+                .len(),
+        );
+    }
+
+    Ok(bytes)
 }
 
 fn sync_payload(root: &Path) -> Result<()> {

@@ -145,7 +145,18 @@ Use these commands to inspect the store and verify its blobs:
 
 ```console
 cargo optic status
+cargo optic pending
 cargo optic verify
+```
+
+The store compresses evidence blobs. `status` reports physical blob bytes, total retained bytes,
+the effective storage limit, and available filesystem space.
+
+To inspect this fixture from another worktree or directory, pass its `.optic` directory to a
+read-only command:
+
+```console
+cargo optic --optic-dir /path/to/generic/.optic captures
 ```
 
 Use these commands to remove one capture and its unreferenced blobs:

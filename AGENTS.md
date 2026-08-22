@@ -28,16 +28,23 @@ Read [README.md](README.md) before you change the product behavior. Use the
 - `.optic/store` contains immutable captures, the SQLite catalog, blobs, and temporary staging files.
 - `.optic/locks` coordinates store operations and remains after `cargo optic clean`.
 - The clean command removes `.optic/store` only. It keeps the Cargo target directory.
-- Keep other entries below `.optic`, including a future `.optic/config.toml` file.
+- Keep other entries below `.optic`, including `.optic/config.toml`.
 - Cargo Optic does not create a `.optic.lock` file in the workspace root.
 - There is no current capture and no persistent client session.
 - Each read command uses a capture ID or an instance ID.
 - An instance ID identifies its capture, so `show --instance` does not need a capture ID.
 - New IDs contain random UUIDv4 suffixes.
 - Text output shows at least 12 hexadecimal characters and highlights the shortest unique prefix.
-- The schema version is 9. Older stores require `cargo optic clean`.
+- The schema version is 10. Older stores require `cargo optic clean`.
+- Schema 10 stores content-addressed blobs as zstd level-3 frames. Blob IDs hash the logical,
+  uncompressed bytes.
 - Failed post-compilation ingestion can leave validated evidence below `.optic/store/pending`.
 - A matching request validates Cargo freshness before it resumes retained ingestion.
+- `cargo optic pending` lists retained runs. Its `inspect` and `remove` subcommands select opaque
+  pending IDs.
+
+`--optic-dir PATH` opens an existing foreign `.optic` store for read-only commands. A comparison
+can select its before and after stores independently.
 
 Capture writers use a file lock. Read commands can use completed captures in parallel. An operation
 lock prevents `clean` from removing a store that another process uses.

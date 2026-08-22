@@ -26,8 +26,10 @@ serde_yaml = "0.9.34"
 syn = { version = "3.0.3", features = ["full", "visit"] }
 tempfile = "3.27.0"
 thiserror = "2.0.17"
+toml = "1.1.4"
 two-face = { version = "0.5.1", default-features = false, features = ["syntect-fancy"] }
 uuid = { version = "1.18.1", features = ["serde", "v4", "v7"] }
 walkdir = "2.5.0"
+zstd = { version = "0.13.3", default-features = false }
 
 [workspace.lints.clippy]

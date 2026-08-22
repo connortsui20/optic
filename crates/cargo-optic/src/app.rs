@@ -15,15 +15,16 @@ use serde::Serialize;
 use crate::pending::{PendingCapture, ResumableCapture};
 use crate::source::{SourceBaseline, find_item_at};
 use crate::store::{
-    AnalysisKey, CaptureCacheKey, FileLock, LEGACY_STORE_ENTRIES, Store, lock_optic_shared,
-    lock_workspace_exclusive, lock_workspace_shared,
+    AnalysisKey, CaptureCacheKey, CapturePublication, FileLock, LEGACY_STORE_ENTRIES, Store,
+    lock_optic_shared, lock_workspace_exclusive, lock_workspace_shared,
 };
 use crate::{
     BodySetDelta, BodySetSummary, BuildSpec, CachePolicy, CaptureDetails, CaptureDisposition,
-    CaptureEvent, CaptureId, CapturePhase, CaptureSummary, CleanSummary, CompareView,
-    CompilerOutput, FindOptions, FindResult, GcSummary, InspectEvent, InspectSummary, InstanceId,
-    RemarkOptions, RemarkShowView, RemoveSummary, Result, ShowEvent, ShowSummary, ShowView,
-    StoreStatus, StreamCount, VerifySummary,
+    CaptureEvent, CaptureId, CaptureOptions, CapturePhase, CaptureSummary, CleanSummary,
+    CompareView, CompilerOutput, FindOptions, FindResult, GcSummary, InspectEvent, InspectSummary,
+    InstanceId, PendingId, PendingRemoveSummary, PendingSummary, RemarkOptions, RemarkShowView,
+    RemoveSummary, Result, ShowEvent, ShowSummary, ShowView, StoreStatus, StreamCount,
+    VerifySummary,
 };
 
 const EVIDENCE_VERSION: u32 = 5;
@@ -49,6 +50,20 @@ enum ApplicationContext {
     Workspace(WorkspaceContext),
 
     Foreign { optic_dir: PathBuf },
+}
+
+struct PendingPublication<'a> {
+    spec: &'a BuildSpec,
+
+    request_key: &'a str,
+
+    directory: &'a Path,
+
+    capture: ResumableCapture,
+
+    disposition: CaptureDisposition,
+
+    maximum_store_bytes: Option<u64>,
 }
 
 impl Application {
@@ -137,7 +152,26 @@ impl Application {
         spec: &BuildSpec,
         cache_policy: CachePolicy,
     ) -> Result<CaptureSummary> {
-        self.capture_with_events(spec, cache_policy, |_| ControlFlow::Continue(()))
+        self.capture_with_options(
+            spec,
+            CaptureOptions {
+                cache_policy,
+                maximum_store_bytes: None,
+            },
+        )
+    }
+
+    /// Captures or reuses compiler evidence with explicit storage options.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error from [`Self::capture_with_options_and_events`].
+    pub fn capture_with_options(
+        &mut self,
+        spec: &BuildSpec,
+        options: CaptureOptions,
+    ) -> Result<CaptureSummary> {
+        self.capture_with_options_and_events(spec, options, |_| ControlFlow::Continue(()))
     }
 
     /// Captures or reuses evidence and reports user-visible Cargo output as it arrives.
@@ -152,6 +186,28 @@ impl Application {
         &mut self,
         spec: &BuildSpec,
         cache_policy: CachePolicy,
+        on_event: impl FnMut(CaptureEvent) -> ControlFlow<()>,
+    ) -> Result<CaptureSummary> {
+        self.capture_with_options_and_events(
+            spec,
+            CaptureOptions {
+                cache_policy,
+                maximum_store_bytes: None,
+            },
+            on_event,
+        )
+    }
+
+    /// Captures or reuses evidence with explicit storage options and streamed Cargo output.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store is over budget, or if source capture, compiler execution, or
+    /// evidence publication fails.
+    pub fn capture_with_options_and_events(
+        &mut self,
+        spec: &BuildSpec,
+        options: CaptureOptions,
         mut on_event: impl FnMut(CaptureEvent) -> ControlFlow<()>,
     ) -> Result<CaptureSummary> {
         let workspace = self.workspace_context("capture evidence")?.clone();
@@ -180,11 +236,14 @@ impl Application {
             ) {
                 Ok(pending) => {
                     return self.resume_capture(
-                        spec,
-                        &request_key,
-                        &pending_directory,
-                        pending,
-                        CaptureDisposition::Resumed,
+                        PendingPublication {
+                            spec,
+                            request_key: &request_key,
+                            directory: &pending_directory,
+                            capture: pending,
+                            disposition: CaptureDisposition::Resumed,
+                            maximum_store_bytes: options.maximum_store_bytes,
+                        },
                         &mut on_event,
                     );
                 }
@@ -196,10 +255,14 @@ impl Application {
         }
 
         remove_pending(&pending_directory)?;
-        let cached = match cache_policy {
+        let cached = match options.cache_policy {
             CachePolicy::Reuse => self.store.cached_capture(&request_key)?,
             CachePolicy::Refresh => None,
         };
+        if cached.is_none() {
+            self.store
+                .ensure_storage_budget(options.maximum_store_bytes)?;
+        }
         let analysis_key = cached
             .as_ref()
             .map_or_else(AnalysisKey::new, |cached| cached.analysis_key.clone());
@@ -258,11 +321,14 @@ impl Application {
                 )?;
 
                 self.resume_capture(
-                    spec,
-                    &request_key,
-                    &pending_directory,
-                    pending,
-                    CaptureDisposition::Captured,
+                    PendingPublication {
+                        spec,
+                        request_key: &request_key,
+                        directory: &pending_directory,
+                        capture: pending,
+                        disposition: CaptureDisposition::Captured,
+                        maximum_store_bytes: options.maximum_store_bytes,
+                    },
                     &mut on_event,
                 )
             }
@@ -289,38 +355,46 @@ impl Application {
 
     fn resume_capture(
         &mut self,
-        spec: &BuildSpec,
-        request_key: &str,
-        pending_directory: &Path,
-        pending: ResumableCapture,
-        disposition: CaptureDisposition,
+        publication: PendingPublication<'_>,
         on_event: &mut impl FnMut(CaptureEvent) -> ControlFlow<()>,
     ) -> Result<CaptureSummary> {
+        let PendingPublication {
+            spec,
+            request_key,
+            directory,
+            capture: pending,
+            disposition,
+            maximum_store_bytes,
+        } = publication;
         if let Some(summary) = self.store.completed_capture(
             &pending.capture_id,
             request_key,
             &pending.analysis_key,
             CaptureDisposition::Resumed,
         )? {
-            remove_pending(pending_directory)?;
+            remove_pending(directory)?;
 
             return Ok(summary);
         }
 
+        self.store.ensure_storage_budget(maximum_store_bytes)?;
         let target = selected_target(spec, &pending.compilation.toolchain.host).to_owned();
         emit_capture_event(on_event, CaptureEvent::PhaseStarted(CapturePhase::Ingest))?;
         let mut summary = self.store.publish_stream(
-            &pending.capture_id,
-            CaptureCacheKey::new(request_key, &pending.analysis_key),
-            spec,
             pending.compilation,
-            &pending.sources,
-            &target,
+            CapturePublication {
+                capture_id: &pending.capture_id,
+                cache_key: CaptureCacheKey::new(request_key, &pending.analysis_key),
+                spec,
+                sources: &pending.sources,
+                target: &target,
+                maximum_store_bytes,
+            },
         )?;
         let finish =
             emit_capture_event(on_event, CaptureEvent::PhaseFinished(CapturePhase::Ingest));
         summary.disposition = disposition;
-        remove_pending(pending_directory)?;
+        remove_pending(directory)?;
         finish?;
 
         Ok(summary)
@@ -358,6 +432,37 @@ impl Application {
         let _reader = self.store.lock_evidence_reader()?;
 
         self.store.status()
+    }
+
+    /// Lists recoverable compiler runs that await evidence ingestion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a pending marker or retained directory cannot be read.
+    pub fn pending(&self) -> Result<Vec<PendingSummary>> {
+        self.store.pending()
+    }
+
+    /// Returns one recoverable compiler run selected by full ID or a unique prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the selector is not unique or its pending evidence cannot be read.
+    pub fn inspect_pending(&self, pending_id: &PendingId) -> Result<PendingSummary> {
+        self.store.pending_summary(pending_id)
+    }
+
+    /// Removes one recoverable compiler run selected by full ID or a unique prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the application is read-only, the selector is not unique, another
+    /// writer is active, or the retained directory cannot be removed.
+    pub fn remove_pending(&mut self, pending_id: &PendingId) -> Result<PendingRemoveSummary> {
+        self.workspace_context("remove pending evidence")?;
+        let _writer = self.store.lock_writer()?;
+
+        self.store.remove_pending(pending_id)
     }
 
     /// Removes one completed capture but leaves shared blobs for explicit garbage collection.
@@ -459,6 +564,10 @@ impl Application {
 
     pub(crate) fn unique_instance_prefix(&self, instance_id: &InstanceId) -> Result<InstanceId> {
         self.store.unique_instance_prefix(instance_id)
+    }
+
+    pub(crate) fn unique_pending_prefix(&self, pending_id: &PendingId) -> Result<PendingId> {
+        self.store.unique_pending_prefix(pending_id)
     }
 
     /// Loads one compiler output and optional captured source for one instance.
