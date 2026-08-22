@@ -32,8 +32,11 @@ use crate::{
 };
 
 const STORE_VERSION: u32 = 10;
-// Level 3 reduced the observed 319 MB LLVM module to 36 MB while encoding above 2 GB/s.
+// Level 3 reduced the 319,120,141-byte prototype corpus to 36,326,789 bytes while encoding above
+// 2 GB/s. Higher levels would spend more capture time for a secondary prototype concern.
 const BLOB_COMPRESSION_LEVEL: i32 = 3;
+// This limits an over-budget staging catalog to 100,000 new records without walking the store for
+// every remark in a multi-million-record capture.
 const STORAGE_BUDGET_EVENT_INTERVAL: usize = 100_000;
 
 #[derive(Clone, Debug)]
@@ -258,6 +261,17 @@ impl Store {
         let path = self.locks.join("writer.lock");
 
         lock_file(&path)
+    }
+
+    pub(crate) fn lock_pending_reader(&self) -> Result<FileLock> {
+        let path = self.locks.join("writer.lock");
+        let file = match &self.access {
+            StoreAccess::ReadWrite => open_lock_file(&path)?,
+            StoreAccess::ReadOnly { .. } => open_existing_lock_file(&path)?,
+        };
+        FileExt::lock_shared(&file).map_err(|source| Error::filesystem("lock", &path, source))?;
+
+        Ok(FileLock { _file: file })
     }
 
     pub(crate) fn lock_evidence_reader(&self) -> Result<FileLock> {

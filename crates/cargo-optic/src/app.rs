@@ -225,6 +225,8 @@ impl Application {
         let pending_directory = self.store.pending_directory(&request_key)?;
 
         if PendingCapture::exists(&pending_directory) {
+            self.store
+                .ensure_storage_budget(options.maximum_store_bytes)?;
             let request_template = Self::build_request(&workspace, spec, PathBuf::new());
             match PendingCapture::resume(
                 &pending_directory,
@@ -259,10 +261,8 @@ impl Application {
             CachePolicy::Reuse => self.store.cached_capture(&request_key)?,
             CachePolicy::Refresh => None,
         };
-        if cached.is_none() {
-            self.store
-                .ensure_storage_budget(options.maximum_store_bytes)?;
-        }
+        self.store
+            .ensure_storage_budget(options.maximum_store_bytes)?;
         let analysis_key = cached
             .as_ref()
             .map_or_else(AnalysisKey::new, |cached| cached.analysis_key.clone());
@@ -440,6 +440,8 @@ impl Application {
     ///
     /// Returns an error if a pending marker or retained directory cannot be read.
     pub fn pending(&self) -> Result<Vec<PendingSummary>> {
+        let _reader = self.store.lock_pending_reader()?;
+
         self.store.pending()
     }
 
@@ -449,6 +451,8 @@ impl Application {
     ///
     /// Returns an error if the selector is not unique or its pending evidence cannot be read.
     pub fn inspect_pending(&self, pending_id: &PendingId) -> Result<PendingSummary> {
+        let _reader = self.store.lock_pending_reader()?;
+
         self.store.pending_summary(pending_id)
     }
 

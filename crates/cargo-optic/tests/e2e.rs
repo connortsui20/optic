@@ -821,6 +821,12 @@ fn resumes_retained_ingestion_before_cargo_even_with_fresh() {
     assert!(string(&json(&failed), "/error/message").contains("test capture publication failure"));
     let retained = json(&fixture.run(["status", "--format", "jsonl"]));
     assert_eq!(retained["result"]["pending"], 1);
+    let pending = json(&fixture.run(["pending", "--format", "jsonl"]));
+    let pending_id = string(&pending, "/result/0/id");
+    assert!(pending_id.starts_with("pen_"));
+    let inspected = json(&fixture.run(["pending", "inspect", pending_id, "--format", "jsonl"]));
+    assert_eq!(string(&inspected, "/result/id"), pending_id);
+    assert!(string(&inspected, "/result/capture_id").starts_with("cap_"));
     catalog
         .execute("DROP TRIGGER fail_capture_publication", [])
         .expect("the test can enable capture publication");
