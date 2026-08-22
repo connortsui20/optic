@@ -15,8 +15,8 @@ use serde::Serialize;
 use crate::pending::{PendingCapture, ResumableCapture};
 use crate::source::{SourceBaseline, find_item_at};
 use crate::store::{
-    AnalysisKey, CaptureCacheKey, CapturePublication, FileLock, LEGACY_STORE_ENTRIES, Store,
-    lock_optic_shared, lock_workspace_exclusive, lock_workspace_shared,
+    AnalysisKey, CaptureCacheKey, CapturePublication, FileLock, LEGACY_STORE_ENTRIES,
+    PendingSnapshot, Store, lock_optic_shared, lock_workspace_exclusive, lock_workspace_shared,
 };
 use crate::{
     BodySetDelta, BodySetSummary, BuildSpec, CachePolicy, CaptureDetails, CaptureDisposition,
@@ -90,7 +90,7 @@ impl Application {
         })
     }
 
-    /// Opens one existing `.optic` directory without Cargo discovery or store mutation.
+    /// Opens one existing `.optic` directory without Cargo discovery or Optic-state mutation.
     ///
     /// # Errors
     ///
@@ -202,8 +202,8 @@ impl Application {
     ///
     /// # Errors
     ///
-    /// Returns an error if the store is over budget, or if source capture, compiler execution, or
-    /// evidence publication fails.
+    /// Returns an error if a storage admission checkpoint fails, or if source capture, compiler
+    /// execution, or evidence publication fails.
     pub fn capture_with_options_and_events(
         &mut self,
         spec: &BuildSpec,
@@ -261,14 +261,32 @@ impl Application {
             CachePolicy::Reuse => self.store.cached_capture(&request_key)?,
             CachePolicy::Refresh => None,
         };
-        self.store
-            .ensure_storage_budget(options.maximum_store_bytes)?;
         let analysis_key = cached
             .as_ref()
             .map_or_else(AnalysisKey::new, |cached| cached.analysis_key.clone());
         let run_directory = pending_directory.join(analysis_key.as_str());
         let staging = run_directory.join("staging");
         let analysis_directory = run_directory.join("analysis");
+        if let Err(error) = self
+            .store
+            .ensure_storage_budget(options.maximum_store_bytes)
+        {
+            // An over-budget store can reuse matching evidence only after Cargo's non-compiling
+            // freshness probe. A stale target retains the original admission error before the
+            // selected rustc can create new evidence.
+            if !matches!(error, crate::Error::StoreBudgetExceeded { .. }) {
+                return Err(error);
+            }
+            let Some(cached) = cached.as_ref() else {
+                return Err(error);
+            };
+            let request = Self::build_request(&workspace, spec, analysis_directory.clone());
+            if !cargo_ir::check_fresh(&request, &toolchain)? {
+                return Err(error);
+            }
+
+            return Ok(cached.summary.clone());
+        }
         fs::create_dir_all(&staging)
             .map_err(|source| crate::Error::filesystem("create", &staging, source))?;
         emit_discardable_capture_event(
@@ -445,6 +463,12 @@ impl Application {
         self.store.pending()
     }
 
+    pub(crate) fn pending_snapshots(&self) -> Result<Vec<PendingSnapshot>> {
+        let _reader = self.store.lock_pending_reader()?;
+
+        self.store.pending_snapshots()
+    }
+
     /// Returns one recoverable compiler run selected by full ID or a unique prefix.
     ///
     /// # Errors
@@ -454,6 +478,15 @@ impl Application {
         let _reader = self.store.lock_pending_reader()?;
 
         self.store.pending_summary(pending_id)
+    }
+
+    pub(crate) fn inspect_pending_snapshot(
+        &self,
+        pending_id: &PendingId,
+    ) -> Result<PendingSnapshot> {
+        let _reader = self.store.lock_pending_reader()?;
+
+        self.store.pending_snapshot(pending_id)
     }
 
     /// Removes one recoverable compiler run selected by full ID or a unique prefix.
@@ -508,6 +541,8 @@ impl Application {
     ///
     /// Returns an error if the capture selector is not unique or its metadata is invalid.
     pub fn inspect(&self, capture_id: &CaptureId) -> Result<CaptureDetails> {
+        let _reader = self.store.lock_evidence_reader()?;
+
         self.store.capture_details(capture_id)
     }
 
@@ -524,6 +559,7 @@ impl Application {
         capture_id: &CaptureId,
         mut on_event: impl FnMut(InspectEvent) -> ControlFlow<()>,
     ) -> Result<InspectSummary> {
+        let _reader = self.store.lock_evidence_reader()?;
         let metadata = self.store.capture_metadata(capture_id)?;
         let resolved_id = metadata.summary.id.clone();
         emit_inspect_event(
@@ -568,10 +604,6 @@ impl Application {
 
     pub(crate) fn unique_instance_prefix(&self, instance_id: &InstanceId) -> Result<InstanceId> {
         self.store.unique_instance_prefix(instance_id)
-    }
-
-    pub(crate) fn unique_pending_prefix(&self, pending_id: &PendingId) -> Result<PendingId> {
-        self.store.unique_pending_prefix(pending_id)
     }
 
     /// Loads one compiler output and optional captured source for one instance.

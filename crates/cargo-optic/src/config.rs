@@ -2,8 +2,8 @@
 //!
 //! The prototype accepts one storage limit below `.optic/config.toml`. Command-specific limits
 //! override this file, while an adaptive default limits an unconfigured store. The policy keeps
-//! the retained-byte limit separate from the available-space reserve because both constraints
-//! must hold before a capture can add evidence.
+//! the retained-byte admission limit separate from the available-space reserve. Capture and
+//! ingestion checkpoints enforce both constraints without reserving filesystem space.
 
 use std::fs;
 use std::path::Path;
@@ -18,10 +18,10 @@ const AVAILABLE_SPACE_RESERVE: u64 = 10 * 1024 * 1024 * 1024;
 /// The effective limits for retained compiler evidence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct StorePolicy {
-    /// The maximum number of bytes retained below `.optic/store`.
+    /// The retained-byte limit enforced at admission checkpoints.
     pub(crate) maximum_bytes: u64,
 
-    /// The filesystem space that a capture must leave available.
+    /// The available filesystem space required at admission checkpoints.
     pub(crate) available_space_reserve: u64,
 }
 

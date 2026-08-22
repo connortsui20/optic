@@ -190,8 +190,8 @@ effective rustc arguments. It ignores Optic arguments that only collect evidence
 counts are not performance measurements.
 
 Use `--optic-dir PATH` to read completed or pending evidence from another workspace without Cargo
-discovery or store mutation. The path must name an existing `.optic` directory with the same store
-schema. This is useful for another worktree of the same project.
+discovery or Optic-state mutation. The path must name an existing `.optic` directory with the same
+store schema. This is useful for another worktree of the same project.
 
 ```console
 cargo optic --optic-dir ../other-worktree/.optic captures
@@ -232,8 +232,11 @@ max_bytes = "64GiB"
 
 Use `--max-store-bytes 8GiB` on `capture` or a build-based `show` command for a one-command
 override. Cargo Optic checks the policy before compilation, while it publishes blobs, and at
-bounded intervals during ingestion. Completed evidence remains readable when a store is over its
-limit.
+bounded intervals during ingestion. These admission checks do not reserve space or impose a hard
+filesystem quota. Compiler output and the temporary file for one blob can cross a configured limit
+before the next check rejects the capture. A failed capture can therefore leave pending evidence or
+unreferenced blobs above the limit until you remove the pending run, run `gc`, or run `clean`.
+Completed evidence remains readable when a store is over its limit.
 
 The `remove` command removes one catalog capture. Shared blobs remain until `gc` removes all
 unreferenced blobs. The `verify` command reads each referenced blob and checks its BLAKE3 digest.
@@ -262,7 +265,12 @@ Cargo Optic stores its operation and data locks in `.optic/locks`. These locks r
 There is no current capture and no session state. Each read-only command uses an explicit capture
 or instance ID. An instance ID identifies its capture. Content-addressed blobs hold the evidence.
 Blob names remain the BLAKE3 digest of their uncompressed content. Schema 10 stores every blob as
-one zstd level-3 frame and decompresses logical byte ranges transparently.
+one zstd frame at zstd's default compression level and decompresses logical byte ranges
+transparently.
+
+Cache lookup opens every referenced blob and checks its zstd frame header before Cargo evaluates
+freshness. It does not decompress and hash complete blobs. Actual evidence reads and `cargo optic
+verify` perform the complete logical BLAKE3 verification.
 
 The current store schema is version 10. Cargo Optic rejects older stores. Run `cargo optic clean`
 once to replace an older prototype store.

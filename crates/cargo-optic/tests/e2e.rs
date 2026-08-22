@@ -91,6 +91,25 @@ fn captures_finds_and_shows_concrete_generic_instances() {
     assert_eq!(string(&reused_after_refresh, "/result/id"), capture);
     assert_eq!(reused_after_refresh["result"]["disposition"], "reused");
 
+    let reused_over_budget = fixture.run([
+        "show",
+        "optic_mvp_kernel::ReexportedKernel::identity",
+        "-p",
+        "optic-mvp-app",
+        "--bin",
+        "optic-mvp-app",
+        "--release",
+        "--max-store-bytes",
+        "0",
+        "--format",
+        "jsonl",
+    ]);
+    assert_success(&reused_over_budget);
+    assert_eq!(
+        string(&json(&reused_over_budget), "/result/capture_id"),
+        capture
+    );
+
     let capture_ids = [first_capture, changed_capture, capture];
     let capture_prefix = shortest_unique_prefix(capture, &capture_ids);
     let capture_display = displayed_id(capture, &capture_ids);

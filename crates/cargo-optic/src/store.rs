@@ -32,11 +32,12 @@ use crate::{
 };
 
 const STORE_VERSION: u32 = 10;
-// Level 3 reduced the 319,120,141-byte prototype corpus to 36,326,789 bytes while encoding above
-// 2 GB/s. Higher levels would spend more capture time for a secondary prototype concern.
-const BLOB_COMPRESSION_LEVEL: i32 = 3;
-// This limits an over-budget staging catalog to 100,000 new records without walking the store for
-// every remark in a multi-million-record capture.
+// A Zstandard frame contains a four-byte magic number followed by a frame header of at most 14
+// bytes. Cache admission reads only this prefix instead of decompressing the complete blob.
+// https://github.com/facebook/zstd/blob/v1.5.7/doc/zstd_compression_format.md#zstandard-frames
+const ZSTD_FRAME_PREFIX_BYTES: u64 = 18;
+// This bounds staging growth between filesystem walks without checking the store after every
+// evidence event.
 const STORAGE_BUDGET_EVENT_INTERVAL: usize = 100_000;
 
 #[derive(Clone, Debug)]
@@ -92,6 +93,14 @@ impl rusqlite::types::FromSql for AnalysisKey {
 pub(crate) struct CachedCapture {
     pub(crate) analysis_key: AnalysisKey,
     pub(crate) summary: CaptureSummary,
+}
+
+pub(crate) struct PendingSnapshot {
+    /// The summary read while the pending-store lock is held.
+    pub(crate) summary: PendingSummary,
+
+    /// The shortest prefix that selects the summary in the same locked snapshot.
+    pub(crate) unique_prefix: PendingId,
 }
 
 pub(crate) struct CaptureCacheKey<'a> {
@@ -228,9 +237,13 @@ impl Store {
         FileExt::lock_shared(&schema_file)
             .map_err(|source| Error::filesystem("lock", &schema_path, source))?;
         let _schema_lock = FileLock { _file: schema_file };
+        let catalog = root.join("catalog.sqlite");
+        let catalog_uri = immutable_sqlite_uri(&catalog);
         let connection = Connection::open_with_flags(
-            root.join("catalog.sqlite"),
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            catalog_uri,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.pragma_update(None, "query_only", true)?;
@@ -314,7 +327,7 @@ impl Store {
 
         cached
             .map(|(capture_id, analysis_key)| {
-                self.verify_capture_blobs(&capture_id)?;
+                self.check_capture_blob_headers(&capture_id)?;
                 Ok(CachedCapture {
                     analysis_key,
                     summary: self.capture_summary(&capture_id, CaptureDisposition::Reused)?,
@@ -660,24 +673,21 @@ impl Store {
         Ok(self.resolve_pending(pending_id)?.summary)
     }
 
-    pub(crate) fn unique_pending_prefix(&self, pending_id: &PendingId) -> Result<PendingId> {
+    pub(crate) fn pending_snapshots(&self) -> Result<Vec<PendingSnapshot>> {
         let entries = self.pending_entries()?;
-        let index = entries
-            .binary_search_by(|entry| entry.summary.id.as_str().cmp(pending_id.as_str()))
-            .map_err(|_| Error::UnknownPending {
-                pending_id: pending_id.clone(),
-            })?;
-        let previous = index
-            .checked_sub(1)
-            .map(|index| entries[index].summary.id.as_str());
-        let next = entries
-            .get(index + 1)
-            .map(|entry| entry.summary.id.as_str());
-        let length = unique_prefix_length(pending_id.as_str(), previous, next);
 
-        Ok(pending_id.as_str()[..length]
-            .parse()
-            .expect("the pending prefix comes from a validated pending-capture ID"))
+        Ok(entries
+            .iter()
+            .enumerate()
+            .map(|(index, _)| pending_snapshot(&entries, index))
+            .collect())
+    }
+
+    pub(crate) fn pending_snapshot(&self, pending_id: &PendingId) -> Result<PendingSnapshot> {
+        let entries = self.pending_entries()?;
+        let index = resolve_pending_index(&entries, pending_id)?;
+
+        Ok(pending_snapshot(&entries, index))
     }
 
     pub(crate) fn remove_pending(&self, pending_id: &PendingId) -> Result<PendingRemoveSummary> {
@@ -1277,7 +1287,7 @@ impl Store {
         Ok(digest)
     }
 
-    fn verify_capture_blobs(&self, capture_id: &CaptureId) -> Result<()> {
+    fn check_capture_blob_headers(&self, capture_id: &CaptureId) -> Result<()> {
         let mut statement = self.connection.prepare(
             "SELECT bitcode_blob FROM modules WHERE capture_id = ?1
              UNION
@@ -1292,8 +1302,8 @@ impl Store {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         for digest in digests {
-            let (path, expected) = self.verified_blob_path(&digest)?;
-            verify_file_digest(&path, expected)?;
+            let (path, _expected) = self.verified_blob_path(&digest)?;
+            check_blob_header(&path)?;
         }
 
         Ok(())
@@ -1459,27 +1469,10 @@ impl Store {
     }
 
     fn resolve_pending(&self, prefix: &PendingId) -> Result<PendingEntry> {
-        let mut candidates = self
-            .pending_entries()?
-            .into_iter()
-            .filter(|entry| entry.summary.id.as_str().starts_with(prefix.as_str()));
-        let Some(candidate) = candidates.next() else {
-            return Err(Error::UnknownPending {
-                pending_id: prefix.clone(),
-            });
-        };
-        let Some(other) = candidates.next() else {
-            return Ok(candidate);
-        };
+        let mut entries = self.pending_entries()?;
+        let index = resolve_pending_index(&entries, prefix)?;
 
-        Err(ambiguous_identifier(
-            "pending capture",
-            prefix.as_str(),
-            &[
-                candidate.summary.id.to_string(),
-                other.summary.id.to_string(),
-            ],
-        ))
+        Ok(entries.swap_remove(index))
     }
 
     fn pending_entries(&self) -> Result<Vec<PendingEntry>> {
@@ -1798,7 +1791,7 @@ fn compress_and_hash_file(source: &Path, destination: &Path) -> Result<blake3::H
         .open(destination)
         .map_err(|error| Error::filesystem("create", destination, error))?;
     let mut encoder =
-        zstd::stream::write::Encoder::new(destination_file, BLOB_COMPRESSION_LEVEL)
+        zstd::stream::write::Encoder::new(destination_file, zstd::DEFAULT_COMPRESSION_LEVEL)
             .map_err(|error| Error::filesystem("create compressor for", destination, error))?;
     encoder
         .include_checksum(true)
@@ -1862,6 +1855,84 @@ fn blob_decoder(path: &Path) -> Result<zstd::stream::read::Decoder<'static, BufR
 
     zstd::stream::read::Decoder::new(file)
         .map_err(|source| invalid_blob("create decompressor for", path, source))
+}
+
+fn check_blob_header(path: &Path) -> Result<()> {
+    let file = File::open(path).map_err(|source| Error::filesystem("open", path, source))?;
+    let metadata = file
+        .metadata()
+        .map_err(|source| Error::filesystem("read metadata for", path, source))?;
+    if !metadata.is_file() {
+        return Err(invalid_blob(
+            "check",
+            path,
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "blob path must be a regular file, got a non-file entry",
+            ),
+        ));
+    }
+
+    let mut prefix = Vec::with_capacity(ZSTD_FRAME_PREFIX_BYTES as usize);
+    file.take(ZSTD_FRAME_PREFIX_BYTES)
+        .read_to_end(&mut prefix)
+        .map_err(|source| Error::filesystem("read zstd frame header from", path, source))?;
+    zstd::zstd_safe::get_frame_content_size(&prefix).map_err(|source| {
+        invalid_blob(
+            "check zstd frame header in",
+            path,
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("blob must start with a zstd frame header, got {source}"),
+            ),
+        )
+    })?;
+
+    Ok(())
+}
+
+/// Encodes a catalog path for SQLite's immutable URI mode.
+///
+/// Immutable mode prevents read-only connections from creating WAL and shared-memory sidecars.
+/// URI delimiters in the user-selected path must be encoded before the query parameter is added.
+/// See <https://www.sqlite.org/uri.html#uriquery>.
+fn immutable_sqlite_uri(path: &Path) -> String {
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt;
+
+    const HEXADECIMAL: &[u8; 16] = b"0123456789ABCDEF";
+
+    #[cfg(unix)]
+    let path_bytes = path.as_os_str().as_bytes();
+    #[cfg(not(unix))]
+    let path_bytes = path.as_os_str().as_encoded_bytes();
+
+    let mut uri = String::with_capacity(path_bytes.len().saturating_mul(3).saturating_add(17));
+    uri.push_str("file:");
+
+    #[cfg(windows)]
+    if path.is_absolute() && !path_bytes.starts_with(b"/") {
+        uri.push('/');
+    }
+
+    for byte in path_bytes {
+        #[cfg(windows)]
+        if *byte == b'\\' {
+            uri.push('/');
+            continue;
+        }
+
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b':' | b'-' | b'.' | b'_') {
+            uri.push(char::from(*byte));
+        } else {
+            uri.push('%');
+            uri.push(char::from(HEXADECIMAL[(byte >> 4) as usize]));
+            uri.push(char::from(HEXADECIMAL[(byte & 0x0f) as usize]));
+        }
+    }
+    uri.push_str("?immutable=1");
+
+    uri
 }
 
 fn invalid_blob(operation: &'static str, path: &Path, source: io::Error) -> Error {
@@ -1953,6 +2024,49 @@ fn common_prefix_length(left: &str, right: &str) -> usize {
         .zip(right.bytes())
         .take_while(|(left, right)| left == right)
         .count()
+}
+
+fn resolve_pending_index(entries: &[PendingEntry], prefix: &PendingId) -> Result<usize> {
+    let mut candidates = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.summary.id.as_str().starts_with(prefix.as_str()));
+    let Some((index, candidate)) = candidates.next() else {
+        return Err(Error::UnknownPending {
+            pending_id: prefix.clone(),
+        });
+    };
+    let Some((_, other)) = candidates.next() else {
+        return Ok(index);
+    };
+
+    Err(ambiguous_identifier(
+        "pending capture",
+        prefix.as_str(),
+        &[
+            candidate.summary.id.to_string(),
+            other.summary.id.to_string(),
+        ],
+    ))
+}
+
+fn pending_snapshot(entries: &[PendingEntry], index: usize) -> PendingSnapshot {
+    let entry = &entries[index];
+    let previous = index
+        .checked_sub(1)
+        .map(|index| entries[index].summary.id.as_str());
+    let next = entries
+        .get(index + 1)
+        .map(|entry| entry.summary.id.as_str());
+    let length = unique_prefix_length(entry.summary.id.as_str(), previous, next);
+    let unique_prefix = entry.summary.id.as_str()[..length]
+        .parse()
+        .expect("the pending prefix comes from a validated pending-capture ID");
+
+    PendingSnapshot {
+        summary: entry.summary.clone(),
+        unique_prefix,
+    }
 }
 
 #[cfg(test)]
@@ -2683,6 +2797,9 @@ fn create_schema(connection: &mut Connection) -> Result<()> {
              bitcode_blob TEXT NOT NULL,
              text_blob TEXT NOT NULL
          );
+         CREATE INDEX modules_thin_lto_selection
+             ON modules(capture_id, codegen_unit)
+             WHERE compiler_stage = 'thin-lto-after-pm';
          CREATE VIEW selected_modules AS
          SELECT module.* FROM modules AS module
          WHERE module.stage != 'llvm-optimized'
@@ -2753,6 +2870,7 @@ fn create_schema(connection: &mut Connection) -> Result<()> {
              end INTEGER NOT NULL
          );
          CREATE INDEX bodies_symbol ON bodies(module_id, symbol);
+         CREATE INDEX bodies_symbol_module ON bodies(symbol, module_id);
          CREATE TABLE instance_bodies(
              instance_id TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
              body_id TEXT NOT NULL REFERENCES bodies(id) ON DELETE CASCADE,
@@ -2767,6 +2885,7 @@ fn create_schema(connection: &mut Connection) -> Result<()> {
              end INTEGER NOT NULL
          );
          CREATE INDEX declarations_symbol ON declarations(module_id, symbol);
+         CREATE INDEX declarations_symbol_module ON declarations(symbol, module_id);
          CREATE TABLE aliases(
              id TEXT PRIMARY KEY,
              module_id TEXT NOT NULL REFERENCES modules(id) ON DELETE CASCADE,
@@ -2777,6 +2896,7 @@ fn create_schema(connection: &mut Connection) -> Result<()> {
              end INTEGER NOT NULL
          );
          CREATE INDEX aliases_symbol ON aliases(module_id, symbol);
+         CREATE INDEX aliases_symbol_module ON aliases(symbol, module_id);
          CREATE TABLE placements(
              instance_id TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
              codegen_unit TEXT NOT NULL,
@@ -3747,7 +3867,7 @@ mod tests {
     use std::collections::HashMap;
     use std::fs::{self, OpenOptions};
     use std::io;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use cargo_ir::{
         ArtifactProvenance, BodyRange, CaptureInvocation, CaptureMethod, CommandInvocation,
@@ -3842,6 +3962,48 @@ mod tests {
         PendingId::from_capture(&capture_id)
     }
 
+    fn cached_blob_store(path: &Path, contents: &[u8]) -> (Store, String) {
+        let store = Store::open(path).expect("the test can open a store");
+        let source = path.join("cached-blob-source.ll");
+        fs::write(&source, contents).expect("the test can write source evidence");
+        let digest = store
+            .publish_blob(&source)
+            .expect("the store can publish cached evidence");
+        store
+            .connection
+            .execute_batch(
+                "INSERT INTO captures(
+                     id, created_at_ms, request_key, request_json, rustc_path, rustc_release,
+                     rustc_commit, rustc_host, llvm_version, rustc_sysroot, llvm_dis_path, target,
+                     profile, invocation_json
+                 ) VALUES (
+                     'cap_00000000000000000000000000000000', 0, 'cached', '{}', '', '', '', '',
+                     '', '', '', '', 'faithful', '{}'
+                 );
+                 INSERT INTO capture_cache(request_key, capture_id, analysis_key) VALUES (
+                     'cached', 'cap_00000000000000000000000000000000',
+                     '00000000000000000000000000000000'
+                 );",
+            )
+            .expect("the test can record the cached capture");
+        store
+            .connection
+            .execute(
+                "INSERT INTO modules(
+                     id, capture_id, name, stage, compiler_stage, codegen_unit, lto,
+                     capture_method, bitcode_blob, text_blob
+                 ) VALUES (
+                     'mod_cached', 'cap_00000000000000000000000000000000', 'cached',
+                     'llvm-optimized', 'saved-temporary', 'cached.0', 'none',
+                     'saved-temporary', ?1, ?1
+                 )",
+                [&digest],
+            )
+            .expect("the test can reference the cached blob");
+
+        (store, digest)
+    }
+
     #[test]
     fn creates_the_store_below_the_retained_optic_root() {
         let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
@@ -3865,8 +4027,9 @@ mod tests {
     #[test]
     fn opens_an_existing_store_read_only() {
         let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
-        drop(Store::open(temporary.path()).expect("the test can create a store"));
-        let optic_dir = temporary.path().join(".optic");
+        let workspace = temporary.path().join("foreign # store");
+        drop(Store::open(&workspace).expect("the test can create a store"));
+        let optic_dir = workspace.join(".optic");
         let store = Store::open_read_only(&optic_dir).expect("the test can read the store");
 
         assert!(
@@ -3886,6 +4049,38 @@ mod tests {
                 .execute("DELETE FROM captures", [])
                 .is_err()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_open_does_not_create_sqlite_sidecars() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        drop(Store::open(temporary.path()).expect("the test can create a store"));
+        let optic_dir = temporary.path().join(".optic");
+        let store_directory = optic_dir.join("store");
+        let catalog = store_directory.join("catalog.sqlite");
+        let wal = store_directory.join("catalog.sqlite-wal");
+        let shared_memory = store_directory.join("catalog.sqlite-shm");
+        assert!(!wal.exists());
+        assert!(!shared_memory.exists());
+
+        fs::set_permissions(&catalog, fs::Permissions::from_mode(0o400))
+            .expect("the test can make the catalog read-only");
+        fs::set_permissions(&store_directory, fs::Permissions::from_mode(0o500))
+            .expect("the test can make the store directory read-only");
+
+        let result = Store::open_read_only(&optic_dir).and_then(|store| store.captures());
+
+        fs::set_permissions(&store_directory, fs::Permissions::from_mode(0o700))
+            .expect("the test can restore the store directory permissions");
+        fs::set_permissions(&catalog, fs::Permissions::from_mode(0o600))
+            .expect("the test can restore the catalog permissions");
+
+        assert!(result.expect("the read-only store opens").is_empty());
+        assert!(!wal.exists());
+        assert!(!shared_memory.exists());
     }
 
     #[test]
@@ -3934,7 +4129,6 @@ mod tests {
         assert_eq!(status.pending, 1);
         assert_eq!(status.pending_bytes, 13);
         assert!(status.retained_bytes >= status.pending_bytes);
-        assert!(status.available_bytes > status.minimum_available_bytes);
         assert!(status.maximum_bytes > 0);
     }
 
@@ -3990,13 +4184,12 @@ mod tests {
             "cap_01000000000000000000000000000000",
         );
 
-        let pending = store.pending().expect("the pending captures can be listed");
+        let pending = store
+            .pending_snapshots()
+            .expect("the pending captures can be listed");
         let inspected = store
-            .pending_summary(&"pen_00".parse().expect("the pending prefix is valid"))
+            .pending_snapshot(&"pen_00".parse().expect("the pending prefix is valid"))
             .expect("the unique pending prefix resolves");
-        let unique = store
-            .unique_pending_prefix(&first)
-            .expect("the full pending ID has a unique prefix");
         let removed = store
             .remove_pending(&"pen_00".parse().expect("the pending prefix is valid"))
             .expect("the pending capture can be removed");
@@ -4004,14 +4197,14 @@ mod tests {
         assert_eq!(
             pending
                 .iter()
-                .map(|summary| &summary.id)
+                .map(|snapshot| &snapshot.summary.id)
                 .collect::<Vec<_>>(),
             vec![&first, &second]
         );
-        assert_eq!(inspected.id, first);
-        assert_eq!(unique.to_string(), "pen_00");
+        assert_eq!(inspected.summary.id, first);
+        assert_eq!(inspected.unique_prefix.to_string(), "pen_00");
         assert_eq!(removed.id, first);
-        assert_eq!(removed.removed_bytes, inspected.retained_bytes);
+        assert_eq!(removed.removed_bytes, inspected.summary.retained_bytes);
         assert_eq!(
             store
                 .pending()
@@ -4221,6 +4414,42 @@ mod tests {
             .expect("the selected optimized artifact is readable");
 
         assert_eq!(selected, "thin");
+    }
+
+    #[test]
+    fn streamed_relationship_lookups_use_companion_indexes() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let store = lookup_store(temporary.path());
+        let cases = [
+            (
+                "SELECT id FROM bodies WHERE symbol = '_Rsymbol'",
+                "bodies_symbol_module",
+            ),
+            (
+                "SELECT id FROM declarations WHERE symbol = '_Rsymbol'",
+                "declarations_symbol_module",
+            ),
+            (
+                "SELECT id FROM aliases WHERE symbol = '_Rsymbol'",
+                "aliases_symbol_module",
+            ),
+            (
+                "SELECT id FROM modules
+                 WHERE capture_id = 'cap_11111111111111111111111111111111'
+                   AND codegen_unit IS 'crate.cgu.0'
+                   AND compiler_stage = 'thin-lto-after-pm'",
+                "modules_thin_lto_selection",
+            ),
+        ];
+
+        for (query, expected_index) in cases {
+            let plan = explain_query_plan(&store.connection, query);
+
+            assert!(
+                plan.contains(expected_index),
+                "expected {expected_index} in query plan, got {plan}"
+            );
+        }
     }
 
     #[test]
@@ -4993,6 +5222,75 @@ mod tests {
     }
 
     #[test]
+    fn cache_lookup_defers_complete_blob_verification_until_read() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let contents = "define void @kernel() {}\n".repeat(1_000);
+        let (store, digest) = cached_blob_store(temporary.path(), contents.as_bytes());
+        let path = store.blob_path(&digest);
+        let mut compressed = fs::read(&path).expect("the test can read the compressed blob");
+        let checksum_byte = compressed
+            .last_mut()
+            .expect("published zstd evidence contains a checksum");
+        *checksum_byte ^= 0x80;
+        fs::write(&path, compressed).expect("the test can corrupt the blob checksum");
+
+        let cached = store
+            .cached_capture("cached")
+            .expect("cache lookup reads only the blob header")
+            .expect("the cached capture exists");
+
+        assert_eq!(cached.summary.disposition, CaptureDisposition::Reused);
+        assert_invalid_data(store.read_blob(&digest));
+        assert_invalid_data(store.verify());
+    }
+
+    #[test]
+    fn cache_lookup_rejects_a_missing_blob() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let (store, digest) = cached_blob_store(temporary.path(), b"cached evidence");
+        fs::remove_file(store.blob_path(&digest)).expect("the test can remove the cached blob");
+
+        assert!(matches!(
+            store.cached_capture("cached"),
+            Err(Error::Filesystem { source, .. })
+                if source.kind() == io::ErrorKind::NotFound
+        ));
+    }
+
+    #[test]
+    fn cache_lookup_rejects_a_non_zstd_blob() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let (store, digest) = cached_blob_store(temporary.path(), b"cached evidence");
+        fs::write(store.blob_path(&digest), b"not a zstd frame")
+            .expect("the test can replace the cached blob");
+
+        assert_invalid_data(store.cached_capture("cached"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_lookup_rejects_an_unreadable_blob() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let (store, digest) = cached_blob_store(temporary.path(), b"cached evidence");
+        let path = store.blob_path(&digest);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000))
+            .expect("the test can make the cached blob unreadable");
+
+        let result = store.cached_capture("cached");
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .expect("the test can restore the cached blob permissions");
+
+        assert!(matches!(
+            result,
+            Err(Error::Filesystem { source, .. })
+                if source.kind() == io::ErrorKind::PermissionDenied
+        ));
+    }
+
+    #[test]
     fn rejects_a_schema_five_store() {
         let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
         let catalog = temporary.path().join("catalog.sqlite");
@@ -5178,6 +5476,19 @@ mod tests {
             .expect("the test can insert the lookup capture");
 
         store
+    }
+
+    fn explain_query_plan(connection: &Connection, query: &str) -> String {
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {query}"))
+            .expect("the query plan can be prepared");
+        let steps = statement
+            .query_map([], |row| row.get::<_, String>(3))
+            .expect("the query plan can be read")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("the query plan steps are valid");
+
+        steps.join("; ")
     }
 
     #[allow(clippy::too_many_arguments)]

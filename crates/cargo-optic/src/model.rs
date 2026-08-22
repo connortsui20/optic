@@ -60,7 +60,7 @@ pub struct CaptureOptions {
     /// Controls whether matching completed evidence can be reused.
     pub cache_policy: CachePolicy,
 
-    /// Overrides the workspace retained-byte limit for this request.
+    /// Overrides the workspace retained-byte admission limit for this request.
     pub maximum_store_bytes: Option<u64>,
 }
 
@@ -467,10 +467,10 @@ pub struct StoreStatus {
     /// Bytes currently available on the store filesystem.
     pub available_bytes: u64,
 
-    /// The effective retained-byte limit for new captures.
+    /// The effective retained-byte admission limit for new captures.
     pub maximum_bytes: u64,
 
-    /// The filesystem space that new captures must leave available.
+    /// The available filesystem space required at admission checkpoints.
     pub minimum_available_bytes: u64,
 }
 

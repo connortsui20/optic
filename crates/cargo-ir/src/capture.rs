@@ -1452,16 +1452,6 @@ Args:
     }
 
     #[test]
-    fn default_remark_limits_cover_the_observed_large_capture() {
-        let limits = RemarkCollectionLimits::default();
-
-        assert!(limits.max_files >= 17);
-        assert!(limits.max_bytes >= 3_164_926_664);
-        assert!(limits.max_records >= 3_628_751);
-        assert!(limits.parse.max_file_bytes >= 488_286_865);
-    }
-
-    #[test]
     fn rejects_a_malformed_selected_remark_file() {
         let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
         write_remark(

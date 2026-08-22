@@ -18,6 +18,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use crate::app::validate_remark_options;
+use crate::store::PendingSnapshot;
 use crate::terminal::{CodeHighlighter, CodeSyntax, Terminal};
 use crate::{
     Application, BuildSpec, BuildTarget, CachePolicy, CaptureId, CaptureMetadata, CaptureOptions,
@@ -1269,38 +1270,32 @@ fn execute_pending(
 
     match action {
         None => {
-            let summaries = application.pending().map_err(|error| Failure {
+            let snapshots = application.pending_snapshots().map_err(|error| Failure {
                 format,
                 message: error.to_string(),
             })?;
-            let text =
-                pending_list_text(application, &summaries, format, &terminal).map_err(|error| {
-                    Failure {
-                        format,
-                        message: error.to_string(),
-                    }
-                })?;
+            let text = pending_list_text(&snapshots, format, &terminal);
+            let summaries = snapshots
+                .into_iter()
+                .map(|snapshot| snapshot.summary)
+                .collect::<Vec<_>>();
 
             success("pending", format, &summaries, text)
         }
         Some(PendingCommand::Inspect { pending_id }) => {
-            let summary = application
-                .inspect_pending(&pending_id)
+            let snapshot = application
+                .inspect_pending_snapshot(&pending_id)
                 .map_err(|error| Failure {
                     format,
                     message: error.to_string(),
                 })?;
-            let display =
-                display_pending_id(application, &summary.id, format).map_err(|error| Failure {
-                    format,
-                    message: error.to_string(),
-                })?;
+            let display = display_pending_id(&snapshot, format);
 
             success(
                 "pending",
                 format,
-                &summary,
-                pending_summary_text(&summary, &display, &terminal),
+                &snapshot.summary,
+                pending_summary_text(&snapshot.summary, &display, &terminal),
             )
         }
         Some(PendingCommand::Remove { pending_id }) => {
@@ -1847,21 +1842,13 @@ fn display_instance_id(
     }
 }
 
-fn display_pending_id(
-    application: &Application,
-    pending_id: &PendingId,
-    format: Format,
-) -> crate::Result<DisplayIdentifier> {
+fn display_pending_id(snapshot: &PendingSnapshot, format: Format) -> DisplayIdentifier {
     match format {
-        Format::Text => {
-            let unique_prefix = application.unique_pending_prefix(pending_id)?;
-
-            Ok(DisplayIdentifier::new(
-                pending_id.as_str(),
-                unique_prefix.as_str(),
-            ))
-        }
-        Format::JsonLines => Ok(DisplayIdentifier::full(pending_id.as_str())),
+        Format::Text => DisplayIdentifier::new(
+            snapshot.summary.id.as_str(),
+            snapshot.unique_prefix.as_str(),
+        ),
+        Format::JsonLines => DisplayIdentifier::full(snapshot.summary.id.as_str()),
     }
 }
 
@@ -2181,22 +2168,18 @@ fn clean_text(summary: &CleanSummary, terminal: &Terminal) -> String {
     }
 }
 
-fn pending_list_text(
-    application: &Application,
-    summaries: &[PendingSummary],
-    format: Format,
-    terminal: &Terminal,
-) -> crate::Result<String> {
+fn pending_list_text(snapshots: &[PendingSnapshot], format: Format, terminal: &Terminal) -> String {
     if format == Format::JsonLines {
-        return Ok(String::new());
+        return String::new();
     }
-    if summaries.is_empty() {
-        return Ok(format!("{}\n", terminal.warning("No pending captures.")));
+    if snapshots.is_empty() {
+        return format!("{}\n", terminal.warning("No pending captures."));
     }
 
     let mut output = format!("{}\n", terminal.heading("Pending captures"));
-    for summary in summaries {
-        let display = display_pending_id(application, &summary.id, format)?;
+    for snapshot in snapshots {
+        let summary = &snapshot.summary;
+        let display = display_pending_id(snapshot, format);
         writeln!(
             output,
             "{}  {} bytes  {}  {}  {}",
@@ -2213,7 +2196,7 @@ fn pending_list_text(
         .expect("writing pending-capture text to a String cannot fail");
     }
 
-    Ok(output)
+    output
 }
 
 fn pending_summary_text(

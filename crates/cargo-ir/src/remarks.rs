@@ -182,15 +182,13 @@ pub fn parse_optimization_remarks_with(
     let mut line = Vec::new();
 
     loop {
-        line.clear();
-        let bytes_read =
-            reader
-                .read_until(b'\n', &mut line)
-                .map_err(|source| Error::Filesystem {
-                    operation: "read",
-                    path: path.to_path_buf(),
-                    source,
-                })?;
+        let bytes_read = read_bounded_document_line(
+            &mut reader,
+            &mut line,
+            parser.document.len(),
+            limits.max_document_bytes,
+            path,
+        )?;
         if bytes_read == 0 {
             break;
         }
@@ -199,6 +197,39 @@ pub fn parse_optimization_remarks_with(
     }
 
     parser.finish()
+}
+
+fn read_bounded_document_line(
+    reader: &mut impl BufRead,
+    line: &mut Vec<u8>,
+    document_bytes: usize,
+    maximum_document_bytes: usize,
+    path: &Path,
+) -> Result<usize> {
+    let remaining_bytes = maximum_document_bytes.saturating_sub(document_bytes);
+    let read_limit = u64::try_from(remaining_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    line.clear();
+    let bytes_read = reader
+        .take(read_limit)
+        .read_until(b'\n', line)
+        .map_err(|source| Error::Filesystem {
+            operation: "read",
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if bytes_read > remaining_bytes {
+        return Err(invalid_remarks(
+            path,
+            format!(
+                "document length exceeds {maximum_document_bytes} bytes, got {}",
+                document_bytes.saturating_add(bytes_read)
+            ),
+        ));
+    }
+
+    Ok(bytes_read)
 }
 
 struct RemarkStreamParser<'a, 'b> {
@@ -779,6 +810,24 @@ Args:
         for limits in cases {
             assert!(parse_fixture(yaml, limits).is_err());
         }
+    }
+
+    #[test]
+    fn rejects_a_long_line_before_buffering_the_complete_line() {
+        let yaml = format!("--- !Passed\n{}", "x".repeat(1024 * 1024));
+        let limits = RemarkParseLimits {
+            max_file_bytes: yaml.len() as u64,
+            max_document_bytes: 64,
+            ..RemarkParseLimits::default()
+        };
+
+        let error = parse_fixture(&yaml, limits).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("document length exceeds 64 bytes, got 65")
+        );
     }
 
     #[test]

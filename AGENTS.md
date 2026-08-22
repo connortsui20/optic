@@ -36,8 +36,8 @@ Read [README.md](README.md) before you change the product behavior. Use the
 - New IDs contain random UUIDv4 suffixes.
 - Text output shows at least 12 hexadecimal characters and highlights the shortest unique prefix.
 - The schema version is 10. Older stores require `cargo optic clean`.
-- Schema 10 stores content-addressed blobs as zstd level-3 frames. Blob IDs hash the logical,
-  uncompressed bytes.
+- Schema 10 stores content-addressed blobs as zstd frames at zstd's default compression level. Blob
+  IDs hash the logical, uncompressed bytes.
 - Failed post-compilation ingestion can leave validated evidence below `.optic/store/pending`.
 - A matching request validates Cargo freshness before it resumes retained ingestion.
 - `cargo optic pending` lists retained runs. Its `inspect` and `remove` subcommands select opaque

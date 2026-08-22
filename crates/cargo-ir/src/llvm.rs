@@ -50,15 +50,24 @@ pub(crate) fn scan_with(path: &Path, mut on_record: impl FnMut(ModuleRecord)) ->
         source,
     })?;
     let mut reader = BufReader::new(file);
-    let mut line = Vec::new();
+    let mut line = ModuleLine::new();
     let mut offset = 0_u64;
 
-    while read_line(&mut reader, &mut line, path)? != 0 {
+    loop {
+        line.clear();
+        let line_bytes = read_line_with(&mut reader, path, |bytes| line.push(bytes))?;
+        if line_bytes == 0 {
+            break;
+        }
+
         let start = offset;
-        offset += line.len() as u64;
+        offset += line_bytes;
+        let Some(line) = line.record() else {
+            continue;
+        };
 
         if line.starts_with(b"declare ") {
-            let symbol = required_global_name(&line, path, "function declaration")?;
+            let symbol = required_global_name(line, path, "function declaration")?;
             on_record(ModuleRecord::Declaration(LlvmDeclaration {
                 demangled: demangle(&symbol),
                 raw_symbol: symbol,
@@ -69,11 +78,11 @@ pub(crate) fn scan_with(path: &Path, mut on_record: impl FnMut(ModuleRecord)) ->
             continue;
         }
 
-        if trim_ascii(&line).starts_with(b"@") && is_alias(&line) {
-            let symbol = required_global_name(&line, path, "alias")?;
+        if line.starts_with(b"@") {
+            let symbol = required_global_name(line, path, "alias")?;
             on_record(ModuleRecord::Alias(LlvmAlias {
                 demangled: demangle(&symbol),
-                target: alias_target(&line, &symbol),
+                target: alias_target(line, &symbol),
                 raw_symbol: symbol,
                 start,
                 end: offset,
@@ -82,21 +91,24 @@ pub(crate) fn scan_with(path: &Path, mut on_record: impl FnMut(ModuleRecord)) ->
             continue;
         }
 
-        if !line.starts_with(b"define ") {
-            continue;
-        }
+        let symbol = required_global_name(line, path, "function definition")?;
+        let mut function_end = FunctionEnd::new();
 
-        let symbol = required_global_name(&line, path, "function definition")?;
-
-        while !is_function_end(&line) {
-            if read_line(&mut reader, &mut line, path)? == 0 {
+        loop {
+            function_end.clear();
+            let line_bytes = read_line_with(&mut reader, path, |bytes| function_end.push(bytes))?;
+            if line_bytes == 0 {
                 return Err(Error::InvalidLlvm {
                     path: path.to_owned(),
                     message: "function reached the end of the file without a closing brace"
                         .to_owned(),
                 });
             }
-            offset += line.len() as u64;
+            offset += line_bytes;
+
+            if function_end.is_end() {
+                break;
+            }
         }
 
         on_record(ModuleRecord::Body(BodyRange {
@@ -110,6 +122,283 @@ pub(crate) fn scan_with(path: &Path, mut on_record: impl FnMut(ModuleRecord)) ->
     Ok(())
 }
 
+/// Buffers a line only after its prefix identifies an indexed LLVM record.
+///
+/// Large globals, metadata, and function-body lines transition to `Ignore` and discard all
+/// subsequent chunks. Record headers remain available to the existing symbol parsers.
+struct ModuleLine {
+    state: ModuleLineState,
+    bytes: Vec<u8>,
+}
+
+impl ModuleLine {
+    fn new() -> Self {
+        Self {
+            state: ModuleLineState::Start,
+            bytes: Vec::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.state = ModuleLineState::Start;
+        self.bytes.clear();
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        if matches!(self.state, ModuleLineState::Ignore) {
+            return;
+        }
+        if matches!(self.state, ModuleLineState::Record) {
+            self.bytes.extend_from_slice(bytes);
+            return;
+        }
+
+        for (index, byte) in bytes.iter().enumerate() {
+            self.push_byte(*byte);
+
+            if matches!(self.state, ModuleLineState::Ignore) {
+                return;
+            }
+            if matches!(self.state, ModuleLineState::Record) {
+                self.bytes.extend_from_slice(&bytes[index + 1..]);
+                return;
+            }
+        }
+    }
+
+    fn push_byte(&mut self, byte: u8) {
+        match &mut self.state {
+            ModuleLineState::Start => {
+                if byte.is_ascii_whitespace() {
+                    self.state = ModuleLineState::LeadingWhitespace;
+                } else if byte == b'd' {
+                    self.bytes.push(byte);
+                    self.state = ModuleLineState::Keyword;
+                } else if byte == b'@' {
+                    self.bytes.push(byte);
+                    self.state = ModuleLineState::Alias(AliasPrefix::new());
+                } else {
+                    self.state = ModuleLineState::Ignore;
+                }
+            }
+            ModuleLineState::LeadingWhitespace => {
+                if byte == b'@' {
+                    self.bytes.push(byte);
+                    self.state = ModuleLineState::Alias(AliasPrefix::new());
+                } else if !byte.is_ascii_whitespace() {
+                    self.state = ModuleLineState::Ignore;
+                }
+            }
+            ModuleLineState::Keyword => {
+                self.bytes.push(byte);
+
+                const KEYWORDS: [&[u8]; 2] = [b"declare ", b"define "];
+                if KEYWORDS.iter().any(|keyword| *keyword == self.bytes) {
+                    self.state = ModuleLineState::Record;
+                } else if !KEYWORDS
+                    .iter()
+                    .any(|keyword| keyword.starts_with(&self.bytes))
+                {
+                    self.bytes.clear();
+                    self.state = ModuleLineState::Ignore;
+                }
+            }
+            ModuleLineState::Alias(prefix) => {
+                self.bytes.push(byte);
+
+                match prefix.push(byte) {
+                    AliasPrefixResult::Continue => {}
+                    AliasPrefixResult::Record => self.state = ModuleLineState::Record,
+                    AliasPrefixResult::Ignore => {
+                        self.bytes.clear();
+                        self.state = ModuleLineState::Ignore;
+                    }
+                }
+            }
+            ModuleLineState::Record | ModuleLineState::Ignore => {
+                unreachable!("completed line states are handled before byte classification")
+            }
+        }
+    }
+
+    fn record(&self) -> Option<&[u8]> {
+        matches!(self.state, ModuleLineState::Record).then_some(self.bytes.as_slice())
+    }
+}
+
+enum ModuleLineState {
+    Start,
+    LeadingWhitespace,
+    Keyword,
+    Alias(AliasPrefix),
+    Record,
+    Ignore,
+}
+
+struct AliasPrefix {
+    state: AliasPrefixState,
+}
+
+impl AliasPrefix {
+    fn new() -> Self {
+        Self {
+            state: AliasPrefixState::NameStart,
+        }
+    }
+
+    fn push(&mut self, byte: u8) -> AliasPrefixResult {
+        match self.state {
+            AliasPrefixState::NameStart if byte == b'"' => {
+                self.state = AliasPrefixState::QuotedName;
+            }
+            AliasPrefixState::NameStart if is_identifier_byte(byte) => {
+                self.state = AliasPrefixState::UnquotedName;
+            }
+            AliasPrefixState::NameStart => return self.push_pattern(byte, 0),
+            AliasPrefixState::UnquotedName if !is_identifier_byte(byte) => {
+                return self.push_pattern(byte, 0);
+            }
+            AliasPrefixState::UnquotedName => {}
+            AliasPrefixState::QuotedName if byte == b'\\' => {
+                self.state = AliasPrefixState::QuotedEscape;
+            }
+            AliasPrefixState::QuotedName if byte == b'"' => {
+                self.state = AliasPrefixState::Pattern(0);
+            }
+            AliasPrefixState::QuotedName => {}
+            AliasPrefixState::QuotedEscape => self.state = AliasPrefixState::QuotedName,
+            AliasPrefixState::Pattern(matched) => return self.push_pattern(byte, matched),
+        }
+
+        AliasPrefixResult::Continue
+    }
+
+    fn push_pattern(&mut self, byte: u8, matched: usize) -> AliasPrefixResult {
+        const ALIAS_PATTERN: &[u8] = b" = alias ";
+
+        if ALIAS_PATTERN.get(matched) != Some(&byte) {
+            return AliasPrefixResult::Ignore;
+        }
+
+        let matched = matched + 1;
+        if matched == ALIAS_PATTERN.len() {
+            AliasPrefixResult::Record
+        } else {
+            self.state = AliasPrefixState::Pattern(matched);
+            AliasPrefixResult::Continue
+        }
+    }
+}
+
+enum AliasPrefixState {
+    NameStart,
+    UnquotedName,
+    QuotedName,
+    QuotedEscape,
+    Pattern(usize),
+}
+
+enum AliasPrefixResult {
+    Continue,
+    Record,
+    Ignore,
+}
+
+/// Recognizes a closing-brace line without retaining function-body bytes.
+struct FunctionEnd {
+    state: FunctionEndState,
+}
+
+impl FunctionEnd {
+    fn new() -> Self {
+        Self {
+            state: FunctionEndState::LeadingWhitespace,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.state = FunctionEndState::LeadingWhitespace;
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            match self.state {
+                FunctionEndState::LeadingWhitespace if byte.is_ascii_whitespace() => {}
+                FunctionEndState::LeadingWhitespace if *byte == b'}' => {
+                    self.state = FunctionEndState::AfterBrace;
+                }
+                FunctionEndState::LeadingWhitespace => {
+                    self.state = FunctionEndState::NotEnd;
+                }
+                FunctionEndState::AfterBrace if byte.is_ascii_whitespace() => {}
+                FunctionEndState::AfterBrace if *byte == b';' => {
+                    self.state = FunctionEndState::Comment;
+                }
+                FunctionEndState::AfterBrace => self.state = FunctionEndState::NotEnd,
+                FunctionEndState::Comment | FunctionEndState::NotEnd => {}
+            }
+
+            if matches!(
+                self.state,
+                FunctionEndState::Comment | FunctionEndState::NotEnd
+            ) {
+                return;
+            }
+        }
+    }
+
+    fn is_end(&self) -> bool {
+        matches!(
+            self.state,
+            FunctionEndState::AfterBrace | FunctionEndState::Comment
+        )
+    }
+}
+
+enum FunctionEndState {
+    LeadingWhitespace,
+    AfterBrace,
+    Comment,
+    NotEnd,
+}
+
+/// Streams one line in reader-sized chunks and returns its exact byte length.
+fn read_line_with(
+    reader: &mut impl BufRead,
+    path: &Path,
+    mut on_bytes: impl FnMut(&[u8]),
+) -> Result<u64> {
+    let mut total_bytes = 0_u64;
+
+    loop {
+        let (bytes_read, finished) = {
+            let available = reader.fill_buf().map_err(|source| Error::Filesystem {
+                operation: "read",
+                path: path.to_owned(),
+                source,
+            })?;
+            if available.is_empty() {
+                return Ok(total_bytes);
+            }
+
+            let bytes_read = available
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(available.len(), |index| index + 1);
+            let finished = available[bytes_read - 1] == b'\n';
+            on_bytes(&available[..bytes_read]);
+
+            (bytes_read, finished)
+        };
+
+        reader.consume(bytes_read);
+        total_bytes = total_bytes.saturating_add(bytes_read as u64);
+        if finished {
+            return Ok(total_bytes);
+        }
+    }
+}
+
 fn required_global_name(line: &[u8], path: &Path, kind: &str) -> Result<String> {
     global_name(line).ok_or_else(|| Error::InvalidLlvm {
         path: path.to_owned(),
@@ -119,14 +408,6 @@ fn required_global_name(line: &[u8], path: &Path, kind: &str) -> Result<String> 
 
 fn demangle(symbol: &str) -> String {
     try_demangle(symbol).map_or_else(|_| symbol.to_owned(), |name| format!("{name:#}"))
-}
-
-fn is_alias(line: &[u8]) -> bool {
-    let content = content_before_comment(line);
-
-    content
-        .windows(b" = alias ".len())
-        .any(|window| window == b" = alias ")
 }
 
 fn alias_target(line: &[u8], alias: &str) -> AliasTarget {
@@ -219,17 +500,6 @@ fn encoded_global_name_length(value: &[u8]) -> Option<usize> {
     Some(start + length)
 }
 
-fn read_line(reader: &mut impl BufRead, line: &mut Vec<u8>, path: &Path) -> Result<usize> {
-    line.clear();
-    reader
-        .read_until(b'\n', line)
-        .map_err(|source| Error::Filesystem {
-            operation: "read",
-            path: path.to_owned(),
-            source,
-        })
-}
-
 fn global_name(line: &[u8]) -> Option<String> {
     let start = line.iter().position(|byte| *byte == b'@')? + 1;
 
@@ -261,28 +531,6 @@ const fn is_identifier_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'$' | b'.' | b'_')
 }
 
-fn is_function_end(line: &[u8]) -> bool {
-    let content = content_before_comment(line);
-    trim_ascii(content) == b"}"
-}
-
-fn content_before_comment(line: &[u8]) -> &[u8] {
-    let mut quoted = false;
-    let mut cursor = 0;
-
-    while cursor < line.len() {
-        match line[cursor] {
-            b'"' => quoted = !quoted,
-            b'\\' if quoted => cursor += 1,
-            b';' if !quoted => return &line[..cursor],
-            _ => {}
-        }
-        cursor += 1;
-    }
-
-    line
-}
-
 fn trim_ascii(mut value: &[u8]) -> &[u8] {
     while value.first().is_some_and(u8::is_ascii_whitespace) {
         value = &value[1..];
@@ -298,8 +546,15 @@ fn trim_ascii(mut value: &[u8]) -> &[u8] {
 mod tests {
     use std::fs;
 
-    use super::{alias_target, content_before_comment, global_name, is_function_end, scan};
+    use super::{FunctionEnd, ModuleLine, alias_target, global_name, scan};
     use crate::AliasTarget;
+
+    fn is_function_end(line: &[u8]) -> bool {
+        let mut detector = FunctionEnd::new();
+        detector.push(line);
+
+        detector.is_end()
+    }
 
     #[test]
     fn extracts_unquoted_and_quoted_names() {
@@ -320,11 +575,14 @@ mod tests {
     }
 
     #[test]
-    fn ignores_semicolons_inside_strings() {
-        assert_eq!(
-            content_before_comment(br#"asm "a;b" ; comment"#),
-            br#"asm "a;b" "#
-        );
+    fn does_not_buffer_a_large_irrelevant_line() {
+        let mut line = ModuleLine::new();
+        line.push(b"@bytes = private constant [1048576 x i8] c\"");
+        line.push(&vec![b'x'; 1024 * 1024]);
+        line.push(b"\"\n");
+
+        assert!(line.record().is_none());
+        assert!(line.bytes.is_empty());
     }
 
     #[test]
