@@ -8,7 +8,7 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::Read;
+use std::io::{ErrorKind, Read};
 use std::ops::ControlFlow;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -1059,7 +1059,7 @@ fn disassemble_with_events(
     let module = disassemble_module(toolchain, artifact, analysis_directory)?;
     let text_path = module.text_path.clone();
     on_event(EvidenceEvent::ModuleStarted { module });
-    llvm::scan_with(&text_path, |record| {
+    let scan = llvm::scan_with(&text_path, |record| {
         on_event(match record {
             llvm::ModuleRecord::Body(body) => EvidenceEvent::Body { body },
             llvm::ModuleRecord::Declaration(declaration) => {
@@ -1067,7 +1067,9 @@ fn disassemble_with_events(
             }
             llvm::ModuleRecord::Alias(alias) => EvidenceEvent::Alias { alias },
         });
-    })
+    });
+
+    remove_generated_llvm_text(&text_path, scan)
 }
 
 fn disassemble_module(
@@ -1086,13 +1088,18 @@ fn disassemble_module(
     let mut text_name = file_name.to_owned();
     text_name.push(".ll");
     let text_path = analysis_directory.join(text_name);
-    let (status, diagnostics) = run_disassembler(toolchain, &bitcode_path, &text_path)?;
+    let (status, diagnostics) = match run_disassembler(toolchain, &bitcode_path, &text_path) {
+        Ok(output) => output,
+        Err(error) => return remove_generated_llvm_text(&text_path, Err(error)),
+    };
     if !status.success() {
-        return Err(Error::ProcessFailed {
+        let error = Error::ProcessFailed {
             program: toolchain.llvm_dis.display().to_string(),
             status: status.to_string(),
             diagnostics: String::from_utf8_lossy(&diagnostics).into_owned(),
-        });
+        };
+
+        return remove_generated_llvm_text(&text_path, Err(error));
     }
 
     Ok(ModuleStart {
@@ -1101,6 +1108,27 @@ fn disassemble_module(
         bitcode_path,
         text_path,
     })
+}
+
+fn remove_generated_llvm_text<T>(text_path: &Path, result: Result<T>) -> Result<T> {
+    let removal = match fs::remove_file(text_path) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(Error::Filesystem {
+            operation: "remove",
+            path: text_path.to_owned(),
+            source,
+        }),
+    };
+
+    match result {
+        Err(error) => Err(error),
+        Ok(value) => {
+            removal?;
+
+            Ok(value)
+        }
+    }
 }
 
 fn run_disassembler(
@@ -1164,7 +1192,7 @@ mod tests {
     use super::{
         RemarkCollectionLimits, artifact_provenance, collect_remarks_with_limits,
         injected_rustc_arguments, prepare_analysis_directory, prepare_remarks_directory,
-        requested_remarks,
+        remove_generated_llvm_text, requested_remarks,
     };
     use crate::{
         BuildRequest, CaptureProfile, Error, LlvmStage, LtoScope, UnstableAccess,
@@ -1210,6 +1238,53 @@ Args:
         assert!(matches!(
             prepare_analysis_directory(temporary.path()),
             Err(Error::AnalysisDirectoryNotEmpty { path }) if path == temporary.path()
+        ));
+    }
+
+    #[test]
+    fn removes_generated_llvm_text_after_a_successful_scan() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let text = temporary.path().join("module.bc.ll");
+        fs::write(&text, b"derived LLVM text").expect("the test can create generated LLVM text");
+
+        let value = remove_generated_llvm_text(&text, Ok("indexed"))
+            .expect("the generated LLVM text can be removed");
+
+        assert_eq!(value, "indexed");
+        assert!(!text.exists());
+    }
+
+    #[test]
+    fn removes_generated_llvm_text_after_a_failed_scan() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let text = temporary.path().join("module.bc.ll");
+        fs::write(&text, b"invalid LLVM text").expect("the test can create generated LLVM text");
+        let scan = Err(Error::InvalidLlvm {
+            path: text.clone(),
+            message: "test scan failure".to_owned(),
+        });
+
+        let result = remove_generated_llvm_text::<()>(&text, scan);
+
+        assert!(matches!(result, Err(Error::InvalidLlvm { .. })));
+        assert!(!text.exists());
+    }
+
+    #[test]
+    fn preserves_a_scan_error_when_generated_text_removal_fails() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let text = temporary.path().join("module.bc.ll");
+        fs::create_dir(&text).expect("the test can create an invalid generated-text directory");
+        let scan = Err(Error::InvalidLlvm {
+            path: text.clone(),
+            message: "test scan failure".to_owned(),
+        });
+
+        let result = remove_generated_llvm_text::<()>(&text, scan);
+
+        assert!(matches!(
+            result,
+            Err(Error::InvalidLlvm { message, .. }) if message == "test scan failure"
         ));
     }
 
