@@ -63,14 +63,45 @@ pub fn run_cli() -> ExitCode {
     {
         *path = directory.join(&*path);
     }
+    if let Err(message) = validate_optic_selection(&cli) {
+        return print_error(cli.command.format(), cli.command.name(), &message);
+    }
     if let Command::Clean { format } = &cli.command {
         return finish(
             "clean",
             execute_clean(&directory, cli.manifest_path.as_deref(), *format, cli.color),
         );
     }
+    if let Command::Compare {
+        before,
+        after,
+        before_optic_dir,
+        after_optic_dir,
+        output,
+        format,
+    } = &cli.command
+    {
+        return finish(
+            "compare",
+            execute_compare(
+                &directory,
+                cli.manifest_path.as_deref(),
+                cli.optic_dir.as_deref(),
+                before,
+                before_optic_dir.as_deref(),
+                after,
+                after_optic_dir.as_deref(),
+                *output,
+                *format,
+            ),
+        );
+    }
     let command = cli.command.name();
-    let mut application = match Application::discover(&directory, cli.manifest_path.as_deref()) {
+    let application = match cli.optic_dir.as_deref() {
+        Some(optic_dir) => Application::open_read_only(optic_dir),
+        None => Application::discover(&directory, cli.manifest_path.as_deref()),
+    };
+    let mut application = match application {
         Ok(application) => application,
         Err(error) => {
             return print_error(cli.command.format(), cli.command.name(), &error.to_string());
@@ -112,6 +143,10 @@ struct Cli {
     /// Uses the specified Cargo manifest.
     #[arg(long, global = true, value_name = "PATH")]
     manifest_path: Option<PathBuf>,
+
+    /// Reads completed evidence from an existing `.optic` directory.
+    #[arg(long, global = true, value_name = "PATH")]
+    optic_dir: Option<PathBuf>,
 
     /// Controls ANSI color and syntax highlighting.
     #[arg(long, global = true, value_enum, default_value_t)]
@@ -191,9 +226,17 @@ enum Command {
         #[arg(long)]
         before: InstanceId,
 
+        /// Reads the first instance from this `.optic` directory.
+        #[arg(long, value_name = "PATH")]
+        before_optic_dir: Option<PathBuf>,
+
         /// Selects the second instance by full ID or unique prefix.
         #[arg(long)]
         after: InstanceId,
+
+        /// Reads the second instance from this `.optic` directory.
+        #[arg(long, value_name = "PATH")]
+        after_optic_dir: Option<PathBuf>,
 
         /// Selects one compiler output.
         #[arg(long, value_enum, default_value_t)]
@@ -341,6 +384,58 @@ impl Command {
             Self::Find { .. } => "find",
             Self::Show { .. } => "show",
         }
+    }
+}
+
+fn validate_optic_selection(cli: &Cli) -> std::result::Result<(), String> {
+    let mut paths = Vec::new();
+    if let Some(path) = &cli.optic_dir {
+        paths.push(path);
+    }
+    if let Command::Compare {
+        before_optic_dir,
+        after_optic_dir,
+        ..
+    } = &cli.command
+    {
+        paths.extend(before_optic_dir);
+        paths.extend(after_optic_dir);
+    }
+    if paths.iter().any(|path| path.to_str().is_none()) {
+        return Err(".optic paths must be valid UTF-8, got a non-UTF-8 path".to_owned());
+    }
+
+    if cli.optic_dir.is_some() && cli.manifest_path.is_some() {
+        return Err(
+            "--optic-dir cannot be combined with --manifest-path, got both options".to_owned(),
+        );
+    }
+
+    if cli.optic_dir.is_none() {
+        return Ok(());
+    }
+
+    match &cli.command {
+        Command::Captures { .. }
+        | Command::Inspect { .. }
+        | Command::Status { .. }
+        | Command::Verify { .. }
+        | Command::Compare { .. }
+        | Command::Find { .. } => Ok(()),
+        Command::Show {
+            capture,
+            instance,
+            build,
+            ..
+        } if (capture.is_some() || instance.is_some()) && !build.has_build_selection() => Ok(()),
+        Command::Show { .. } => Err(
+            "--optic-dir requires --capture or --instance for show, got a build-based show"
+                .to_owned(),
+        ),
+        command => Err(format!(
+            "--optic-dir requires a read-only command, got {}",
+            command.name()
+        )),
     }
 }
 
@@ -852,6 +947,54 @@ fn execute_clean(
     success("clean", format, &summary, clean_text(&summary, &terminal))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn execute_compare(
+    directory: &Path,
+    manifest_path: Option<&Path>,
+    optic_dir: Option<&Path>,
+    before: &InstanceId,
+    before_optic_dir: Option<&Path>,
+    after: &InstanceId,
+    after_optic_dir: Option<&Path>,
+    output: CompilerOutput,
+    format: Format,
+) -> Result<Execution, Failure> {
+    let before_optic_dir = before_optic_dir.or(optic_dir);
+    let after_optic_dir = after_optic_dir.or(optic_dir);
+    let before_application = open_application(directory, manifest_path, before_optic_dir, format)?;
+
+    let comparison = if before_optic_dir == after_optic_dir {
+        before_application.compare(before, after, output)
+    } else {
+        let after_application =
+            open_application(directory, manifest_path, after_optic_dir, format)?;
+        before_application.compare_with(before, &after_application, after, output)
+    }
+    .map_err(|error| Failure {
+        format,
+        message: error.to_string(),
+    })?;
+
+    success("compare", format, &comparison, compare_text(&comparison))
+}
+
+fn open_application(
+    directory: &Path,
+    manifest_path: Option<&Path>,
+    optic_dir: Option<&Path>,
+    format: Format,
+) -> Result<Application, Failure> {
+    let application = match optic_dir {
+        Some(optic_dir) => Application::open_read_only(optic_dir),
+        None => Application::discover(directory, manifest_path),
+    };
+
+    application.map_err(|error| Failure {
+        format,
+        message: error.to_string(),
+    })
+}
+
 fn execute(application: &mut Application, cli: Cli) -> Result<Execution, Failure> {
     let manifest_path = cli.manifest_path;
     let color = cli.color;
@@ -950,18 +1093,14 @@ fn execute(application: &mut Application, cli: Cli) -> Result<Execution, Failure
             )
         }
         Command::Compare {
-            before,
-            after,
-            output,
-            format,
+            before: _,
+            before_optic_dir: _,
+            after: _,
+            after_optic_dir: _,
+            output: _,
+            format: _,
         } => {
-            let comparison = application
-                .compare(&before, &after, output)
-                .map_err(|error| Failure {
-                    format,
-                    message: error.to_string(),
-                })?;
-            success("compare", format, &comparison, compare_text(&comparison))
+            unreachable!("compare executes before the default application opens its store")
         }
         Command::Clean { .. } => {
             unreachable!("clean executes before the application opens its store")
@@ -1004,7 +1143,13 @@ fn execute(application: &mut Application, cli: Cli) -> Result<Execution, Failure
                 "find",
                 format,
                 &result,
-                find_text(&result, &display_capture, &display_instances, &terminal),
+                find_text(
+                    &result,
+                    &display_capture,
+                    &display_instances,
+                    application.explicit_optic_dir(),
+                    &terminal,
+                ),
             )
         }
         Command::Show {
@@ -1424,6 +1569,7 @@ fn select_and_show(
             result,
             &display_capture,
             &display_instances,
+            application.explicit_optic_dir(),
             output,
             remark_options,
             include_source,
@@ -2041,6 +2187,7 @@ fn find_text(
     result: &FindResult,
     display_capture: &DisplayIdentifier,
     display_instances: &[DisplayIdentifier],
+    optic_dir: Option<&Path>,
     terminal: &Terminal,
 ) -> String {
     if result.instances.is_empty() {
@@ -2066,7 +2213,14 @@ fn find_text(
         writeln!(
             output,
             "  {}",
-            show_command(terminal, display_id, ShowOutput::default(), None, false)
+            show_command(
+                terminal,
+                display_id,
+                optic_dir,
+                ShowOutput::default(),
+                None,
+                false,
+            )
         )
         .expect("writing instance text to a String cannot fail");
     }
@@ -2147,6 +2301,7 @@ fn selection_text(
     result: &FindResult,
     display_capture: &DisplayIdentifier,
     display_instances: &[DisplayIdentifier],
+    optic_dir: Option<&Path>,
     selected_output: ShowOutput,
     remark_options: &RemarkOptions,
     include_source: bool,
@@ -2183,6 +2338,7 @@ fn selection_text(
             show_command(
                 terminal,
                 display_id,
+                optic_dir,
                 selected_output,
                 (selected_output == ShowOutput::Remarks).then_some(remark_options),
                 include_source,
@@ -2207,6 +2363,7 @@ fn selection_text(
 fn show_command(
     terminal: &Terminal,
     instance_id: &DisplayIdentifier,
+    optic_dir: Option<&Path>,
     output: ShowOutput,
     remark_options: Option<&RemarkOptions>,
     include_source: bool,
@@ -2234,8 +2391,22 @@ fn show_command(
         after.push_str(" --source");
     }
 
+    let before = optic_dir.map_or_else(
+        || "cargo optic show --instance ".to_owned(),
+        |optic_dir| {
+            let optic_dir = optic_dir
+                .to_str()
+                .expect("CLI validation requires explicit .optic paths to be UTF-8");
+
+            format!(
+                "cargo optic --optic-dir {} show --instance ",
+                shell_quoted(optic_dir)
+            )
+        },
+    );
+
     terminal.command_with_identifier(
-        "cargo optic show --instance ",
+        &before,
         &instance_id.text,
         instance_id.unique_prefix_length,
         &after,
@@ -2373,7 +2544,10 @@ fn normalized_arguments() -> Vec<OsString> {
 mod tests {
     use clap::Parser as _;
 
-    use super::{Cli, Command, DisplayIdentifier, ShowOutput, find_text, show_command};
+    use super::{
+        Cli, Command, DisplayIdentifier, ShowOutput, find_text, show_command,
+        validate_optic_selection,
+    };
     use crate::{
         CaptureId, FindMatchKind, FindResult, InstanceId, InstanceSummary, RemarkKindFilter,
         RemarkOptions, SourceLocation,
@@ -2447,6 +2621,59 @@ mod tests {
     }
 
     #[test]
+    fn parses_foreign_store_selections() {
+        let cli = Cli::try_parse_from([
+            "cargo optic",
+            "--optic-dir",
+            "/tmp/default/.optic",
+            "compare",
+            "--before",
+            "ins_0",
+            "--before-optic-dir",
+            "/tmp/before/.optic",
+            "--after",
+            "ins_1",
+            "--after-optic-dir",
+            "/tmp/after/.optic",
+        ])
+        .expect("compare accepts global and side-specific stores");
+
+        assert!(validate_optic_selection(&cli).is_ok());
+        assert_eq!(
+            cli.optic_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/default/.optic"))
+        );
+        assert!(matches!(
+            cli.command,
+            Command::Compare {
+                before_optic_dir: Some(ref before),
+                after_optic_dir: Some(ref after),
+                ..
+            } if before == std::path::Path::new("/tmp/before/.optic")
+                && after == std::path::Path::new("/tmp/after/.optic")
+        ));
+    }
+
+    #[test]
+    fn rejects_mutating_and_build_based_foreign_commands() {
+        for arguments in [
+            vec!["cargo optic", "--optic-dir", "/tmp/.optic", "capture"],
+            vec!["cargo optic", "--optic-dir", "/tmp/.optic", "gc"],
+            vec![
+                "cargo optic",
+                "--optic-dir",
+                "/tmp/.optic",
+                "show",
+                "kernel",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(arguments).expect("clap accepts the command shape");
+
+            assert!(validate_optic_selection(&cli).is_err());
+        }
+    }
+
+    #[test]
     fn quotes_pass_names_in_generated_show_commands() {
         let instance = DisplayIdentifier::full("ins_0123456789abcdef0123456789abcdef");
         let options = RemarkOptions {
@@ -2457,6 +2684,7 @@ mod tests {
         let command = show_command(
             &crate::terminal::Terminal::new(false),
             &instance,
+            None,
             ShowOutput::Remarks,
             Some(&options),
             false,
@@ -2468,6 +2696,27 @@ mod tests {
                 "cargo optic show --instance ins_0123456789abcdef0123456789abcdef ",
                 "--output remarks --pass='foo bar; $(echo unsafe) '",
                 "\"'\"'quoted'\"'\"''",
+            )
+        );
+    }
+
+    #[test]
+    fn keeps_the_foreign_store_in_generated_show_commands() {
+        let instance = DisplayIdentifier::full("ins_0123456789abcdef0123456789abcdef");
+        let command = show_command(
+            &crate::terminal::Terminal::new(false),
+            &instance,
+            Some(std::path::Path::new("/tmp/foreign optic's/.optic")),
+            ShowOutput::Llvm,
+            None,
+            false,
+        );
+
+        assert_eq!(
+            command,
+            concat!(
+                "cargo optic --optic-dir '/tmp/foreign optic'\"'\"'s/.optic' ",
+                "show --instance ins_0123456789abcdef0123456789abcdef",
             )
         );
     }
@@ -2517,6 +2766,7 @@ mod tests {
             &result,
             &display_capture,
             &display_instances,
+            None,
             &crate::terminal::Terminal::new(false),
         );
 

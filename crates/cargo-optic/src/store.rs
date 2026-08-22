@@ -16,7 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use cargo_ir::{CompiledCapture, EvidenceEvent, LlvmStage, Toolchain};
 use fs2::FileExt;
 use rusqlite::types::Type;
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use walkdir::WalkDir;
 
 use crate::source::{SourceBaseline, StoredSource};
@@ -107,6 +107,14 @@ pub(crate) struct Store {
     pending: PathBuf,
 
     connection: Connection,
+
+    access: StoreAccess,
+}
+
+enum StoreAccess {
+    ReadWrite,
+
+    ReadOnly { optic_dir: PathBuf },
 }
 
 pub(crate) struct FileLock {
@@ -122,6 +130,15 @@ pub(crate) fn lock_workspace_shared(workspace_root: &Path) -> Result<FileLock> {
     create_private_directory(&locks)?;
     let path = locks.join("operation.lock");
     let file = open_lock_file(&path)?;
+    FileExt::lock_shared(&file).map_err(|source| Error::filesystem("lock", &path, source))?;
+
+    Ok(FileLock { _file: file })
+}
+
+/// Prevents evidence removal while a command reads an existing `.optic` store.
+pub(crate) fn lock_optic_shared(optic: &Path) -> Result<FileLock> {
+    let path = optic.join("locks/operation.lock");
+    let file = open_existing_lock_file(&path)?;
     FileExt::lock_shared(&file).map_err(|source| Error::filesystem("lock", &path, source))?;
 
     Ok(FileLock { _file: file })
@@ -172,6 +189,38 @@ impl Store {
             blobs,
             pending,
             connection,
+            access: StoreAccess::ReadWrite,
+        })
+    }
+
+    pub(crate) fn open_read_only(optic: &Path) -> Result<Self> {
+        let root = optic.join("store");
+        let blobs = root.join("blobs");
+        let pending = root.join("pending");
+        let locks = optic.join("locks");
+        let schema_path = locks.join("schema.lock");
+        let schema_file = open_existing_lock_file(&schema_path)?;
+        FileExt::lock_shared(&schema_file)
+            .map_err(|source| Error::filesystem("lock", &schema_path, source))?;
+        let _schema_lock = FileLock { _file: schema_file };
+        let connection = Connection::open_with_flags(
+            root.join("catalog.sqlite"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        connection.pragma_update(None, "query_only", true)?;
+        connection.pragma_update(None, "foreign_keys", true)?;
+        validate_schema(&connection)?;
+
+        Ok(Self {
+            root,
+            locks,
+            blobs,
+            pending,
+            connection,
+            access: StoreAccess::ReadOnly {
+                optic_dir: optic.to_owned(),
+            },
         })
     }
 
@@ -182,6 +231,7 @@ impl Store {
     }
 
     pub(crate) fn lock_writer(&self) -> Result<FileLock> {
+        self.require_writable("write evidence")?;
         let path = self.locks.join("writer.lock");
 
         lock_file(&path)
@@ -189,16 +239,30 @@ impl Store {
 
     pub(crate) fn lock_evidence_reader(&self) -> Result<FileLock> {
         let path = self.locks.join("evidence.lock");
-        let file = open_lock_file(&path)?;
+        let file = match &self.access {
+            StoreAccess::ReadWrite => open_lock_file(&path)?,
+            StoreAccess::ReadOnly { .. } => open_existing_lock_file(&path)?,
+        };
         FileExt::lock_shared(&file).map_err(|source| Error::filesystem("lock", &path, source))?;
 
         Ok(FileLock { _file: file })
     }
 
     fn lock_evidence_writer(&self) -> Result<FileLock> {
+        self.require_writable("update evidence")?;
         let path = self.locks.join("evidence.lock");
 
         lock_file(&path)
+    }
+
+    fn require_writable(&self, operation: &'static str) -> Result<()> {
+        match &self.access {
+            StoreAccess::ReadWrite => Ok(()),
+            StoreAccess::ReadOnly { optic_dir } => Err(Error::ReadOnlyStore {
+                operation,
+                path: optic_dir.clone(),
+            }),
+        }
     }
 
     pub(crate) fn cached_capture(&self, request_key: &str) -> Result<Option<CachedCapture>> {
@@ -1654,6 +1718,13 @@ fn open_lock_file(path: &Path) -> Result<File> {
         .map_err(|source| Error::filesystem("open", path, source))
 }
 
+fn open_existing_lock_file(path: &Path) -> Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .open(path)
+        .map_err(|source| Error::filesystem("open", path, source))
+}
+
 fn ambiguous_identifier(kind: &'static str, prefix: &str, candidates: &[String]) -> Error {
     Error::AmbiguousIdentifier {
         kind,
@@ -2322,6 +2393,18 @@ fn initialize_schema(connection: &mut Connection) -> Result<()> {
             actual,
         }),
     }
+}
+
+fn validate_schema(connection: &Connection) -> Result<()> {
+    let actual = connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))?;
+    if actual == STORE_VERSION {
+        return Ok(());
+    }
+
+    Err(Error::StoreVersion {
+        expected: STORE_VERSION,
+        actual,
+    })
 }
 
 fn create_schema(connection: &mut Connection) -> Result<()> {
@@ -3456,6 +3539,62 @@ mod tests {
             assert!(temporary.path().join(path).exists(), "missing {path}");
         }
         assert!(!temporary.path().join(".optic.lock").exists());
+    }
+
+    #[test]
+    fn opens_an_existing_store_read_only() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        drop(Store::open(temporary.path()).expect("the test can create a store"));
+        let optic_dir = temporary.path().join(".optic");
+        let store = Store::open_read_only(&optic_dir).expect("the test can read the store");
+
+        assert!(
+            store
+                .captures()
+                .expect("the catalog is readable")
+                .is_empty()
+        );
+        assert!(matches!(
+            store.lock_writer(),
+            Err(Error::ReadOnlyStore { operation: "write evidence", path })
+                if path == optic_dir
+        ));
+        assert!(
+            store
+                .connection
+                .execute("DELETE FROM captures", [])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn read_only_open_does_not_create_a_missing_store() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        let optic_dir = temporary.path().join("missing/.optic");
+
+        assert!(Store::open_read_only(&optic_dir).is_err());
+        assert!(!optic_dir.exists());
+    }
+
+    #[test]
+    fn read_only_open_does_not_initialize_an_empty_catalog() {
+        let temporary = tempfile::tempdir().expect("the test can create a temporary directory");
+        drop(Store::open(temporary.path()).expect("the test can create a store"));
+        let optic_dir = temporary.path().join(".optic");
+        let catalog = Connection::open(optic_dir.join("store/catalog.sqlite"))
+            .expect("the test can edit the catalog version");
+        catalog
+            .pragma_update(None, "user_version", 0)
+            .expect("the test can clear the catalog version");
+        drop(catalog);
+
+        assert!(matches!(
+            Store::open_read_only(&optic_dir),
+            Err(Error::StoreVersion {
+                expected: STORE_VERSION,
+                actual: 0,
+            })
+        ));
     }
 
     #[test]

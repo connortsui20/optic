@@ -15,8 +15,8 @@ use serde::Serialize;
 use crate::pending::{PendingCapture, ResumableCapture};
 use crate::source::{SourceBaseline, find_item_at};
 use crate::store::{
-    AnalysisKey, CaptureCacheKey, FileLock, LEGACY_STORE_ENTRIES, Store, lock_workspace_exclusive,
-    lock_workspace_shared,
+    AnalysisKey, CaptureCacheKey, FileLock, LEGACY_STORE_ENTRIES, Store, lock_optic_shared,
+    lock_workspace_exclusive, lock_workspace_shared,
 };
 use crate::{
     BodySetDelta, BodySetSummary, BuildSpec, CachePolicy, CaptureDetails, CaptureDisposition,
@@ -28,16 +28,27 @@ use crate::{
 
 const EVIDENCE_VERSION: u32 = 5;
 
-/// Product workflows for one Cargo workspace and its `.optic` store.
+/// Product workflows for one writable Cargo workspace or one read-only `.optic` store.
 pub struct Application {
     /// Prevents `clean` from removing the store while this application uses it.
     _operation_lock: FileLock,
 
+    context: ApplicationContext,
+
+    store: Store,
+}
+
+#[derive(Clone)]
+struct WorkspaceContext {
     workspace_root: PathBuf,
 
     target_directory: PathBuf,
+}
 
-    store: Store,
+enum ApplicationContext {
+    Workspace(WorkspaceContext),
+
+    Foreign { optic_dir: PathBuf },
 }
 
 impl Application {
@@ -56,10 +67,49 @@ impl Application {
 
         Ok(Self {
             _operation_lock: operation_lock,
-            workspace_root,
-            target_directory,
+            context: ApplicationContext::Workspace(WorkspaceContext {
+                workspace_root,
+                target_directory,
+            }),
             store,
         })
+    }
+
+    /// Opens one existing `.optic` directory without Cargo discovery or store mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path, existing locks, catalog, or evidence format is invalid.
+    pub fn open_read_only(optic_dir: &Path) -> Result<Self> {
+        let optic_dir = fs::canonicalize(optic_dir)
+            .map_err(|source| crate::Error::filesystem("canonicalize", optic_dir, source))?;
+        let operation_lock = lock_optic_shared(&optic_dir)?;
+        let store = Store::open_read_only(&optic_dir)?;
+
+        Ok(Self {
+            _operation_lock: operation_lock,
+            context: ApplicationContext::Foreign {
+                optic_dir: optic_dir.clone(),
+            },
+            store,
+        })
+    }
+
+    pub(crate) fn explicit_optic_dir(&self) -> Option<&Path> {
+        match &self.context {
+            ApplicationContext::Workspace(_) => None,
+            ApplicationContext::Foreign { optic_dir } => Some(optic_dir),
+        }
+    }
+
+    fn workspace_context(&self, operation: &'static str) -> Result<&WorkspaceContext> {
+        match &self.context {
+            ApplicationContext::Workspace(workspace) => Ok(workspace),
+            ApplicationContext::Foreign { optic_dir } => Err(crate::Error::ReadOnlyStore {
+                operation,
+                path: optic_dir.clone(),
+            }),
+        }
     }
 
     /// Removes stored evidence for the Cargo workspace that contains `directory`.
@@ -104,6 +154,7 @@ impl Application {
         cache_policy: CachePolicy,
         mut on_event: impl FnMut(CaptureEvent) -> ControlFlow<()>,
     ) -> Result<CaptureSummary> {
+        let workspace = self.workspace_context("capture evidence")?.clone();
         if spec.capture_profile != crate::CaptureProfile::Experiment
             && !spec.rustc_arguments.is_empty()
         {
@@ -113,12 +164,12 @@ impl Application {
         }
 
         let _writer = self.store.lock_writer()?;
-        let toolchain = cargo_ir::inspect_workspace_toolchain(&self.workspace_root)?;
-        let request_key = request_key(spec, &toolchain, &self.target_directory)?;
+        let toolchain = cargo_ir::inspect_workspace_toolchain(&workspace.workspace_root)?;
+        let request_key = request_key(spec, &toolchain, &workspace.target_directory)?;
         let pending_directory = self.store.pending_directory(&request_key)?;
 
         if PendingCapture::exists(&pending_directory) {
-            let request_template = self.build_request(spec, PathBuf::new());
+            let request_template = Self::build_request(&workspace, spec, PathBuf::new());
             match PendingCapture::resume(
                 &pending_directory,
                 &request_key,
@@ -162,13 +213,13 @@ impl Application {
             CaptureEvent::PhaseStarted(CapturePhase::Source),
             &pending_directory,
         )?;
-        let sources = SourceBaseline::capture(&self.workspace_root, spec, &staging)?;
+        let sources = SourceBaseline::capture(&workspace.workspace_root, spec, &staging)?;
         emit_discardable_capture_event(
             &mut on_event,
             CaptureEvent::PhaseFinished(CapturePhase::Source),
             &pending_directory,
         )?;
-        let request = self.build_request(spec, analysis_directory.clone());
+        let request = Self::build_request(&workspace, spec, analysis_directory.clone());
         emit_discardable_capture_event(
             &mut on_event,
             CaptureEvent::PhaseStarted(CapturePhase::Compile),
@@ -201,7 +252,7 @@ impl Application {
                     &pending_directory,
                     &request_key,
                     spec,
-                    &self.build_request(spec, PathBuf::new()),
+                    &Self::build_request(&workspace, spec, PathBuf::new()),
                     &toolchain,
                     false,
                 )?;
@@ -517,10 +568,27 @@ impl Application {
         after: &InstanceId,
         output: CompilerOutput,
     ) -> Result<CompareView> {
+        self.compare_with(before, self, after, output)
+    }
+
+    /// Compares compact LLVM structure for instances from two evidence stores.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if either instance or its capture evidence cannot be read.
+    pub fn compare_with(
+        &self,
+        before: &InstanceId,
+        after_application: &Self,
+        after: &InstanceId,
+        output: CompilerOutput,
+    ) -> Result<CompareView> {
         let (before_result, before_summary) = self.summarize_instance(before, output)?;
-        let (after_result, after_summary) = self.summarize_instance(after, output)?;
+        let (after_result, after_summary) = after_application.summarize_instance(after, output)?;
         let before_capture = self.store.capture_details(&before_result.capture_id)?;
-        let after_capture = self.store.capture_details(&after_result.capture_id)?;
+        let after_capture = after_application
+            .store
+            .capture_details(&after_result.capture_id)?;
         let mut compatibility_differences = Vec::new();
 
         if before_capture.summary.rustc_release != after_capture.summary.rustc_release {
@@ -590,9 +658,13 @@ impl Application {
         Ok((result, body_set))
     }
 
-    fn build_request(&self, spec: &BuildSpec, analysis_directory: PathBuf) -> BuildRequest {
+    fn build_request(
+        workspace: &WorkspaceContext,
+        spec: &BuildSpec,
+        analysis_directory: PathBuf,
+    ) -> BuildRequest {
         BuildRequest {
-            workspace_root: self.workspace_root.clone(),
+            workspace_root: workspace.workspace_root.clone(),
             manifest_path: spec.manifest_path.clone(),
             package: spec.package.clone(),
             target: spec.target.as_ref().map(|target| match target {

@@ -136,6 +136,16 @@ pub enum Error {
         actual: u32,
     },
 
+    /// An operation requires a writable workspace store.
+    #[error("{operation} requires a writable workspace store, got read-only store at {path}")]
+    ReadOnlyStore {
+        /// The operation that requires write access.
+        operation: &'static str,
+
+        /// The explicitly opened `.optic` directory.
+        path: PathBuf,
+    },
+
     /// Evidence from the previous store layout exists at the `.optic` root.
     #[error(
         "legacy Optic evidence exists at {path}\n\

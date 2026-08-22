@@ -603,6 +603,112 @@ fn captures_finds_and_shows_concrete_generic_instances() {
 }
 
 #[test]
+fn reads_and_compares_explicit_foreign_stores() {
+    let fixture = Fixture::new();
+    let captured = fixture.run([
+        "capture",
+        "-p",
+        "optic-mvp-app",
+        "--bin",
+        "optic-mvp-app",
+        "--release",
+        "--format",
+        "jsonl",
+    ]);
+    assert_success(&captured);
+    let capture = json(&captured);
+    let capture_id = string(&capture, "/result/id");
+    let selected = fixture.run([
+        "find",
+        "--capture",
+        capture_id,
+        "optic_mvp_kernel::outlined_sum",
+        "--format",
+        "jsonl",
+    ]);
+    assert_success(&selected);
+    let selected = json(&selected);
+    let instance_id = string(&selected, "/result/instances/0/id").to_owned();
+    let before = fixture.temporary.path().join("foreign optic's/.optic");
+    let after = fixture.temporary.path().join("second foreign/.optic");
+    copy_directory(&fixture.root.join(".optic"), &before);
+    copy_directory(&fixture.root.join(".optic"), &after);
+    let before_entries = durable_paths_below(&before);
+    let outside_workspace = fixture.temporary.path().join("outside-workspace");
+    fs::create_dir(&outside_workspace).expect("the test can create a non-Cargo directory");
+    let before = before.to_str().expect("temporary paths are UTF-8");
+    let after = after.to_str().expect("temporary paths are UTF-8");
+
+    let found = fixture
+        .command([
+            "--optic-dir",
+            before,
+            "find",
+            "--capture",
+            capture_id,
+            "optic_mvp_kernel::outlined_sum",
+        ])
+        .current_dir(&outside_workspace)
+        .output()
+        .expect("the foreign find starts");
+    assert_success(&found);
+    let found = String::from_utf8(found.stdout).expect("plain output is UTF-8");
+    let quoted_before = before.replace('\'', "'\"'\"'");
+    assert!(found.contains(&format!(
+        "cargo optic --optic-dir '{quoted_before}' show --instance"
+    )));
+
+    let shown = fixture
+        .command([
+            "--optic-dir",
+            before,
+            "show",
+            "--instance",
+            &instance_id,
+            "--source",
+            "--format",
+            "jsonl",
+        ])
+        .current_dir(&outside_workspace)
+        .output()
+        .expect("the foreign show starts");
+    assert_success(&shown);
+    assert!(json(&shown)["result"]["source"]["text"].is_string());
+
+    let compared = fixture
+        .command([
+            "compare",
+            "--before",
+            &instance_id,
+            "--before-optic-dir",
+            before,
+            "--after",
+            &instance_id,
+            "--after-optic-dir",
+            after,
+            "--format",
+            "jsonl",
+        ])
+        .current_dir(&outside_workspace)
+        .output()
+        .expect("the cross-store comparison starts");
+    assert_success(&compared);
+    assert_eq!(json(&compared)["result"]["delta"]["bytes"], 0);
+
+    let mutation = fixture
+        .command(["--optic-dir", before, "gc", "--format", "jsonl"])
+        .current_dir(&outside_workspace)
+        .output()
+        .expect("the rejected mutation starts");
+    assert!(!mutation.status.success());
+    assert!(
+        string(&json(&mutation), "/error/message")
+            .contains("--optic-dir requires a read-only command")
+    );
+    assert_eq!(durable_paths_below(Path::new(before)), before_entries);
+}
+
+#[test]
 fn captures_and_reports_optimization_remark_state() {
     let fixture = Fixture::new();
     let shown = fixture.run([
@@ -1379,6 +1485,47 @@ fn copy_tree(source: &Path, destination: &Path) {
             fs::copy(entry.path(), &target).expect("the test can copy fixture files");
         }
     }
+}
+
+#[track_caller]
+fn copy_directory(source: &Path, destination: &Path) {
+    for entry in WalkDir::new(source) {
+        let entry = entry.expect("the source directory is readable");
+        let relative = entry
+            .path()
+            .strip_prefix(source)
+            .expect("copied entries remain below the source");
+        let target = destination.join(relative);
+
+        if entry.file_type().is_dir() {
+            fs::create_dir_all(&target).expect("the test can create copied directories");
+        } else {
+            fs::copy(entry.path(), &target).expect("the test can copy a file");
+        }
+    }
+}
+
+fn durable_paths_below(root: &Path) -> Vec<PathBuf> {
+    let mut paths = WalkDir::new(root)
+        .into_iter()
+        .map(|entry| {
+            entry
+                .expect("the directory inventory is readable")
+                .path()
+                .strip_prefix(root)
+                .expect("inventory entries remain below their root")
+                .to_owned()
+        })
+        .filter(|path| {
+            !matches!(
+                path.file_name().and_then(OsStr::to_str),
+                Some("catalog.sqlite-shm" | "catalog.sqlite-wal")
+            )
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+
+    paths
 }
 
 fn committed_fixture_entry(entry: &DirEntry) -> bool {
