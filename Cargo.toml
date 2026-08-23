@@ -8,4 +8,13 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/<placeholder>/optic"
 
+[workspace.dependencies]
+optic-records = { path = "crates/optic-records", version = "0.0.1" }
+optic-store = { path = "crates/optic-store", version = "0.0.1" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+snafu = "0.9.2"
+tempfile = "3.27.0"
+uuid = { version = "1.18.1", features = ["v4"] }
+
 [workspace.lints.clippy]

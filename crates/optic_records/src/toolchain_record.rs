@@ -1,0 +1,110 @@
+//! Records the stable identity reported by the compiler used for a capture.
+//!
+//! [`ToolchainRecord`] joins a [`RustcInvocation`] to the identity that invocation reports for
+//! `rustc -vV`. The compiler crate owns Cargo selection and process execution; this module ensures
+//! the durable record cannot omit either side of that provenance relationship.
+
+use serde::Deserialize;
+use serde::Serialize;
+
+use crate::Error;
+use crate::RustcInvocation;
+use crate::validation::require_text;
+
+/// Stable identity fields reported by the rustc used for a capture.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(try_from = "UncheckedToolchainRecord")]
+pub struct ToolchainRecord {
+    invocation: RustcInvocation,
+    release: String,
+    commit_hash: String,
+    host: String,
+    llvm_version: String,
+}
+
+impl ToolchainRecord {
+    /// Creates an identity from a compiler invocation and its verbose version output.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any identity field is empty.
+    pub fn new(
+        invocation: RustcInvocation,
+        release: impl Into<String>,
+        commit_hash: impl Into<String>,
+        host: impl Into<String>,
+        llvm_version: impl Into<String>,
+    ) -> Result<Self, Error> {
+        let release = release.into();
+        let commit_hash = commit_hash.into();
+        let host = host.into();
+        let llvm_version = llvm_version.into();
+
+        require_text("rustc release", &release)?;
+        require_text("rustc commit hash", &commit_hash)?;
+        require_text("rustc host", &host)?;
+        require_text("LLVM version", &llvm_version)?;
+
+        Ok(Self {
+            invocation,
+            release,
+            commit_hash,
+            host,
+            llvm_version,
+        })
+    }
+
+    /// Returns the complete compiler invocation selected by Cargo.
+    #[must_use]
+    pub fn invocation(&self) -> &RustcInvocation {
+        &self.invocation
+    }
+
+    /// Returns the `release` field from `rustc -vV`.
+    #[must_use]
+    pub fn release(&self) -> &str {
+        &self.release
+    }
+
+    /// Returns the `commit-hash` field from `rustc -vV`.
+    #[must_use]
+    pub fn commit_hash(&self) -> &str {
+        &self.commit_hash
+    }
+
+    /// Returns the `host` field from `rustc -vV`.
+    #[must_use]
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// Returns the `LLVM version` field from `rustc -vV`.
+    #[must_use]
+    pub fn llvm_version(&self) -> &str {
+        &self.llvm_version
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UncheckedToolchainRecord {
+    invocation: RustcInvocation,
+    release: String,
+    commit_hash: String,
+    host: String,
+    llvm_version: String,
+}
+
+impl TryFrom<UncheckedToolchainRecord> for ToolchainRecord {
+    type Error = Error;
+
+    fn try_from(record: UncheckedToolchainRecord) -> Result<Self, Self::Error> {
+        Self::new(
+            record.invocation,
+            record.release,
+            record.commit_hash,
+            record.host,
+            record.llvm_version,
+        )
+    }
+}
