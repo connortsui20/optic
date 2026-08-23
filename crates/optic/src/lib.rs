@@ -8,7 +8,7 @@
 //! The lower-level crates remain implementation details. Applications should use the request and
 //! record types re-exported here rather than coordinating compiler execution or opening `.optic`
 //! paths themselves. Command-line parsing and human-readable rendering are deliberately excluded;
-//! the `cargo-optic` binary is one consumer of this API.
+//! the `cargo_optic` binary is one consumer of this API.
 
 use std::path::Path;
 
