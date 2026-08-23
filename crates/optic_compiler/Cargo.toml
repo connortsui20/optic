@@ -1,0 +1,16 @@
+[package]
+name = "optic_compiler"
+version = "0.0.1"
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cargo_metadata.workspace = true
+optic_records.workspace = true
+serde_json.workspace = true
+snafu.workspace = true
+
+[lints]
+workspace = true
