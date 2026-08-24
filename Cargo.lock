@@ -74,6 +74,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cargo-optic"
+version = "0.0.1"
+dependencies = [
+ "clap",
+ "optic",
+ "snafu",
+ "tempfile",
+ "time",
+]
+
+[[package]]
 name = "cargo-platform"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -95,17 +106,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
-]
-
-[[package]]
-name = "cargo_optic"
-version = "0.0.1"
-dependencies = [
- "clap",
- "optic",
- "snafu",
- "tempfile",
- "time",
 ]
 
 [[package]]

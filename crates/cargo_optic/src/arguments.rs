@@ -1,9 +1,15 @@
-//! Parses the `cargo_optic` grammar into valid product commands.
+//! Parses the `cargo optic` grammar into valid product commands.
+//!
+//! Cargo [custom subcommands] pass `optic` to the `cargo-optic` executable before the user's
+//! arguments. [`Cargo`] models that outer invocation so Clap accepts the repeated command name and
+//! renders help with the public `cargo optic` spelling.
 //!
 //! Capture syntax requires an exact package, one target subcommand, and one profile selector. The
 //! target enum makes zero or multiple target selections unrepresentable after Clap succeeds.
 //! [`parse`] then constructs a [`BuildRequest`], establishing the remaining non-empty-name
 //! invariants before command dispatch begins.
+//!
+//! [custom subcommands]: https://doc.rust-lang.org/cargo/reference/external-tools.html#custom-subcommands
 
 use clap::ArgGroup;
 use clap::Args;
@@ -14,15 +20,14 @@ use optic::CargoTarget;
 use optic::InvalidBuildRequest;
 
 #[derive(Debug, Parser)]
-#[command(
-    name = "cargo_optic",
-    bin_name = "cargo_optic",
-    version,
-    about = "Capture and inspect Cargo build metadata"
-)]
-struct Cli {
-    #[command(subcommand)]
-    command: ParsedCommand,
+#[command(bin_name = "cargo")]
+enum Cargo {
+    /// Captures and inspects Cargo build metadata.
+    #[command(name = "optic", version)]
+    Optic {
+        #[command(subcommand)]
+        command: ParsedCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -81,9 +86,9 @@ pub(crate) enum Command {
 }
 
 pub(crate) fn parse() -> Result<Command, InvalidBuildRequest> {
-    let cli = Cli::parse();
+    let Cargo::Optic { command } = Cargo::parse();
 
-    match cli.command {
+    match command {
         ParsedCommand::Capture(options) => Ok(Command::Capture(options.request()?)),
         ParsedCommand::Captures => Ok(Command::Captures),
     }

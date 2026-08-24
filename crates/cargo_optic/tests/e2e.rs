@@ -7,6 +7,20 @@ use std::process::Command;
 use std::process::Output;
 
 #[test]
+fn exposes_the_cargo_subcommand_entry_point() {
+    let temporary = tempfile::tempdir().expect("the test directory can be created");
+
+    let output = command(temporary.path())
+        .arg("--help")
+        .output()
+        .expect("the Cargo Optic binary can run");
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).expect("help output is UTF-8");
+
+    assert!(stdout.contains("Usage: cargo optic <COMMAND>"));
+}
+
+#[test]
 fn captures_a_fixture_target_and_lists_the_completed_record() {
     let temporary = tempfile::tempdir().expect("the test workspace can be created");
     copy_fixture(temporary.path());
@@ -118,8 +132,8 @@ where
 }
 
 fn command(directory: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_cargo_optic"));
-    command.current_dir(directory);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-optic"));
+    command.current_dir(directory).arg("optic");
 
     command
 }
