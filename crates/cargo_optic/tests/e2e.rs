@@ -23,7 +23,8 @@ fn captures_a_fixture_target_and_lists_the_completed_record() {
         .and_then(|line| line.strip_prefix("Captured "))
         .expect("capture output starts with its opaque ID");
 
-    assert!(capture_id.starts_with("cap_"));
+    assert_eq!(capture_id.len(), 32);
+    assert!(capture_id.bytes().all(|byte| (b'k'..=b'z').contains(&byte)));
     assert!(captured_text.contains("Package    capture_fixture 0.1.0"));
     assert!(captured_text.contains("Target     lib capture_fixture"));
     assert!(captured_text.contains("Profile    release"));

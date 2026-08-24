@@ -1,8 +1,9 @@
 //! Defines the complete durable entry published for one successful capture.
 //!
 //! [`CaptureRecord`] joins a stable [`CaptureId`] and completion time to an already validated
-//! [`BuildRecord`] and [`ToolchainRecord`]. Construction always writes the current format version;
-//! deserialization rejects versions this crate does not understand.
+//! [`BuildRecord`] and [`ToolchainRecord`]. Construction always writes the current format version
+//! and canonical capture ID. Deserialization rejects versions this crate does not understand and
+//! normalizes the legacy capture ID spelling written by initial format-version-1 stores.
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -79,7 +80,7 @@ impl CaptureRecord {
 #[serde(deny_unknown_fields)]
 struct UncheckedCaptureRecord {
     format_version: u32,
-    id: CaptureId,
+    id: String,
     completed_at_unix_ms: u64,
     build: BuildRecord,
     toolchain: ToolchainRecord,
@@ -96,9 +97,10 @@ impl TryFrom<UncheckedCaptureRecord> for CaptureRecord {
                 actual: record.format_version,
             }
         );
+        let id = CaptureId::from_storage_str(&record.id)?;
 
         Ok(Self::new(
-            record.id,
+            id,
             record.completed_at_unix_ms,
             record.build,
             record.toolchain,

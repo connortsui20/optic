@@ -31,13 +31,30 @@ fn record() -> CaptureRecord {
     .expect("the fixture toolchain is valid");
 
     CaptureRecord::new(
-        "cap_0123456789abcdef0123456789abcdef"
+        "zyxwvutsrqponmlkzyxwvutsrqponmlk"
             .parse()
             .expect("the fixture capture ID is valid"),
         1_000,
         build,
         toolchain,
     )
+}
+
+#[test]
+fn reads_and_normalizes_legacy_format_version_one_ids() {
+    let encoded = serde_json::to_string(&record()).expect("the fixture record can be encoded");
+    let legacy = encoded.replace(
+        "zyxwvutsrqponmlkzyxwvutsrqponmlk",
+        "cap_0123456789abcdef0123456789abcdef",
+    );
+    let actual = serde_json::from_str::<CaptureRecord>(&legacy)
+        .expect("the legacy format-version-1 record remains readable");
+
+    assert_eq!(actual.id().as_str(), "zyxwvutsrqponmlkzyxwvutsrqponmlk");
+    assert_eq!(
+        serde_json::to_string(&actual).expect("the normalized record can be encoded"),
+        encoded
+    );
 }
 
 #[test]

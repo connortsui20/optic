@@ -58,11 +58,11 @@ impl Store {
                 }
                 .build()
             })?;
-            let directory_id =
-                name.parse::<CaptureId>()
-                    .with_context(|_| InvalidCaptureDirectoryIdSnafu {
-                        path: entry_path.clone(),
-                    })?;
+            let directory_id = CaptureId::from_storage_str(&name).with_context(|_| {
+                InvalidCaptureDirectoryIdSnafu {
+                    path: entry_path.clone(),
+                }
+            })?;
             let path = entry_path.join(RECORD_FILE_NAME);
             let reader = BufReader::new(File::open(&path).with_context(|_| FilesystemSnafu {
                 operation: "open",

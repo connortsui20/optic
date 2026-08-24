@@ -23,7 +23,10 @@ mod error;
 pub use error::Error;
 pub(crate) use error::InvalidCaptureIdSnafu;
 pub(crate) use error::InvalidFieldSnafu;
+pub(crate) use error::InvalidStoredCaptureIdSnafu;
 pub(crate) use error::UnsupportedFormatSnafu;
+
+mod reverse_hex;
 
 mod rustc_invocation;
 pub use rustc_invocation::RustcInvocation;
