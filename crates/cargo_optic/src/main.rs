@@ -1,3 +1,3 @@
 fn main() {
-    println!("cargo_optic is not implemented yet");
+    println!("cargo optic is not implemented yet");
 }

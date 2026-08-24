@@ -1,5 +1,5 @@
 [package]
-name = "cargo_optic"
+name = "cargo-optic"
 version = "0.0.1"
 edition.workspace = true
 license.workspace = true

@@ -1,4 +1,4 @@
-//! Application library for `cargo_optic`.
+//! Application library for Cargo Optic.
 //!
 //! This crate will own the Optic project store, capture history, queries, comparisons, and client
-//! state. The `cargo_optic` binary and terminal interface will use this library.
+//! state. The `cargo optic` command and terminal interface will use this library.
