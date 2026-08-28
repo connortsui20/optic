@@ -1,3 +1,7 @@
+//! Keeps invalid records from crossing the durable interchange boundary.
+//!
+//! Typed failures let constructors and deserializers enforce the same record contracts.
+
 use snafu::Snafu;
 
 /// Explains why input could not become a trusted capture record.

@@ -1,3 +1,8 @@
+//! Keeps shared record-field checks consistent across construction and deserialization.
+//!
+//! Each record retains its field-specific invariants so these helpers do not become a general
+//! validation layer.
+
 use std::path::Path;
 
 use crate::Error;

@@ -61,6 +61,7 @@ impl BuildRecord {
             }
             .fail();
         }
+
         if cargo_arguments.is_empty() {
             return InvalidFieldSnafu {
                 field: "Cargo arguments",

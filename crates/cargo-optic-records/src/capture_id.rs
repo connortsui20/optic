@@ -1,9 +1,8 @@
 //! Defines the stable identity shared by all evidence from one capture.
 //!
-//! [`CaptureId`] is generated only after a build succeeds. Parsing and deserialization enforce the
-//! same canonical textual contract as generation, so safe code cannot construct a malformed ID.
-//! The representation remains opaque: callers must not infer time, ordering, or storage paths from
-//! its text.
+//! [`CaptureId::generate`] uses UUIDv4 after a build succeeds. Parsing and deserialization enforce
+//! the canonical text representation. Callers must not infer time, ordering, or storage paths from
+//! that opaque text.
 
 use std::fmt;
 use std::str::FromStr;
@@ -20,14 +19,15 @@ const TEXT_LENGTH: usize = 32;
 
 /// An immutable identifier for all evidence from one capture.
 ///
-/// Capture IDs use the reverse-hexadecimal alphabet `k` through `z`. This alphabet makes the text
-/// distinct from future instance IDs at boundaries that cannot use the Rust type.
+/// [`Self::generate`] encodes the 128 bits of a UUIDv4 with the reverse-hexadecimal alphabet `k`
+/// through `z`. This alphabet keeps capture IDs distinct at boundaries that cannot preserve the
+/// Rust type.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct CaptureId(String);
 
 impl CaptureId {
-    /// Generates a new random capture identifier.
+    /// Generates a new UUIDv4 capture identifier.
     pub fn generate() -> Self {
         Self(reverse_hex::encode(uuid::Uuid::new_v4().as_bytes()))
     }

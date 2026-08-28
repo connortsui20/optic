@@ -1,3 +1,8 @@
+//! Keeps [`CaptureId`](crate::CaptureId) generation and parsing on one reverse-hexadecimal grammar.
+//!
+//! The distinct alphabet separates capture IDs from future instance IDs when a boundary cannot
+//! preserve their Rust types.
+
 const DIGITS: &[u8; 16] = b"zyxwvutsrqponmlk";
 
 pub(crate) fn encode(bytes: &[u8]) -> String {

@@ -1,3 +1,7 @@
+//! Protects capture behavior across the public application boundary.
+//!
+//! These tests keep compiler, record, and store integration separate from their local edge cases.
+
 use std::fs;
 use std::path::Path;
 
@@ -71,7 +75,9 @@ fn captures_and_lists_builds_through_the_product_api() {
 
     assert_ne!(first.id(), second.id());
 
-    let captures = optic.captures().expect("completed captures can be listed");
+    let captures = optic
+        .list_captures()
+        .expect("completed captures can be listed");
     assert_eq!(captures.len(), 2);
     for capture in &captures {
         assert_library_capture(capture, temporary.path());
@@ -97,7 +103,7 @@ fn failed_target_resolution_does_not_publish_a_capture() {
     assert!(error.to_string().contains("binary missing"));
     assert!(
         optic
-            .captures()
+            .list_captures()
             .expect("completed captures can be listed")
             .is_empty()
     );
@@ -117,7 +123,7 @@ fn failed_cargo_process_does_not_publish_a_capture() {
     assert!(matches!(&error, Error::Compiler { .. }));
     assert!(
         optic
-            .captures()
+            .list_captures()
             .expect("completed captures can be listed")
             .is_empty()
     );

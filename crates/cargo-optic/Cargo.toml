@@ -4,3 +4,12 @@ version = "0.0.1"
 publish = false
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+cargo-optic-api.workspace = true
+clap.workspace = true
+snafu.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

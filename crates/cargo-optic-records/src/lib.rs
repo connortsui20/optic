@@ -10,6 +10,8 @@
 //! do not prove that recorded provenance is true. Readers accept only the format version written by
 //! this release.
 
+const CAPTURE_FORMAT_VERSION: u32 = 1;
+
 mod build_record;
 pub use build_record::BuildRecord;
 
@@ -29,8 +31,6 @@ pub use target::CargoTargetKind;
 pub use target::TargetRecord;
 
 mod validation;
-
-const CAPTURE_FORMAT_VERSION: u32 = 1;
 
 #[cfg(test)]
 mod tests;

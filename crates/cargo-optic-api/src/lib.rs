@@ -2,8 +2,8 @@
 //!
 //! Consumers begin with [`Optic::open`], which discovers the enclosing Cargo workspace and binds a
 //! store handle to its root. The resulting [`Optic`] value exposes the two product operations:
-//! [`Optic::capture`] executes and publishes a [`BuildRequest`], while [`Optic::captures`] reads
-//! the validated completed history.
+//! [`Optic::capture`] executes and publishes a [`BuildRequest`], while [`Optic::list_captures`]
+//! reads the validated completed history.
 //!
 //! This crate is the primary application API. The subsystem crates remain available as narrow APIs
 //! for callers that need their individual boundaries. Most applications should use the types
@@ -19,6 +19,7 @@ pub use optic_compiler::CargoTarget;
 pub use optic_compiler::Error as CompilerError;
 pub use optic_compiler::InvalidBuildRequest;
 use optic_compiler::Workspace;
+
 pub use optic_records::BuildRecord;
 pub use optic_records::CaptureId;
 pub use optic_records::CaptureRecord;
@@ -27,6 +28,7 @@ pub use optic_records::Error as RecordError;
 pub use optic_records::TargetRecord;
 pub use optic_store::Error as StoreError;
 use optic_store::Store;
+
 use snafu::ResultExt;
 use snafu::Snafu;
 
@@ -62,12 +64,14 @@ impl Optic {
     /// record timestamp, or the record cannot be published.
     pub fn capture(&self, request: &BuildRequest) -> Result<CaptureRecord, Error> {
         let build = optic_compiler::run_build(&self.workspace, request)?;
+
         let completed_at_unix_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .context(ClockSnafu)?
             .as_millis()
             .try_into()
             .context(TimestampOverflowSnafu)?;
+
         let record = CaptureRecord::new(CaptureId::generate(), completed_at_unix_ms, build);
 
         self.store.publish(&record)?;
@@ -80,8 +84,8 @@ impl Optic {
     /// # Errors
     ///
     /// Returns an error if any completed durable record is invalid or cannot be read.
-    pub fn captures(&self) -> Result<Vec<CaptureRecord>, Error> {
-        Ok(self.store.captures()?)
+    pub fn list_captures(&self) -> Result<Vec<CaptureRecord>, Error> {
+        Ok(self.store.list_captures()?)
     }
 }
 

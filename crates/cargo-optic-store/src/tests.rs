@@ -59,7 +59,7 @@ fn lists_records_by_descending_recorded_completion_time() {
         .expect("the newer capture can be published");
 
     assert_eq!(
-        store.captures().expect("captures can be listed"),
+        store.list_captures().expect("captures can be listed"),
         vec![newer, older]
     );
 }
@@ -79,7 +79,7 @@ fn breaks_timestamp_ties_with_the_capture_id() {
         .expect("the smaller capture ID can be published");
 
     assert_eq!(
-        store.captures().expect("captures can be listed"),
+        store.list_captures().expect("captures can be listed"),
         vec![smaller_id, larger_id]
     );
 }
@@ -112,7 +112,12 @@ fn ignores_staged_records() {
     fs::write(staged.join(RECORD_FILE_NAME), b"not complete")
         .expect("the staging record can be written");
 
-    assert!(store.captures().expect("staging is not visible").is_empty());
+    assert!(
+        store
+            .list_captures()
+            .expect("staging is not visible")
+            .is_empty()
+    );
 }
 
 #[test]
@@ -126,7 +131,7 @@ fn rejects_invalid_completed_json() {
     fs::write(&path, b"not JSON").expect("the invalid record can be written");
 
     let error = store
-        .captures()
+        .list_captures()
         .expect_err("the invalid completed JSON must be rejected");
 
     assert!(matches!(error, Error::Json { path: error_path, .. } if error_path == path));
@@ -141,7 +146,7 @@ fn rejects_a_completed_directory_without_a_record() {
     let path = directory.join(RECORD_FILE_NAME);
 
     let error = store
-        .captures()
+        .list_captures()
         .expect_err("the missing completed record must be rejected");
 
     assert!(matches!(
@@ -164,7 +169,7 @@ fn rejects_non_directory_entries_in_completed_history() {
     fs::write(&path, b"not a capture directory").expect("the invalid entry can be written");
 
     let error = store
-        .captures()
+        .list_captures()
         .expect_err("the non-directory entry must be rejected");
 
     assert!(matches!(
@@ -182,7 +187,7 @@ fn rejects_noncanonical_capture_directory_names() {
     fs::create_dir_all(&path).expect("the invalid capture directory can be created");
 
     let error = store
-        .captures()
+        .list_captures()
         .expect_err("the invalid capture directory name must be rejected");
 
     assert!(matches!(
@@ -206,7 +211,7 @@ fn rejects_a_record_id_that_differs_from_its_directory_id() {
     let path = write_completed_record(&store, directory_id.as_str(), &capture);
 
     let error = store
-        .captures()
+        .list_captures()
         .expect_err("the mismatched record ID must be rejected");
 
     assert!(matches!(

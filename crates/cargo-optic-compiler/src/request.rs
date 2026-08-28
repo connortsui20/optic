@@ -126,6 +126,7 @@ impl BuildRequest {
         for feature in &features {
             require_text("feature name", feature)?;
         }
+
         self.features = features;
 
         Ok(self)

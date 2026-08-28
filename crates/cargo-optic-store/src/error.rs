@@ -1,3 +1,7 @@
+//! Keeps persistence failures attached to the affected operation and path.
+//!
+//! Typed corruption errors prevent invalid completed entries from becoming valid history.
+
 use std::ffi::OsString;
 use std::path::PathBuf;
 

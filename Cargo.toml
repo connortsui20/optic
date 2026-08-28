@@ -12,8 +12,10 @@ cargo-optic-compiler = { path = "crates/cargo-optic-compiler", version = "0.0.1"
 cargo-optic-records = { path = "crates/cargo-optic-records", version = "0.0.1" }
 cargo-optic-store = { path = "crates/cargo-optic-store", version = "0.0.1" }
 cargo_metadata = "0.23.1"
+clap = { version = "4.5.48", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 snafu = "0.9.2"
 tempfile = "3.27.0"
+time = { version = "0.3.44", features = ["formatting"] }
 uuid = { version = "1.18.1", features = ["v4"] }

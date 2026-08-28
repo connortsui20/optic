@@ -1,3 +1,7 @@
+//! Keeps compiler failures distinct from invalid requests and record failures.
+//!
+//! Callers need this boundary to identify the failed phase without parsing an error message.
+
 use std::path::PathBuf;
 
 use snafu::Snafu;

@@ -3,6 +3,10 @@
 //! [`run_build`] binds a [`BuildRequest`] to exact Cargo metadata and invokes `cargo rustc` from
 //! the original invocation directory. A successful return records the invocation. It does not
 //! claim that Cargo invoked rustc because Cargo can reuse a fresh target.
+//!
+//! Cargo Optic uses `cargo rustc` instead of `cargo build` because capture must support additional
+//! code-generation output. This command keeps Cargo's dependency planning and lets later capture
+//! stages pass compiler flags only to the final invocation for the selected target.
 
 use std::process::Command;
 use std::process::Stdio;
@@ -32,7 +36,7 @@ use crate::error::TargetNotFoundSnafu;
 ///
 /// Returns an error if the request does not resolve to one workspace target or `cargo rustc` fails.
 pub fn run_build(workspace: &Workspace, request: &BuildRequest) -> Result<BuildRecord, Error> {
-    let metadata = workspace.metadata(request)?;
+    let metadata = workspace.read_metadata(request)?;
     let package = resolve_package(&metadata, request.package())?;
     let target = resolve_target(package, request.target())?;
     let arguments = cargo_arguments(request);
@@ -59,6 +63,7 @@ pub fn run_build(workspace: &Workspace, request: &BuildRequest) -> Result<BuildR
     }
 
     let target = TargetRecord::new(target.name.clone(), request.target().kind())?;
+
     let record = BuildRecord::new(
         package.name.to_string(),
         package.version.to_string(),
@@ -119,9 +124,11 @@ fn cargo_arguments(request: &BuildRequest) -> Vec<String> {
         "--package".to_owned(),
         request.package().to_owned(),
     ];
+
     arguments.extend(request.target().selector_arguments());
     arguments.push("--profile".to_owned());
     arguments.push(request.profile().to_owned());
+
     if !request.features().is_empty() {
         arguments.push("--features".to_owned());
         arguments.push(request.features().join(","));

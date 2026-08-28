@@ -9,11 +9,14 @@
 //! workspace, store, or an ancestor directory also invalidates an open handle. The caller must open
 //! a new handle after such a move.
 //!
-//! [`Store::captures`] ignores staging and treats every completed directory and file as untrusted.
-//! Record deserialization enforces structural invariants before a value reaches the caller.
+//! [`Store::list_captures`] ignores staging and treats every completed directory and file as
+//! untrusted. Record deserialization enforces structural invariants before a value reaches the
+//! caller.
 
 use std::path::Path;
 use std::path::PathBuf;
+
+const RECORD_FILE_NAME: &str = "capture.json";
 
 mod captures;
 
@@ -21,8 +24,6 @@ mod error;
 pub use error::Error;
 
 mod publish;
-
-const RECORD_FILE_NAME: &str = "capture.json";
 
 /// The `.optic/store` capture store for one Cargo workspace.
 ///

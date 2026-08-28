@@ -77,6 +77,7 @@ impl TryFrom<UncheckedCaptureRecord> for CaptureRecord {
                 actual: record.format_version,
             }
         );
+
         Ok(Self::new(
             record.id,
             record.completed_at_unix_ms,

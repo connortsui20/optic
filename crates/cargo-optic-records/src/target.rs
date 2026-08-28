@@ -1,8 +1,7 @@
-//! Identifies the Cargo target selected by a completed build.
+//! Preserves the exact Cargo target identity selected by a completed build.
 //!
-//! [`CargoTargetKind`] records the Cargo selector class, while [`TargetRecord`] pairs that class
-//! with the exact name reported by Cargo metadata. Construction and deserialization reject empty
-//! names so downstream code never needs to validate target identity again.
+//! [`TargetRecord`] keeps the selector class with Cargo's reported name. Downstream code can then
+//! use the target without repeating resolution or validation.
 
 use std::fmt;
 
@@ -58,6 +57,7 @@ impl TargetRecord {
     /// Returns an error if `name` is empty.
     pub fn new(name: impl Into<String>, kind: CargoTargetKind) -> Result<Self, Error> {
         let name = name.into();
+
         require_text("target name", &name)?;
 
         Ok(Self { name, kind })

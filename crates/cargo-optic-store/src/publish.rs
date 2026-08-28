@@ -25,7 +25,7 @@ impl Store {
     /// # Errors
     ///
     /// Returns an error if publication fails before the final rename. A failed publication is not
-    /// visible through [`Self::captures`].
+    /// visible through [`Self::list_captures`].
     pub fn publish(&self, capture: &CaptureRecord) -> Result<(), Error> {
         let staging_root = self.root.join("staging");
         let captures_root = self.root.join("captures");
@@ -52,6 +52,7 @@ impl Store {
             operation: "create",
             path: staging.clone(),
         })?;
+
         if let Err(error) = write_record(&staging.join(RECORD_FILE_NAME), capture) {
             let _ = fs::remove_dir_all(&staging);
 
@@ -84,7 +85,9 @@ fn write_record(path: &Path, capture: &CaptureRecord) -> Result<(), Error> {
             operation: "create",
             path: path.to_owned(),
         })?;
+
     let mut writer = BufWriter::new(file);
+
     serde_json::to_writer_pretty(&mut writer, capture).with_context(|_| JsonSnafu {
         path: path.to_owned(),
     })?;
@@ -92,6 +95,7 @@ fn write_record(path: &Path, capture: &CaptureRecord) -> Result<(), Error> {
         operation: "write",
         path: path.to_owned(),
     })?;
+
     writer.flush().with_context(|_| FilesystemSnafu {
         operation: "write",
         path: path.to_owned(),

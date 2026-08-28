@@ -1,3 +1,7 @@
+//! Protects Cargo wrapper configuration across capture execution.
+//!
+//! Real wrapper processes verify behavior that unit tests cannot establish.
+
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;

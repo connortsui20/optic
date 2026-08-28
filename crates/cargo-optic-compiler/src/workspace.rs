@@ -43,8 +43,8 @@ impl Workspace {
         &self.invocation_directory
     }
 
-    pub(crate) fn metadata(&self, request: &BuildRequest) -> Result<Metadata, Error> {
-        read_metadata(&self.cargo, &self.invocation_directory, Some(request))
+    pub(crate) fn read_metadata(&self, request: &BuildRequest) -> Result<Metadata, Error> {
+        query_metadata(&self.cargo, &self.invocation_directory, Some(request))
     }
 }
 
@@ -64,7 +64,7 @@ pub fn discover_workspace(start: &Path) -> Result<Workspace, Error> {
     let cargo = env::var_os("CARGO")
         .filter(|value| !value.is_empty())
         .map_or_else(|| PathBuf::from("cargo"), PathBuf::from);
-    let metadata = read_metadata(&cargo, start, None)?;
+    let metadata = query_metadata(&cargo, start, None)?;
     let root = metadata.workspace_root.clone().into_std_path_buf();
 
     Ok(Workspace {
@@ -74,13 +74,14 @@ pub fn discover_workspace(start: &Path) -> Result<Workspace, Error> {
     })
 }
 
-fn read_metadata(
+fn query_metadata(
     cargo: &Path,
     directory: &Path,
     request: Option<&BuildRequest>,
 ) -> Result<Metadata, Error> {
     let mut command = MetadataCommand::new();
     command.cargo_path(cargo).current_dir(directory).no_deps();
+
     if let Some(request) = request {
         if !request.features().is_empty() {
             command.features(CargoOpt::SomeFeatures(request.features().to_vec()));

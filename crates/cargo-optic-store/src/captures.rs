@@ -1,3 +1,7 @@
+//! Reads completed captures without trusting the store contents.
+//!
+//! Validation at this boundary prevents corrupt entries from appearing as capture history.
+
 use std::fs;
 use std::fs::File;
 use std::io::BufReader;
@@ -23,7 +27,7 @@ impl Store {
     /// # Errors
     ///
     /// Returns an error if any completed entry or record is invalid or cannot be read.
-    pub fn captures(&self) -> Result<Vec<CaptureRecord>, Error> {
+    pub fn list_captures(&self) -> Result<Vec<CaptureRecord>, Error> {
         let captures_root = self.root.join("captures");
         let entries = match fs::read_dir(&captures_root) {
             Ok(entries) => entries,
@@ -36,6 +40,7 @@ impl Store {
                 .into_error(source));
             }
         };
+
         let mut captures = Vec::new();
 
         for entry in entries {
@@ -81,11 +86,13 @@ fn read_capture(entry: fs::DirEntry) -> Result<CaptureRecord, Error> {
                 path: entry_path.clone(),
                 name: name.clone(),
             })?;
+
     let path = entry_path.join(RECORD_FILE_NAME);
     let reader = BufReader::new(File::open(&path).with_context(|_| FilesystemSnafu {
         operation: "open",
         path: path.clone(),
     })?);
+
     let capture = serde_json::from_reader::<_, CaptureRecord>(reader)
         .with_context(|_| JsonSnafu { path: path.clone() })?;
     if capture.id() != &directory_id {
