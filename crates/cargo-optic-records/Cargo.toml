@@ -1,0 +1,17 @@
+[package]
+name = "cargo-optic-records"
+version = "0.0.1"
+publish = false
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "optic_records"
+
+[dependencies]
+serde.workspace = true
+snafu.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "cargo-optic-api"
+version = "0.0.1"
+publish = false
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "optic"
+
+[dependencies]
+cargo-optic-compiler.workspace = true
+cargo-optic-records.workspace = true
+cargo-optic-store.workspace = true
+snafu.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

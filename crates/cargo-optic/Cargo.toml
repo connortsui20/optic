@@ -1,9 +1,6 @@
 [package]
 name = "cargo-optic"
 version = "0.0.1"
+publish = false
 edition.workspace = true
 license.workspace = true
-repository.workspace = true
-
-[lints]
-workspace = true
