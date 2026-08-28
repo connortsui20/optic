@@ -1,0 +1,14 @@
+[package]
+name = "capture_fixture"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[features]
+gated = []
+
+[[bin]]
+name = "feature-gated"
+path = "src/feature_gated.rs"
+required-features = ["gated"]

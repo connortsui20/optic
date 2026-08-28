@@ -1,15 +1,17 @@
 [package]
-name = "cargo-optic"
+name = "cargo-optic-store"
 version = "0.0.1"
 publish = false
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "optic_store"
+
 [dependencies]
-cargo-optic-api.workspace = true
-clap.workspace = true
+cargo-optic-records.workspace = true
+serde_json.workspace = true
 snafu.workspace = true
-time.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
