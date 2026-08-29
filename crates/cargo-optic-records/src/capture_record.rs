@@ -16,7 +16,7 @@ use crate::error::UnsupportedFormatSnafu;
 
 /// One immutable entry in completed capture history.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(try_from = "UncheckedCaptureRecord")]
+#[serde(try_from = "RawCaptureRecord")]
 pub struct CaptureRecord {
     format_version: u32,
     id: CaptureId,
@@ -59,17 +59,17 @@ impl CaptureRecord {
 /// The serialized fields that must pass [`CaptureRecord`] validation during deserialization.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct UncheckedCaptureRecord {
+struct RawCaptureRecord {
     format_version: u32,
     id: CaptureId,
     completed_at_unix_ms: u64,
     build: BuildRecord,
 }
 
-impl TryFrom<UncheckedCaptureRecord> for CaptureRecord {
+impl TryFrom<RawCaptureRecord> for CaptureRecord {
     type Error = Error;
 
-    fn try_from(record: UncheckedCaptureRecord) -> Result<Self, Self::Error> {
+    fn try_from(record: RawCaptureRecord) -> Result<Self, Self::Error> {
         ensure!(
             record.format_version == CAPTURE_FORMAT_VERSION,
             UnsupportedFormatSnafu {

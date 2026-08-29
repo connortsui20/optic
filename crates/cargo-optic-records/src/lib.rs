@@ -1,9 +1,9 @@
 //! Defines Cargo Optic's durable interchange format.
 //!
 //! Capture execution and storage use these records as their shared boundary. A [`CaptureRecord`]
-//! describes one successful Cargo invocation. It deliberately excludes transient process state,
-//! compiler identity, and the store's physical layout. [`CaptureId`] supplies the stable identity
-//! used to join a record to other evidence.
+//! describes one successful Cargo invocation. [`InstanceManifest`] records concrete compiler
+//! instances separately, and [`CaptureId`] joins the two records without exposing store layout.
+//! Both formats exclude transient process state.
 //!
 //! Every public record is structurally valid by construction. Constructors enforce field
 //! invariants, fields are private, and deserialization uses the same validation paths. These checks
@@ -18,13 +18,28 @@ pub use build_record::BuildRecord;
 mod capture_id;
 pub use capture_id::CaptureId;
 
+mod reverse_hex;
+
 mod capture_record;
 pub use capture_record::CaptureRecord;
+
+mod compiler_identity;
+pub use compiler_identity::CompilerIdentity;
+
+mod definition_record;
+pub use definition_record::DefinitionRecord;
 
 mod error;
 pub use error::Error;
 
-mod reverse_hex;
+mod placement_record;
+pub use placement_record::PlacementRecord;
+
+mod instance_record;
+pub use instance_record::InstanceRecord;
+
+mod instance_manifest;
+pub use instance_manifest::InstanceManifest;
 
 mod target;
 pub use target::CargoTargetKind;
