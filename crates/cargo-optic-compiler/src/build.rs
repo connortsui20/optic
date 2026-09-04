@@ -1,12 +1,9 @@
-//! Resolves and executes one validated build request.
+//! Resolves one validated build request into Cargo metadata and command arguments.
 //!
-//! [`run_build`] binds a [`BuildRequest`] to exact Cargo metadata and invokes `cargo rustc` from
-//! the original invocation directory. A successful return records the invocation. It does not
-//! claim that Cargo invoked rustc because Cargo can reuse a fresh target.
-//!
-//! Cargo Optic uses `cargo rustc` instead of `cargo build` because capture must support additional
-//! code-generation output. This command keeps Cargo's dependency planning and lets later capture
-//! stages pass compiler flags only to the final invocation for the selected target.
+//! Collection keeps this resolution separate from compiler interception so the selected package,
+//! target, profile, and features produce both the durable build record and the one instrumented
+//! `cargo rustc` command. [`run_build`] remains the provenance-only entry point for existing
+//! callers while they migrate to complete compiler collection.
 
 use std::process::Command;
 use std::process::Stdio;
@@ -22,7 +19,6 @@ use snafu::ResultExt;
 use crate::BuildRequest;
 use crate::CargoTarget;
 use crate::Error;
-use crate::Workspace;
 use crate::error::PackageNotFoundSnafu;
 use crate::error::ProcessFailedSnafu;
 use crate::error::StartProcessSnafu;
@@ -30,12 +26,16 @@ use crate::error::TargetNotFoundSnafu;
 
 /// Runs one explicit Cargo target and returns its resolved build provenance.
 ///
-/// Cargo inherits the current process's standard input, output, and error streams.
+/// This compatibility entry point does not collect concrete compiler instances. New capture code
+/// must use [`crate::collect_build`].
 ///
 /// # Errors
 ///
 /// Returns an error if the request does not resolve to one workspace target or `cargo rustc` fails.
-pub fn run_build(workspace: &Workspace, request: &BuildRequest) -> Result<BuildRecord, Error> {
+pub fn run_build(
+    workspace: &crate::Workspace,
+    request: &BuildRequest,
+) -> Result<BuildRecord, Error> {
     let metadata = workspace.read_metadata(request)?;
     let package = resolve_package(&metadata, request.package())?;
     let target = resolve_target(package, request.target())?;
@@ -55,13 +55,14 @@ pub fn run_build(workspace: &Workspace, request: &BuildRequest) -> Result<BuildR
         return ProcessFailedSnafu {
             program: workspace.cargo().to_owned(),
             status: status.to_string(),
+            diagnostics: None,
         }
         .fail();
     }
 
     let target = TargetRecord::new(target.name.clone(), request.target().kind())?;
 
-    let record = BuildRecord::new(
+    BuildRecord::new(
         package.name.to_string(),
         package.version.to_string(),
         target,
@@ -69,12 +70,14 @@ pub fn run_build(workspace: &Workspace, request: &BuildRequest) -> Result<BuildR
         workspace.cargo().to_owned(),
         workspace.invocation_directory().to_owned(),
         arguments,
-    )?;
-
-    Ok(record)
+    )
+    .map_err(Error::from)
 }
 
-fn resolve_package<'a>(metadata: &'a Metadata, name: &str) -> Result<&'a Package, Error> {
+pub(crate) fn resolve_package<'a>(
+    metadata: &'a Metadata,
+    name: &str,
+) -> Result<&'a Package, Error> {
     let package = metadata
         .workspace_packages()
         .into_iter()
@@ -86,7 +89,10 @@ fn resolve_package<'a>(metadata: &'a Metadata, name: &str) -> Result<&'a Package
     Ok(package)
 }
 
-fn resolve_target<'a>(package: &'a Package, selected: &CargoTarget) -> Result<&'a Target, Error> {
+pub(crate) fn resolve_target<'a>(
+    package: &'a Package,
+    selected: &CargoTarget,
+) -> Result<&'a Target, Error> {
     let target = package.targets.iter().find(|target| match selected {
         CargoTarget::Library => target.kind.iter().any(|kind| {
             matches!(
@@ -115,7 +121,7 @@ fn resolve_target<'a>(package: &'a Package, selected: &CargoTarget) -> Result<&'
     Ok(target)
 }
 
-fn cargo_arguments(request: &BuildRequest) -> Vec<String> {
+pub(crate) fn cargo_arguments(request: &BuildRequest) -> Vec<String> {
     let mut arguments = vec![
         "rustc".to_owned(),
         "--package".to_owned(),

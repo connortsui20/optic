@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use snafu::Snafu;
 
-/// Explains why a Cargo invocation record could not be produced for a request.
+/// Explains why selected-target compiler evidence could not be produced for a request.
 #[derive(Debug, Snafu)]
 #[non_exhaustive]
 #[snafu(visibility(pub(crate)))]
@@ -25,6 +25,53 @@ pub enum Error {
         source: cargo_metadata::Error,
     },
 
+    /// Cargo's compiler configuration could not be interpreted safely.
+    #[snafu(display("invalid compiler environment: {message}"))]
+    CompilerEnvironment {
+        /// The invalid configuration or missing compiler fact.
+        message: String,
+    },
+
+    /// The selected compiler does not contain its matching rustc-private libraries.
+    #[snafu(display(
+        "rustc {release} ({commit_hash}) requires its matching rustc-dev component at {}{}",
+        path.display(),
+        install_command
+            .as_deref()
+            .map(|command| format!("; install it with `{command}`"))
+            .unwrap_or_default()
+    ))]
+    MissingRustcDev {
+        /// The selected rustc release.
+        release: String,
+        /// The full selected rustc commit hash.
+        commit_hash: String,
+        /// The expected rustc-private library directory.
+        path: PathBuf,
+        /// The exact rustup command when the sysroot proves a rustup toolchain.
+        install_command: Option<String>,
+    },
+
+    /// A local compiler file or manifest operation failed.
+    #[snafu(display("failed to {operation} {}", path.display()))]
+    Filesystem {
+        /// The operation that failed.
+        operation: &'static str,
+        /// The affected path.
+        path: PathBuf,
+        /// The filesystem error.
+        source: std::io::Error,
+    },
+
+    /// The selected compiler wrote an invalid instance manifest.
+    #[snafu(display("invalid compiler manifest at {}: {message}", path.display()))]
+    InvalidManifest {
+        /// The rejected manifest path.
+        path: PathBuf,
+        /// The violated protocol requirement.
+        message: String,
+    },
+
     /// The requested package was not a workspace member.
     #[snafu(display("package must name a workspace member, got {package}"))]
     PackageNotFound {
@@ -37,7 +84,6 @@ pub enum Error {
     TargetNotFound {
         /// The resolved package name.
         package: String,
-
         /// The requested target description.
         target: String,
     },
@@ -47,19 +93,27 @@ pub enum Error {
     StartProcess {
         /// The selected Cargo executable.
         program: PathBuf,
-
         /// The process-start error.
         source: std::io::Error,
     },
 
     /// Cargo exited without completing the selected target successfully.
-    #[snafu(display("{} must complete successfully, got {status}", program.display()))]
+    #[snafu(display(
+        "{} must complete successfully, got {status}{}",
+        program.display(),
+        diagnostics
+            .as_deref()
+            .filter(|diagnostics| !diagnostics.is_empty())
+            .map(|diagnostics| format!("\n{diagnostics}"))
+            .unwrap_or_default()
+    ))]
     ProcessFailed {
         /// The selected Cargo executable.
         program: PathBuf,
-
         /// The unsuccessful process status.
         status: String,
+        /// Process diagnostics, when the caller captured them.
+        diagnostics: Option<String>,
     },
 
     /// The successful Cargo invocation could not become a valid durable record.
