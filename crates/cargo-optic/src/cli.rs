@@ -14,6 +14,7 @@ use snafu::Snafu;
 
 use crate::arguments;
 use crate::output::CaptureOutput;
+use crate::output::InstanceOutput;
 
 pub(crate) fn run() -> Result<(), Error> {
     let stdout = io::stdout();
@@ -53,6 +54,38 @@ fn run_with_output(mut stdout: impl Write) -> Result<(), Error> {
                 write!(stdout, "{output}").context(WriteSnafu)?;
             }
         }
+        arguments::Command::Find {
+            capture,
+            query,
+            limit,
+        } => {
+            let results = optic.find(&capture, &query, limit)?;
+            if results.instances().is_empty() {
+                writeln!(stdout, "No instances found.").context(WriteSnafu)?;
+
+                return Ok(());
+            }
+
+            for (index, instance) in results.instances().iter().enumerate() {
+                if index != 0 {
+                    writeln!(stdout).context(WriteSnafu)?;
+                }
+
+                let output = InstanceOutput::new(results.capture_id(), instance);
+                write!(stdout, "{output}").context(WriteSnafu)?;
+            }
+
+            if results.is_truncated() {
+                writeln!(stdout).context(WriteSnafu)?;
+                writeln!(
+                    stdout,
+                    "Showing {} of {} matching instances. Narrow the query to reduce the result set.",
+                    results.instances().len(),
+                    results.total_matches(),
+                )
+                .context(WriteSnafu)?;
+            }
+        }
     }
 
     Ok(())
@@ -89,7 +122,7 @@ pub(crate) enum Error {
         source: optic::InvalidBuildRequest,
     },
 
-    /// The capture record could not become human-readable output.
+    /// A capture record could not become human-readable output.
     #[snafu(transparent)]
     Output {
         /// The output adapter error.

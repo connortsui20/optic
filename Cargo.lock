@@ -90,6 +90,7 @@ version = "0.0.1"
 dependencies = [
  "cargo-optic-capture",
  "cargo-optic-compiler",
+ "cargo-optic-evidence",
  "cargo-optic-records",
  "cargo-optic-store",
  "snafu",
@@ -112,6 +113,16 @@ version = "0.0.1"
 dependencies = [
  "cargo-optic-records",
  "cargo_metadata",
+ "snafu",
+ "tempfile",
+]
+
+[[package]]
+name = "cargo-optic-evidence"
+version = "0.0.1"
+dependencies = [
+ "cargo-optic-records",
+ "cargo-optic-store",
  "snafu",
  "tempfile",
 ]

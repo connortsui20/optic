@@ -1,9 +1,9 @@
 //! Provides the application boundary for Cargo Optic.
 //!
 //! Consumers begin with [`Optic::open`], which discovers the enclosing Cargo workspace and binds a
-//! store handle to its root. The resulting [`Optic`] value exposes two product operations:
-//! [`Optic::capture`] executes and publishes a [`BuildRequest`], while [`Optic::list_captures`]
-//! reads the validated completed history.
+//! store handle to its root. The resulting [`Optic`] value exposes three product operations:
+//! [`Optic::capture`] executes and publishes a [`BuildRequest`], [`Optic::find`] searches one
+//! completed capture, and [`Optic::list_captures`] reads the validated completed history.
 //!
 //! This crate is the primary application API. The subsystem crates remain available as narrow APIs
 //! for callers that need their individual boundaries. Most applications should use the types
@@ -19,6 +19,9 @@ pub use optic_compiler::Error as CompilerError;
 pub use optic_compiler::InvalidBuildRequest;
 use optic_compiler::Workspace;
 
+pub use optic_evidence::Error as EvidenceError;
+pub use optic_evidence::FindResults;
+pub use optic_evidence::MatchKind;
 pub use optic_records::BuildRecord;
 pub use optic_records::CaptureId;
 pub use optic_records::CaptureRecord;
@@ -80,6 +83,29 @@ impl Optic {
     pub fn list_captures(&self) -> Result<Vec<CaptureRecord>, Error> {
         Ok(self.store.list_captures()?)
     }
+
+    /// Finds concrete compiler instances within one explicit capture.
+    ///
+    /// Exact definition paths, concrete display names, and raw symbols take precedence over a
+    /// case-sensitive literal substring match.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query or limit is invalid, the capture does not exist, or its
+    /// durable evidence cannot be read.
+    pub fn find(
+        &self,
+        capture: &CaptureId,
+        query: &str,
+        limit: usize,
+    ) -> Result<FindResults, Error> {
+        Ok(optic_evidence::find_instances(
+            &self.store,
+            capture,
+            query,
+            limit,
+        )?)
+    }
 }
 
 /// Explains why an application-level Cargo Optic operation failed.
@@ -97,6 +123,12 @@ pub enum Error {
     Capture {
         /// The capture subsystem error.
         source: optic_capture::Error,
+    },
+    /// Evidence search failed.
+    #[snafu(transparent)]
+    Evidence {
+        /// The evidence subsystem error.
+        source: optic_evidence::Error,
     },
     /// Store setup or completed-history reading failed.
     #[snafu(transparent)]

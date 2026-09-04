@@ -6,7 +6,8 @@
 //!
 //! Capture syntax requires an exact package, one Cargo-style target selector, and one profile
 //! selector. [`parse`] constructs a [`BuildRequest`] after Clap establishes those selection
-//! invariants.
+//! invariants. Find syntax parses the opaque capture identity and forwards its result limit to the
+//! evidence subsystem for validation.
 //!
 //! [custom subcommands]:
 //!     https://doc.rust-lang.org/cargo/reference/external-tools.html#custom-subcommands
@@ -16,14 +17,17 @@ use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
 use optic::BuildRequest;
+use optic::CaptureId;
 use optic::CargoTarget;
 use optic::InvalidBuildRequest;
+
+const DEFAULT_FIND_LIMIT: usize = 20;
 
 /// The outer command form that Cargo passes to this executable.
 #[derive(Debug, Parser)]
 #[command(bin_name = "cargo")]
 enum Cargo {
-    /// Captures and inspects Cargo build metadata.
+    /// Captures compiler evidence and finds concrete instances.
     #[command(name = "optic", version)]
     Optic {
         /// The Cargo Optic operation that the user selected.
@@ -35,12 +39,13 @@ enum Cargo {
 /// A parsed public subcommand before product-request validation.
 #[derive(Debug, Subcommand)]
 enum ParsedCommand {
-    /// Runs one explicit Cargo target and remembers the successful invocation.
+    /// Runs one explicit Cargo target and records its compiler evidence.
     Capture(CaptureOptions),
-
     /// Lists captures by descending recorded completion time, then ascending capture ID.
     #[command(name = "list-captures")]
     ListCaptures,
+    /// Finds concrete compiler instances in one completed capture.
+    Find(FindOptions),
 }
 
 /// Cargo-style selectors for one explicit build request.
@@ -99,13 +104,35 @@ struct CaptureOptions {
     no_default_features: bool,
 }
 
+/// Selects one capture and bounds its concrete-instance search.
+#[derive(Debug, Args)]
+struct FindOptions {
+    /// Selects one completed capture by its opaque capture ID.
+    #[arg(long, value_name = "CAPTURE_REF")]
+    capture: CaptureId,
+    /// Sets the maximum number of results to return.
+    #[arg(long, default_value_t = DEFAULT_FIND_LIMIT, value_name = "N")]
+    limit: usize,
+    /// Matches an exact name first, then a case-sensitive literal substring.
+    #[arg(value_name = "QUERY")]
+    query: String,
+}
+
 /// A validated operation ready for application dispatch.
 pub(crate) enum Command {
     /// Captures one explicit Cargo build request.
     Capture(BuildRequest),
-
     /// Lists the completed capture history.
     ListCaptures,
+    /// Finds concrete compiler instances in one completed capture.
+    Find {
+        /// The capture whose evidence is searched.
+        capture: CaptureId,
+        /// The exact or literal-substring query.
+        query: String,
+        /// The maximum number of results to return.
+        limit: usize,
+    },
 }
 
 pub(crate) fn parse() -> Result<Command, InvalidBuildRequest> {
@@ -114,6 +141,11 @@ pub(crate) fn parse() -> Result<Command, InvalidBuildRequest> {
     match command {
         ParsedCommand::Capture(options) => Ok(Command::Capture(options.into_request()?)),
         ParsedCommand::ListCaptures => Ok(Command::ListCaptures),
+        ParsedCommand::Find(options) => Ok(Command::Find {
+            capture: options.capture,
+            query: options.query,
+            limit: options.limit,
+        }),
     }
 }
 
@@ -159,6 +191,7 @@ mod tests {
 
     use super::CaptureOptions;
     use super::Cargo;
+    use super::FindOptions;
     use super::ParsedCommand;
 
     fn capture_options(arguments: Vec<&str>) -> CaptureOptions {
@@ -166,6 +199,16 @@ mod tests {
             Cargo::try_parse_from(arguments).expect("the fixture command is valid");
         let ParsedCommand::Capture(options) = command else {
             panic!("the fixture command is a capture command");
+        };
+
+        options
+    }
+
+    fn find_options(arguments: &[&str]) -> FindOptions {
+        let Cargo::Optic { command } =
+            Cargo::try_parse_from(arguments).expect("the fixture command is valid");
+        let ParsedCommand::Find(options) = command else {
+            panic!("the fixture command is a find command");
         };
 
         options
@@ -317,6 +360,30 @@ mod tests {
         assert_parse_error(
             &["cargo", "optic", "captures"],
             ErrorKind::InvalidSubcommand,
+        );
+    }
+
+    #[test]
+    fn parses_a_capture_scoped_find_with_the_default_limit() {
+        let options = find_options(&[
+            "cargo",
+            "optic",
+            "find",
+            "--capture",
+            "zyxwvutsrqponmlkzyxwvutsrqponmlk",
+            "kernel",
+        ]);
+
+        assert_eq!(options.capture.as_str(), "zyxwvutsrqponmlkzyxwvutsrqponmlk");
+        assert_eq!(options.query, "kernel");
+        assert_eq!(options.limit, 20);
+    }
+
+    #[test]
+    fn rejects_a_noncanonical_find_capture_id() {
+        assert_parse_error(
+            &["cargo", "optic", "find", "--capture", "capture-1", "kernel"],
+            ErrorKind::ValueValidation,
         );
     }
 }

@@ -174,6 +174,12 @@ fn failed_cargo_process_does_not_publish_a_capture() {
             .expect("completed captures can be listed")
             .is_empty()
     );
+
+    let unpublished = optic::CaptureId::generate();
+    let error = optic
+        .find(&unpublished, "broken", 100)
+        .expect_err("a failed capture must not leave findable evidence");
+    assert!(matches!(error, Error::Evidence { .. }));
 }
 
 #[test]
