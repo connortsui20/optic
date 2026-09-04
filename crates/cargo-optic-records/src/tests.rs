@@ -21,6 +21,19 @@ fn capture_id() -> CaptureId {
         .expect("the fixture capture ID is valid")
 }
 
+fn compiler_identity() -> CompilerIdentity {
+    let root = std::env::current_dir().expect("the test invocation directory is available");
+
+    CompilerIdentity::new(
+        root.join("toolchain/bin/rustc"),
+        "1.99.0-nightly",
+        "0123456789abcdef0123456789abcdef01234567",
+        "aarch64-apple-darwin",
+        root.join("toolchain"),
+    )
+    .expect("the fixture compiler identity is valid")
+}
+
 fn record() -> CaptureRecord {
     let target =
         TargetRecord::new("example", CargoTargetKind::Lib).expect("the fixture target is valid");
@@ -35,7 +48,8 @@ fn record() -> CaptureRecord {
     )
     .expect("the fixture build is valid");
 
-    CaptureRecord::new(capture_id(), 1_000, build)
+    CaptureRecord::new(capture_id(), 1_000, build, compiler_identity(), 1, 1)
+        .expect("the fixture capture record is valid")
 }
 
 fn instance() -> InstanceRecord {
@@ -88,16 +102,84 @@ fn round_trips_a_valid_record() {
         .expect("the encoded fixture record can be read");
 
     assert_eq!(actual, expected);
+    assert_eq!(actual.instance_count(), 1);
+    assert_eq!(actual.placement_count(), 1);
 }
 
 #[test]
-fn rejects_an_unknown_format_version() {
+fn rejects_an_unknown_capture_format() {
     let encoded = serde_json::to_string(&record()).expect("the fixture record can be encoded");
-    let unsupported_version = encoded.replace(r#""format_version":1"#, r#""format_version":2"#);
+    let unsupported_version = encoded.replace(r#""format_version":2"#, r#""format_version":3"#);
 
     assert_record_error(
         &unsupported_version,
-        "capture format version must be 1, got 2",
+        "capture format version must be 2, got 3",
+    );
+}
+
+#[test]
+fn reports_the_previous_capture_format_before_its_missing_fields() {
+    let mut previous = serde_json::to_value(record()).expect("the fixture record can be encoded");
+    let previous = previous
+        .as_object_mut()
+        .expect("the capture fixture is an object");
+    previous.insert("format_version".to_owned(), serde_json::Value::from(1));
+    previous.remove("compiler");
+    previous.remove("instance_count");
+    previous.remove("placement_count");
+
+    let error =
+        serde_json::from_value::<CaptureRecord>(serde_json::Value::Object(previous.clone()))
+            .expect_err("the previous capture format must be rejected");
+
+    assert_eq!(error.to_string(), "capture format version must be 2, got 1");
+}
+
+#[test]
+fn rejects_each_invalid_capture_count_relationship() {
+    let fixture = record();
+    let cases = [
+        // Placements without instances.
+        (0, 1), //
+        // Fewer placements than instances.
+        (2, 1), //
+    ];
+
+    for (instance_count, placement_count) in cases {
+        let error = CaptureRecord::new(
+            fixture.id().clone(),
+            fixture.completed_at_unix_ms(),
+            fixture.build().clone(),
+            fixture.compiler().clone(),
+            instance_count,
+            placement_count,
+        )
+        .expect_err("invalid capture counts must be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "capture counts must contain a valid value, got {instance_count} instances and \
+                 {placement_count} placements"
+            )
+        );
+    }
+}
+
+#[test]
+fn rejects_a_capture_without_durable_counts() {
+    let mut encoded = serde_json::to_value(record()).expect("the fixture record can be encoded");
+    encoded
+        .as_object_mut()
+        .expect("the capture fixture is an object")
+        .remove("instance_count");
+    let error = serde_json::from_value::<CaptureRecord>(encoded)
+        .expect_err("a capture without its instance count must be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("instance count must contain a valid value, got no value")
     );
 }
 
@@ -109,19 +191,47 @@ fn round_trips_a_current_instance_manifest_without_body_metadata() {
         .expect("the encoded fixture manifest can be read");
 
     assert_eq!(actual, expected);
-    assert_eq!(actual.format_version(), 1);
+    assert_eq!(actual.format_version(), 2);
     assert_eq!(actual.capture_id(), record().id());
+    assert_eq!(actual.instance_count(), 1);
+    assert_eq!(actual.placement_count(), 1);
     assert!(!encoded.contains("body"));
 }
 
 #[test]
-fn rejects_a_wrong_instance_manifest_version() {
+fn counts_instances_and_all_codegen_unit_placements() {
+    let definition = DefinitionRecord::new("example", "example::kernel")
+        .expect("the fixture definition is valid");
+    let placements = vec![
+        // First codegen unit.
+        PlacementRecord::new("example-cgu.0", "External", "Default", false, 17)
+            .expect("the first fixture placement is valid"), //
+        // Second codegen unit.
+        PlacementRecord::new("example-cgu.1", "External", "Default", false, 19)
+            .expect("the second fixture placement is valid"), //
+    ];
+    let instance = InstanceRecord::new(
+        definition,
+        "example::kernel::<u64>",
+        "_RNvCexample6kernelm",
+        placements,
+    )
+    .expect("the fixture instance is valid");
+    let manifest =
+        InstanceManifest::new(capture_id(), vec![instance]).expect("the fixture manifest is valid");
+
+    assert_eq!(manifest.instance_count(), 1);
+    assert_eq!(manifest.placement_count(), 2);
+}
+
+#[test]
+fn rejects_an_unknown_instance_manifest_format() {
     let encoded = serde_json::to_string(&manifest()).expect("the fixture manifest can be encoded");
-    let unsupported_version = encoded.replace(r#""format_version":1"#, r#""format_version":2"#);
+    let unsupported_version = encoded.replace(r#""format_version":2"#, r#""format_version":3"#);
     let error = serde_json::from_str::<InstanceManifest>(&unsupported_version)
         .expect_err("the unsupported manifest must be rejected");
 
-    assert_eq!(error.to_string(), "capture format version must be 1, got 2");
+    assert_eq!(error.to_string(), "capture format version must be 2, got 3");
 }
 
 #[test]
@@ -217,6 +327,27 @@ fn rejects_each_invalid_compiler_sysroot() {
 }
 
 #[test]
+fn deserialization_rejects_each_empty_compiler_text_field() {
+    let encoded = serde_json::to_value(record()).expect("the fixture record can be encoded");
+    let cases = [
+        ("/compiler/release", "rustc release"), // Release string.
+        ("/compiler/commit_hash", "rustc commit hash"), // Commit hash.
+        ("/compiler/host", "rustc host"),       // Host triple.
+    ];
+
+    for (pointer, field) in cases {
+        let mut invalid = encoded.clone();
+        *invalid
+            .pointer_mut(pointer)
+            .expect("the compiler fixture field exists") = serde_json::Value::String(String::new());
+        let error = serde_json::from_value::<CaptureRecord>(invalid)
+            .expect_err("the empty compiler field must be rejected");
+
+        assert!(error.to_string().contains(field));
+    }
+}
+
+#[test]
 fn deserialization_rejects_each_empty_instance_text_field() {
     let encoded = serde_json::to_value(manifest()).expect("the fixture manifest can be encoded");
     let cases = [
@@ -269,6 +400,13 @@ fn deserialization_rejects_unknown_evidence_fields() {
 
         assert!(error.to_string().contains("unknown field `unknown`"));
     }
+
+    let mut invalid = serde_json::to_value(record()).expect("the fixture record can be encoded");
+    invalid["compiler"]["unknown"] = serde_json::Value::Bool(true);
+    let error = serde_json::from_value::<CaptureRecord>(invalid)
+        .expect_err("the unknown compiler field must be rejected");
+
+    assert!(error.to_string().contains("unknown field `unknown`"));
 }
 
 #[test]

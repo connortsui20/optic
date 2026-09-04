@@ -10,6 +10,7 @@ name = "optic_store"
 
 [dependencies]
 cargo-optic-records.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
 

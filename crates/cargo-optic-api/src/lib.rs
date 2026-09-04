@@ -1,7 +1,7 @@
 //! Provides the application boundary for Cargo Optic.
 //!
 //! Consumers begin with [`Optic::open`], which discovers the enclosing Cargo workspace and binds a
-//! store handle to its root. The resulting [`Optic`] value exposes the two product operations:
+//! store handle to its root. The resulting [`Optic`] value exposes two product operations:
 //! [`Optic::capture`] executes and publishes a [`BuildRequest`], while [`Optic::list_captures`]
 //! reads the validated completed history.
 //!
@@ -11,9 +11,8 @@
 //! Command-line parsing and human-readable rendering remain outside this crate.
 
 use std::path::Path;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
+pub use optic_capture::Error as CaptureError;
 pub use optic_compiler::BuildRequest;
 pub use optic_compiler::CargoTarget;
 pub use optic_compiler::Error as CompilerError;
@@ -24,12 +23,15 @@ pub use optic_records::BuildRecord;
 pub use optic_records::CaptureId;
 pub use optic_records::CaptureRecord;
 pub use optic_records::CargoTargetKind;
+pub use optic_records::CompilerIdentity;
+pub use optic_records::DefinitionRecord;
 pub use optic_records::Error as RecordError;
+pub use optic_records::InstanceRecord;
+pub use optic_records::PlacementRecord;
 pub use optic_records::TargetRecord;
 pub use optic_store::Error as StoreError;
 use optic_store::Store;
 
-use snafu::ResultExt;
 use snafu::Snafu;
 
 /// Cargo Optic operations for one discovered workspace.
@@ -56,27 +58,18 @@ impl Optic {
         Ok(Self { workspace, store })
     }
 
-    /// Runs and publishes one new immutable Cargo invocation capture.
+    /// Runs and publishes one new immutable selected-target capture.
     ///
     /// # Errors
     ///
-    /// Returns an error if Cargo cannot complete the request, the system clock cannot produce the
-    /// record timestamp, or the record cannot be published.
+    /// Returns an error if compiler collection fails, the system clock cannot produce the record
+    /// timestamp, record validation fails, or the complete capture cannot be published.
     pub fn capture(&self, request: &BuildRequest) -> Result<CaptureRecord, Error> {
-        let build = optic_compiler::run_build(&self.workspace, request)?;
-
-        let completed_at_unix_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .context(ClockSnafu)?
-            .as_millis()
-            .try_into()
-            .context(TimestampOverflowSnafu)?;
-
-        let record = CaptureRecord::new(CaptureId::generate(), completed_at_unix_ms, build);
-
-        self.store.publish(&record)?;
-
-        Ok(record)
+        Ok(optic_capture::capture(
+            &self.workspace,
+            &self.store,
+            request,
+        )?)
     }
 
     /// Lists captures by descending recorded completion time, then ascending capture ID.
@@ -93,28 +86,19 @@ impl Optic {
 #[derive(Debug, Snafu)]
 #[non_exhaustive]
 pub enum Error {
-    /// Cargo workspace discovery or build execution failed.
+    /// Cargo workspace discovery failed while opening the application.
     #[snafu(transparent)]
     Compiler {
         /// The compiler subsystem error.
         source: optic_compiler::Error,
     },
-
-    /// The system clock was earlier than the Unix epoch.
-    #[snafu(display("system clock must be at or after the Unix epoch"))]
-    Clock {
-        /// The invalid system time.
-        source: std::time::SystemTimeError,
+    /// Capture planning, compiler collection, validation, or publication failed.
+    #[snafu(transparent)]
+    Capture {
+        /// The capture subsystem error.
+        source: optic_capture::Error,
     },
-
-    /// The completion timestamp did not fit in the record field.
-    #[snafu(display("capture timestamp must fit in u64 milliseconds, got an overflow"))]
-    TimestampOverflow {
-        /// The integer conversion error.
-        source: std::num::TryFromIntError,
-    },
-
-    /// Store setup, capture publication, or history reading failed.
+    /// Store setup or completed-history reading failed.
     #[snafu(transparent)]
     Store {
         /// The store subsystem error.
