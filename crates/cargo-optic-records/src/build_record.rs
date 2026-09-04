@@ -1,8 +1,9 @@
 //! Records one successful Cargo invocation.
 //!
 //! [`BuildRecord`] stores the resolved package and target together with the exact profile, Cargo
-//! executable, invocation directory, and ordered argument list. The record does not claim that
-//! Cargo invoked rustc or preserve all environment and configuration inputs.
+//! executable, invocation directory, and ordered arguments for the requested Cargo command.
+//! Private compiler instrumentation is excluded. The record does not preserve every environment
+//! and configuration input.
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -18,7 +19,7 @@ use crate::validation::require_text;
 
 /// The selected inputs for one successful Cargo invocation.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(try_from = "UncheckedBuildRecord")]
+#[serde(try_from = "RawBuildRecord")]
 pub struct BuildRecord {
     package: String,
     package_version: String,
@@ -111,16 +112,17 @@ impl BuildRecord {
         &self.invocation_directory
     }
 
-    /// Returns the ordered arguments passed to Cargo.
+    /// Returns the ordered arguments for the requested Cargo command.
+    ///
+    /// The arguments exclude private compiler instrumentation that Optic adds during collection.
     pub fn cargo_arguments(&self) -> &[String] {
         &self.cargo_arguments
     }
 }
 
-/// The serialized fields that must pass [`BuildRecord`] validation during deserialization.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct UncheckedBuildRecord {
+struct RawBuildRecord {
     package: String,
     package_version: String,
     target: TargetRecord,
@@ -130,10 +132,10 @@ struct UncheckedBuildRecord {
     cargo_arguments: Vec<String>,
 }
 
-impl TryFrom<UncheckedBuildRecord> for BuildRecord {
+impl TryFrom<RawBuildRecord> for BuildRecord {
     type Error = Error;
 
-    fn try_from(record: UncheckedBuildRecord) -> Result<Self, Self::Error> {
+    fn try_from(record: RawBuildRecord) -> Result<Self, Self::Error> {
         Self::new(
             record.package,
             record.package_version,

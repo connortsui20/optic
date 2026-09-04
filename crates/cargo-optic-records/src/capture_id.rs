@@ -1,8 +1,7 @@
 //! Defines the stable identity shared by all evidence from one capture.
 //!
-//! [`CaptureId::generate`] uses UUIDv4 after a build succeeds. Parsing and deserialization enforce
-//! the canonical text representation. Callers must not infer time, ordering, or storage paths from
-//! that opaque text.
+//! A generated ID becomes visible only with its completed capture. Callers must not infer time,
+//! ordering, or storage paths from its text.
 
 use std::fmt;
 use std::str::FromStr;
@@ -17,17 +16,17 @@ use crate::reverse_hex;
 
 const TEXT_LENGTH: usize = 32;
 
-/// An immutable identifier for all evidence from one capture.
+/// An opaque, immutable identifier for all evidence from one capture.
 ///
-/// [`Self::generate`] encodes the 128 bits of a UUIDv4 with the reverse-hexadecimal alphabet `k`
-/// through `z`. This alphabet keeps capture IDs distinct at boundaries that cannot preserve the
-/// Rust type.
+/// [`CaptureId::generate`] encodes a random 128-bit version 4 UUID as 32 reverse-hexadecimal
+/// characters from `k` through `z`. Parsing guarantees only that canonical representation; callers
+/// must treat the value as opaque and must not infer ordering or storage layout from it.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct CaptureId(String);
 
 impl CaptureId {
-    /// Generates a new UUIDv4 capture identifier.
+    /// Generates a new capture identifier.
     pub fn generate() -> Self {
         Self(reverse_hex::encode(uuid::Uuid::new_v4().as_bytes()))
     }

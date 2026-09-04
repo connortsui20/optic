@@ -17,13 +17,10 @@ use crate::validation::require_text;
 pub enum CargoTargetKind {
     /// Uses Cargo's `--lib` selector for any library-like metadata kind.
     Lib,
-
     /// Uses Cargo's `--bin <name>` selector.
     Bin,
-
     /// Uses Cargo's `--example <name>` selector.
     Example,
-
     /// Uses Cargo's `--bench <name>` selector.
     Bench,
 }
@@ -43,7 +40,7 @@ impl fmt::Display for CargoTargetKind {
 
 /// The target identity reported by Cargo metadata.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(try_from = "UncheckedTargetRecord")]
+#[serde(try_from = "RawTargetRecord")]
 pub struct TargetRecord {
     name: String,
     kind: CargoTargetKind,
@@ -74,18 +71,17 @@ impl TargetRecord {
     }
 }
 
-/// The serialized fields that must pass [`TargetRecord`] validation during deserialization.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct UncheckedTargetRecord {
+struct RawTargetRecord {
     name: String,
     kind: CargoTargetKind,
 }
 
-impl TryFrom<UncheckedTargetRecord> for TargetRecord {
+impl TryFrom<RawTargetRecord> for TargetRecord {
     type Error = Error;
 
-    fn try_from(record: UncheckedTargetRecord) -> Result<Self, Self::Error> {
+    fn try_from(record: RawTargetRecord) -> Result<Self, Self::Error> {
         Self::new(record.name, record.kind)
     }
 }
