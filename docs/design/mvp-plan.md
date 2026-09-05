@@ -121,7 +121,7 @@ the product workflow.
 Implementation status:
 
 - [x] Capture and list ([PR #5](https://github.com/connortsui20/optic/pull/5)).
-- [ ] Complete the walking-MVP stack in PRs #14, #9, and #6.
+- [x] Complete the walking-MVP stack in PRs #14, #9, and #6.
 - [ ] Complete the [stabilization plan](stabilization.md).
 - [ ] Show captured source.
 - [ ] Show exact LLVM IR.
