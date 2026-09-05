@@ -15,20 +15,16 @@ use optic_records::CaptureId;
 use optic_records::CaptureRecord;
 use optic_records::InstanceManifest;
 use optic_store::Store;
-use snafu::ResultExt;
 
 mod error;
 pub use error::Error;
-
-use error::ClockSnafu;
-use error::TimestampOverflowSnafu;
 
 /// Collects compiler evidence and publishes one complete capture.
 ///
 /// # Errors
 ///
-/// Returns an error if compiler collection fails, the completion timestamp cannot be represented,
-/// the instance manifest is invalid, or the complete capture cannot be published.
+/// Returns an error if compiler collection fails, the instance manifest is invalid, or the
+/// complete capture cannot be published.
 pub fn capture(
     workspace: &Workspace,
     store: &Store,
@@ -42,22 +38,11 @@ pub fn capture(
 
     let completed_at_unix_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .context(ClockSnafu)?
-        .as_millis();
-    let completed_at_unix_ms = u64::try_from(completed_at_unix_ms).map_err(|_| {
-        TimestampOverflowSnafu {
-            actual: completed_at_unix_ms,
-        }
-        .build()
-    })?;
-    let capture = CaptureRecord::new(
-        capture_id,
-        completed_at_unix_ms,
-        build,
-        compiler,
-        instances.instance_count(),
-        instances.placement_count(),
-    )?;
+        .expect("the system clock must be after the Unix epoch")
+        .as_millis()
+        .try_into()
+        .expect("the current Unix timestamp must fit in u64 milliseconds");
+    let capture = CaptureRecord::new(capture_id, completed_at_unix_ms, build, compiler);
 
     store.publish(&capture, &instances)?;
 

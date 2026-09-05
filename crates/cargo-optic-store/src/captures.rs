@@ -29,7 +29,6 @@ use crate::error::InvalidCaptureDirectoryIdSnafu;
 use crate::error::InvalidCaptureDirectoryNameSnafu;
 use crate::error::JsonSnafu;
 use crate::error::MismatchedCaptureIdSnafu;
-use crate::publish::validate_instance_counts;
 
 impl Store {
     /// Lists captures by descending recorded completion time, then ascending capture ID.
@@ -96,14 +95,13 @@ impl Store {
     /// # Errors
     ///
     /// Returns an error if the instance manifest or its capture record is missing, invalid, scoped
-    /// to a different capture, or contains evidence counts that disagree with its capture header.
+    /// to a different capture.
     pub fn read_instances(&self, id: &CaptureId) -> Result<InstanceManifest, Error> {
         let directory = self.capture_directory(id)?;
-        let capture = read_capture_from_directory(&directory, id)?;
+        read_capture_from_directory(&directory, id)?;
         let instances_path = require_instances_file(&directory)?;
         let instances: InstanceManifest = read_record(&instances_path)?;
         validate_capture_scope(&instances_path, id, instances.capture_id())?;
-        validate_instance_counts(&capture, &instances)?;
 
         Ok(instances)
     }

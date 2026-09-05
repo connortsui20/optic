@@ -21,15 +21,6 @@ use crate::INSTANCES_FILE_NAME;
 use crate::Store;
 
 fn record(id: &str, completed_at_unix_ms: u64) -> CaptureRecord {
-    record_with_counts(id, completed_at_unix_ms, 0, 0)
-}
-
-fn record_with_counts(
-    id: &str,
-    completed_at_unix_ms: u64,
-    instance_count: u64,
-    placement_count: u64,
-) -> CaptureRecord {
     let invocation_directory =
         std::env::current_dir().expect("the test invocation directory is available");
     let target =
@@ -62,10 +53,7 @@ fn record_with_counts(
         completed_at_unix_ms,
         build,
         compiler,
-        instance_count,
-        placement_count,
     )
-    .expect("the fixture capture record is valid")
 }
 
 fn manifest(id: &CaptureId) -> InstanceManifest {
@@ -218,30 +206,6 @@ fn rejects_records_for_different_captures_before_staging() {
             capture_id,
             manifest_id: error_manifest_id,
         } if capture_id == *capture.id() && error_manifest_id == manifest_id
-    ));
-    assert!(!store.root.exists());
-}
-
-#[test]
-fn rejects_mismatched_counts_before_staging() {
-    let temporary = tempfile::tempdir().expect("the test workspace can be created");
-    let store = Store::new(temporary.path()).expect("the fixture store path is valid");
-    let capture = record_with_counts("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzy", 1_000, 1, 1);
-    let instances = manifest(capture.id());
-
-    let error = store
-        .publish(&capture, &instances)
-        .expect_err("mismatched record counts must be rejected");
-
-    assert!(matches!(
-        error,
-        Error::MismatchedInstanceCounts {
-            capture_id,
-            capture_instance_count: 1,
-            capture_placement_count: 1,
-            manifest_instance_count: 0,
-            manifest_placement_count: 0,
-        } if capture_id == *capture.id()
     ));
     assert!(!store.root.exists());
 }
@@ -477,31 +441,6 @@ fn rejects_a_manifest_id_that_differs_from_its_directory_id() {
         } if error_path == path
             && error_directory_id == directory_id
             && record_id == manifest_id
-    ));
-}
-
-#[test]
-fn rejects_a_manifest_whose_counts_differ_from_its_capture_header() {
-    let temporary = tempfile::tempdir().expect("the test workspace can be created");
-    let store = Store::new(temporary.path()).expect("the fixture store path is valid");
-    let capture = record_with_counts("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzy", 1_000, 1, 1);
-    write_completed_record(&store, capture.id().as_str(), &capture);
-    let instances = manifest(capture.id());
-    write_completed_manifest(&store, capture.id().as_str(), &instances);
-
-    let error = store
-        .read_instances(capture.id())
-        .expect_err("manifest counts that differ from the capture header must be rejected");
-
-    assert!(matches!(
-        error,
-        Error::MismatchedInstanceCounts {
-            capture_id,
-            capture_instance_count: 1,
-            capture_placement_count: 1,
-            manifest_instance_count: 0,
-            manifest_placement_count: 0,
-        } if capture_id == *capture.id()
     ));
 }
 

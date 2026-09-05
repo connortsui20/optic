@@ -72,24 +72,6 @@ impl InstanceManifest {
     pub fn instances(&self) -> &[InstanceRecord] {
         &self.instances
     }
-
-    /// Returns the number of concrete instances in this manifest.
-    pub fn instance_count(&self) -> u64 {
-        u64::try_from(self.instances.len())
-            .expect("a manifest Vec length must fit in u64 on supported Rust targets")
-    }
-
-    /// Returns the total number of codegen-unit placements in this manifest.
-    pub fn placement_count(&self) -> u64 {
-        self.instances.iter().fold(0, |count, instance| {
-            let placements = u64::try_from(instance.placements().len())
-                .expect("an instance Vec length must fit in u64 on supported Rust targets");
-
-            count
-                .checked_add(placements)
-                .expect("manifest placements must fit in u64 within an address space")
-        })
-    }
 }
 
 #[derive(Deserialize)]

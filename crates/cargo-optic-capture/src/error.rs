@@ -17,20 +17,6 @@ pub enum Error {
         source: optic_compiler::Error,
     },
 
-    /// The system clock was earlier than the Unix epoch.
-    #[snafu(display("system clock must be at or after the Unix epoch"))]
-    Clock {
-        /// The invalid system time.
-        source: std::time::SystemTimeError,
-    },
-
-    /// The completion timestamp did not fit in the durable record field.
-    #[snafu(display("capture timestamp must fit in u64 milliseconds, got {actual}"))]
-    TimestampOverflow {
-        /// The overflowing millisecond count.
-        actual: u128,
-    },
-
     /// Collected evidence could not become a valid durable record.
     #[snafu(transparent)]
     Record {

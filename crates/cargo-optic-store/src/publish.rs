@@ -21,7 +21,6 @@ use crate::Store;
 use crate::error::CaptureExistsSnafu;
 use crate::error::FilesystemSnafu;
 use crate::error::JsonSnafu;
-use crate::error::MismatchedInstanceCountsSnafu;
 use crate::error::MismatchedPublishedCaptureIdSnafu;
 
 impl Store {
@@ -43,8 +42,6 @@ impl Store {
             }
             .fail();
         }
-        validate_instance_counts(capture, instances)?;
-
         let staging_root = self.root.join("staging");
         let captures_root = self.root.join("captures");
 
@@ -98,28 +95,6 @@ impl Store {
 
         Ok(())
     }
-}
-
-pub(super) fn validate_instance_counts(
-    capture: &CaptureRecord,
-    instances: &InstanceManifest,
-) -> Result<(), Error> {
-    let manifest_instance_count = instances.instance_count();
-    let manifest_placement_count = instances.placement_count();
-    if capture.instance_count() != manifest_instance_count
-        || capture.placement_count() != manifest_placement_count
-    {
-        return MismatchedInstanceCountsSnafu {
-            capture_id: capture.id().clone(),
-            capture_instance_count: capture.instance_count(),
-            capture_placement_count: capture.placement_count(),
-            manifest_instance_count,
-            manifest_placement_count,
-        }
-        .fail();
-    }
-
-    Ok(())
 }
 
 fn write_capture(path: &Path, capture: &CaptureRecord) -> Result<(), Error> {

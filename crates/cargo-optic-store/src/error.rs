@@ -43,25 +43,6 @@ pub enum Error {
         manifest_id: CaptureId,
     },
 
-    /// A capture header did not describe the instance manifest paired with it.
-    #[snafu(display(
-        "for capture {capture_id}, instance manifest counts must match capture counts \
-         ({capture_instance_count} instances and {capture_placement_count} placements), got \
-         {manifest_instance_count} instances and {manifest_placement_count} placements"
-    ))]
-    MismatchedInstanceCounts {
-        /// The capture whose records disagree.
-        capture_id: CaptureId,
-        /// The instance count recorded in the capture header.
-        capture_instance_count: u64,
-        /// The placement count recorded in the capture header.
-        capture_placement_count: u64,
-        /// The instance count derived from the manifest.
-        manifest_instance_count: u64,
-        /// The placement count derived from the manifest.
-        manifest_placement_count: u64,
-    },
-
     /// A filesystem operation failed before publication committed or while history was read.
     #[snafu(display("failed to {operation} {}", path.display()))]
     Filesystem {
