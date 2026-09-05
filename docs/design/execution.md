@@ -1,7 +1,8 @@
 # MVP execution ledger
 
 Implementation starts from `main` at `684991a` plus the CI commit `b18b658` on `ct/complete-mvp`.
-The approved specification is the plan at `15a4ccb`. No checkpoint is complete yet.
+The approved specification is the plan at `15a4ccb`. Draft PR #17 carries the implementation.
+No checkpoint is complete yet.
 
 ## Ownership
 
@@ -53,6 +54,7 @@ messages. Keep the existing private driver protocol and extend its documented re
 
 - [x] Create the integration branch with the existing CI commit.
 - [x] Allocate isolated compiler, storage, and testing worktrees.
+- [x] Commit the pinned toolchain, standalone formatting check, CI timeouts, and contributor guide.
 - [ ] Establish reproducible checks and the shared test harness.
 - [ ] Implement and verify Checkpoint A on Linux and macOS.
 - [ ] Implement and verify narrow show with the final cache format.
@@ -62,3 +64,13 @@ messages. Keep the existing private driver protocol and extend its documented re
 
 Update this ledger with implementation findings before dependent work starts. The detailed cache,
 show, testing, and installation documents remain the owning behavior contracts.
+
+## Current verification
+
+Rust 1.98.1 and its required components are installed locally. The existing six evidence-search
+unit tests pass on that toolchain. The new standalone-driver formatting check found two baseline
+formatting differences, which the compiler worker will include in its owned changes.
+
+The integration owner has drafted capture policy/outcome and CLI reuse output against the shared
+interfaces. Compiler, records/store, and harness changes are in progress. These changes are not yet
+an integrated or accepted Checkpoint A.
