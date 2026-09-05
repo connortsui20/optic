@@ -26,38 +26,38 @@ required work, including tests and documentation.
 
 ## Foundation subgoals
 
-- [ ] Incorporate the CI commit from PR #16 into `ct/complete-mvp`.
-- [ ] Pin the development toolchain to the tested Rust release, initially `1.98.1`.
-- [ ] Run formatting, Clippy, documentation, and Linux/macOS tests from that toolchain.
-- [ ] Format the standalone driver's source files as well as Cargo workspace files.
-- [ ] Add the unpublished test-support crate with actual API, compiler, and CLI consumers.
-- [ ] Keep all integration environment changes inside child processes.
-- [ ] Preserve the real rustup installation while isolating Cargo configuration and target state.
-- [ ] Add bounded durable readers and prevent writers from publishing unreadable oversized records.
-- [ ] Add deterministic tests for pre-commit storage errors and invalid durable input.
-- [ ] Record current architecture and the Rust style reference for contributors.
+- [x] Incorporate the CI commit from PR #16 into `ct/complete-mvp`.
+- [x] Pin the development toolchain to the tested Rust release, initially `1.98.1`.
+- [x] Run formatting, Clippy, documentation, and Linux/macOS tests from that toolchain.
+- [x] Format the standalone driver's source files as well as Cargo workspace files.
+- [x] Add the unpublished test-support crate with actual API, compiler, and CLI consumers.
+- [x] Keep all integration environment changes inside child processes.
+- [x] Preserve the real rustup installation while isolating Cargo configuration and target state.
+- [x] Add bounded durable readers and prevent writers from publishing unreadable oversized records.
+- [x] Add deterministic tests for pre-commit storage errors and invalid durable input.
+- [x] Record current architecture and the Rust style reference for contributors.
 
 The [foundation document](stabilization.md) and [test strategy](test-strategy.md) fix these details.
 Do not create a generic scenario framework, filesystem backend, or command abstraction.
 
 ## Checkpoint A: capture, list, find, and reuse
 
-- [ ] Keep request selection, feature forwarding, invocation directory, and wrapper policy correct.
-- [ ] Build the driver once per compatible compiler and complete driver source digest.
-- [ ] Reuse a stable wrapper executable and stable analysis marker on ordinary matching requests.
-- [ ] Ask Cargo to evaluate freshness for every attempted evidence reuse.
-- [ ] Keep store output outside Cargo's default build-script tracking through store initialization.
-- [ ] Distinguish a selected-target compilation from a positively identified fresh Cargo result.
-- [ ] Never compile a token already associated with a completed capture.
-- [ ] Install the new candidate immediately before atomic capture publication.
-- [ ] Return the same capture ID and timestamp on reuse without duplicate publication.
-- [ ] Generate a new analysis marker for `--fresh` without rebuilding the compatible driver.
-- [ ] Generate a new marker after a stopped stale probe, including every failed-attempt retry.
-- [ ] Keep previous completed captures searchable after a later request fails.
-- [ ] Preserve normal dependency reuse and Cargo target-directory configuration.
-- [ ] Expose `Captured` versus `Reused` in CLI output and typed API results.
-- [ ] Pass the full cache journey, invalidation matrix, and failure sequence on Linux and macOS.
-- [ ] Inspect all touched code for unnecessary layers under `$rust-style`.
+- [x] Keep request selection, feature forwarding, invocation directory, and wrapper policy correct.
+- [x] Build the driver once per compatible compiler and complete driver source digest.
+- [x] Reuse a stable wrapper executable and stable analysis marker on ordinary matching requests.
+- [x] Ask Cargo to evaluate freshness for every attempted evidence reuse.
+- [x] Keep store output outside Cargo's default build-script tracking through store initialization.
+- [x] Distinguish a selected-target compilation from a positively identified fresh Cargo result.
+- [x] Never compile a token already associated with a completed capture.
+- [x] Install the new candidate immediately before atomic capture publication.
+- [x] Return the same capture ID and timestamp on reuse without duplicate publication.
+- [x] Generate a new analysis marker for `--fresh` without rebuilding the compatible driver.
+- [x] Generate a new marker after a stopped stale probe, including every failed-attempt retry.
+- [x] Keep previous completed captures searchable after a later request fails.
+- [x] Preserve normal dependency reuse and Cargo target-directory configuration.
+- [x] Expose `Captured` versus `Reused` in CLI output and typed API results.
+- [x] Pass the full cache journey, invalidation matrix, and failure sequence on Linux and macOS.
+- [x] Inspect all touched code for unnecessary layers under `$rust-style`.
 
 The [capture-reuse contract](capture-reuse.md) owns the state machine. A cache hit based only on a
 request hash, a missing manifest, or successful Cargo exit does not satisfy this checkpoint.
@@ -70,22 +70,22 @@ can run in parallel because they do not change the implementation.
 
 ## Checkpoint B: narrow show
 
-- [ ] Add instance references without deriving them from display names or symbols.
-- [ ] Have find return and print references that select the same stored instance after sorting.
-- [ ] Store source and LLVM artifacts with the capture's existing atomic publication boundary.
-- [ ] Capture source text from the compiler's source map with matching byte offsets.
-- [ ] Record source unavailability when the compiler cannot establish an approved exact span.
-- [ ] Collect the supported optimized LLVM stage without changing the chosen optimization
+- [x] Add instance references without deriving them from display names or symbols.
+- [x] Have find return and print references that select the same stored instance after sorting.
+- [x] Store source and LLVM artifacts with the capture's existing atomic publication boundary.
+- [x] Capture source text from the compiler's source map with matching byte offsets.
+- [x] Record source unavailability when the compiler cannot establish an approved exact span.
+- [x] Collect the supported optimized LLVM stage without changing the chosen optimization
       configuration.
-- [ ] Index exact symbols and return every applicable standalone body in deterministic order.
-- [ ] Report missing exact evidence without guessing that LLVM optimized the body away.
-- [ ] Expose streaming source/LLVM readers through the library and explicit `show --instance`.
-- [ ] Keep stdout useful for piping and stderr for diagnostics and unavailable-evidence messages.
-- [ ] Increment the evidence version so instance-only captures cannot satisfy complete-evidence
+- [x] Index exact symbols and return every applicable standalone body in deterministic order.
+- [x] Report missing exact evidence without guessing that LLVM optimized the body away.
+- [x] Expose streaming source/LLVM readers through the library and explicit `show --instance`.
+- [x] Keep stdout useful for piping and stderr for diagnostics and unavailable-evidence messages.
+- [x] Increment the evidence version so instance-only captures cannot satisfy complete-evidence
       requests.
-- [ ] Repeat cold, warm, changed-source, failed-publication, and `--fresh` tests with complete
+- [x] Repeat cold, warm, changed-source, failed-publication, and `--fresh` tests with complete
       evidence.
-- [ ] Verify that stored source and LLVM reads do not rebuild the target or use current source
+- [x] Verify that stored source and LLVM reads do not rebuild the target or use current source
       bytes.
 
 The [narrow-show contract](show.md) owns the reference shape, availability, stage selection, and
