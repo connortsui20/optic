@@ -49,10 +49,12 @@ uses an isolated failing compiler shim, without changing installed components.
 | Normalized whole source, exact LLVM, old snapshots, and unsupported configurations reach callers. | API `tests/show.rs` and CLI `tests/e2e.rs`. | Added; runtime verification pending. |
 | Full-format evidence survives the complete cache journey. | API `tests/cache_journey.rs`. | Added; runtime verification pending. |
 
-All 109 records, store, and evidence tests pass together locally. The compiler-stage proof and full
-integration remain required before accepting this checkpoint.
+The accepted B revision is `ed164a3`. All 226 workspace tests and quality checks pass locally.
+[CI run 33997850037](https://github.com/connortsui20/optic/actions/runs/33997850037) passes quality,
+Linux tests, and macOS tests on that revision. Every B row above passes in the integrated suite.
+The stage proof runs both supported modes with the pinned compiler and matching LLVM 22.1.8.
 
 ## Checkpoint C
 
-Checkpoint C has not started. Its evidence will cover verified package archives, both installed CLI
+Checkpoint C starts from accepted B. Its evidence will cover verified package archives, both installed CLI
 hosts, the external library consumer, independent reviews, and the exact final CI revision.

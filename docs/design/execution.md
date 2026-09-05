@@ -2,7 +2,7 @@
 
 Implementation starts from `main` at `684991a` plus the CI commit `b18b658` on `ct/complete-mvp`.
 The approved specification is the plan at `15a4ccb`. Draft PR #17 carries the implementation.
-Checkpoint A is accepted at `0813fba`. Checkpoints B and C remain incomplete.
+Checkpoint A is accepted at `0813fba`. Checkpoint B is accepted at `ed164a3`. C remains incomplete.
 
 ## Ownership
 
@@ -64,7 +64,7 @@ messages. Keep the existing private driver protocol and extend its documented re
 - [x] Commit the pinned toolchain, standalone formatting check, CI timeouts, and contributor guide.
 - [x] Establish reproducible checks and the shared test harness.
 - [x] Implement and verify Checkpoint A on Linux and macOS.
-- [ ] Implement and verify narrow show with the final cache format.
+- [x] Implement and verify narrow show with the final cache format.
 - [ ] Verify packaged installation and external library use.
 - [ ] Resolve independent correctness and Rust-style reviews.
 - [ ] Merge the final verified MVP and reconcile planning status.
@@ -126,12 +126,10 @@ regular modules per mode and preserved effective codegen configuration. The
 Compiler handoffs `d98f141`, `76a0308`, and `6c74758` pass 65 compiler tests and quality checks in
 the worker. They are ready for integration and full process acceptance.
 
-These partial commits are not a validated B implementation and have not replaced the accepted A
-revision on the PR.
-
-The integrated B revision is now `ed164a3`. All 226 workspace tests, formatting, Clippy, and rustdoc
-pass locally. PR #17 runs both-host acceptance in
-[CI run 33997850037](https://github.com/connortsui20/optic/actions/runs/33997850037).
+The integrated B revision `ed164a3` passes all 226 workspace tests, formatting, Clippy, and rustdoc
+locally. PR #17 contains this revision. All jobs in
+[CI run 33997850037](https://github.com/connortsui20/optic/actions/runs/33997850037) pass, including
+Linux and macOS workspace tests. Checkpoint B is accepted, and C can start.
 
 ## Checkpoint C handoff
 
