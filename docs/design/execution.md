@@ -60,7 +60,7 @@ messages. Keep the existing private driver protocol and extend its documented re
 - [x] Create the integration branch with the existing CI commit.
 - [x] Allocate isolated compiler, storage, and testing worktrees.
 - [x] Commit the pinned toolchain, standalone formatting check, CI timeouts, and contributor guide.
-- [ ] Establish reproducible checks and the shared test harness.
+- [x] Establish reproducible checks and the shared test harness.
 - [ ] Implement and verify Checkpoint A on Linux and macOS.
 - [ ] Implement and verify narrow show with the final cache format.
 - [ ] Verify packaged installation and external library use.
@@ -73,15 +73,21 @@ The [acceptance evidence index](acceptance-evidence.md) maps claims to the ownin
 
 ## Current verification
 
-Rust 1.98.1 and its required components are installed locally. The existing six evidence-search
-unit tests pass on that toolchain. The new standalone-driver formatting check found two baseline
-formatting differences, which the compiler worker will include in its owned changes.
+Rust 1.98.1 and its required components are installed locally. The integrated revision `6d3b847`
+passes 148 workspace tests, standalone/workspace formatting, Clippy with warnings denied, and
+rustdoc with warnings denied. Draft PR #17 contains this revision. CI quality passes, with Linux
+and macOS workspace tests still running.
 
-The foundation CI run passed the existing tests on Linux and macOS. Its quality job failed on the
-two standalone-driver formatting differences. This is baseline evidence, not Checkpoint A evidence.
+The cache tests cover real selected-target and driver work counts, cold/warm/stale/forced requests,
+source/dependency/build-script changes, tracked environment, RUSTFLAGS, and A/B/A configuration
+transitions. A publication-failure test executes the newly compiled binary, proves the old capture
+remains searchable, and requires a new capture after restoring the old pointer.
 
-Validated analysis records, capture policy/outcome, CLI reuse output, shared fixtures, isolated child
-processes, and cache-journey tests are integrated locally. The focused records suite has 31 passing
-tests. The isolated helper test and focused Clippy checks also pass. The store worker delivered 37
-passing store tests with bounded records, candidate validation, and deterministic publication
-failures. Compiler integration and full cross-process cache verification remain in progress.
+The first integrated run exposed an overly strict test assertion. Cargo can rewrite its `.d`
+bookkeeping file on a fresh invocation. The corrected test preserves full stored-file metadata,
+target/build inventories and sizes, and the selected executable's modification time. Independent
+positive work counts still establish that warm reuse performs no compiler analysis.
+
+Real example/benchmark selection and invocation-subdirectory coverage are the final request-matrix
+additions before accepting A. No B implementation has started. Before C packaging, remove the
+compiler unit process tests' dependency on the unpublished helper from retained package tests.
