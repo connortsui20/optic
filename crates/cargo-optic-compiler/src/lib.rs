@@ -31,7 +31,6 @@ pub use prepared::prepare_build;
 
 mod collection;
 pub use collection::CollectedBuild;
-pub use collection::collect_build;
 
 mod artifacts;
 

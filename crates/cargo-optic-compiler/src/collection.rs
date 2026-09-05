@@ -15,9 +15,7 @@ use optic_records::LlvmCollection;
 use optic_records::LlvmProvenance;
 use tempfile::TempDir;
 
-use crate::BuildRequest;
 use crate::Error;
-use crate::Workspace;
 
 /// One successful Cargo build and the compiler evidence collected from its selected target.
 pub struct CollectedBuild {
@@ -87,17 +85,4 @@ impl CollectedBuild {
             self.temporary,
         ))
     }
-}
-
-/// Prepares and collects an explicit target with a newly generated analysis token.
-///
-/// # Errors
-///
-/// Returns the preparation or collection errors documented by [`crate::prepare_build`] and
-/// [`crate::PreparedBuild::collect`].
-pub fn collect_build(
-    workspace: &Workspace,
-    request: &BuildRequest,
-) -> Result<CollectedBuild, Error> {
-    crate::prepare_build(workspace, request)?.collect()
 }
