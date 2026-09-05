@@ -51,7 +51,7 @@ impl TestWorkspace {
         .unwrap();
         let root = tempfile::Builder::new()
             .prefix("optic-test-")
-            .tempdir()
+            .tempdir_in(fs::canonicalize(env::temp_dir()).unwrap())
             .unwrap();
 
         for directory in [
@@ -81,7 +81,7 @@ impl TestWorkspace {
 
     /// Returns the canonical workspace directory that contains the ordinary Optic store.
     pub fn workspace(&self) -> PathBuf {
-        fs::canonicalize(self.root.path().join("workspace")).unwrap()
+        self.root.path().join("workspace")
     }
 
     /// Returns the isolated Cargo home, including the driver cache.
