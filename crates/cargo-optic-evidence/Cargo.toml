@@ -1,9 +1,12 @@
 [package]
 name = "cargo-optic-evidence"
-version = "0.0.1"
-publish = false
+description = "Capture-scoped instance search and exact evidence selection for Cargo Optic"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
+rust-version.workspace = true
 
 [lib]
 name = "optic_evidence"
@@ -14,4 +17,5 @@ cargo-optic-store.workspace = true
 snafu.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile.workspace = true

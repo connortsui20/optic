@@ -1,14 +1,52 @@
-//! Searches the concrete compiler instances recorded for one capture.
+//! Searches concrete compiler instances and selects their stored source or LLVM evidence.
 //!
-//! Queries read only the explicitly selected capture. The store crate owns durable evidence.
+//! Queries read only the explicitly selected capture. [`find_instances`] supplies immutable
+//! references for [`source_evidence`] and [`llvm_evidence`]. The store validates durable records and
+//! artifact files, then copies the selected ranges through [`Store::copy_evidence`].
 
 use optic_records::CaptureId;
+use optic_records::InstanceManifest;
 use optic_records::InstanceRecord;
+use optic_records::InstanceRef;
 use optic_store::Store;
 use snafu::ResultExt;
 
 mod error;
 pub use error::Error;
+
+mod evidence_range;
+pub use evidence_range::EvidenceRange;
+
+mod source;
+pub use source::SourceEvidence;
+pub use source::source_evidence;
+
+mod llvm;
+pub use llvm::LlvmBody;
+pub use llvm::LlvmEvidence;
+pub use llvm::llvm_evidence;
+
+/// A search result with its immutable position in the selected capture.
+///
+/// Equal display names remain distinct instances. The reference belongs only to the exact capture
+/// and durable format that produced the record.
+#[derive(Clone, Debug)]
+pub struct FoundInstance {
+    reference: InstanceRef,
+    record: InstanceRecord,
+}
+
+impl FoundInstance {
+    /// Returns the reference for the instance's original manifest position.
+    pub fn reference(&self) -> &InstanceRef {
+        &self.reference
+    }
+
+    /// Returns the stored instance and its searchable names.
+    pub fn record(&self) -> &InstanceRecord {
+        &self.record
+    }
+}
 
 /// How a query matched its returned concrete compiler instances.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -28,7 +66,7 @@ pub struct FindResults {
     capture_id: CaptureId,
     match_kind: MatchKind,
     total_matches: usize,
-    instances: Vec<InstanceRecord>,
+    instances: Vec<FoundInstance>,
 }
 
 impl FindResults {
@@ -48,7 +86,7 @@ impl FindResults {
     }
 
     /// Returns the concrete compiler instances retained by the result limit.
-    pub fn instances(&self) -> &[InstanceRecord] {
+    pub fn instances(&self) -> &[FoundInstance] {
         &self.instances
     }
 
@@ -93,13 +131,16 @@ pub fn find_instances(
 
     let mut matches = instances
         .iter()
-        .filter(|instance| is_exact_match(instance, query))
+        // The ordinal identifies the instance. Enumerating after filtering or sorting changes it.
+        .enumerate()
+        .filter(|(_, instance)| is_exact_match(instance, query))
         .collect::<Vec<_>>();
     let match_kind = if matches.is_empty() {
         matches.extend(
             instances
                 .iter()
-                .filter(|instance| is_substring_match(instance, query)),
+                .enumerate()
+                .filter(|(_, instance)| is_substring_match(instance, query)),
         );
 
         MatchKind::Substring
@@ -107,7 +148,7 @@ pub fn find_instances(
         MatchKind::Exact
     };
 
-    matches.sort_by(|left, right| {
+    matches.sort_by(|(_, left), (_, right)| {
         left.display_name()
             .cmp(right.display_name())
             .then_with(|| {
@@ -123,7 +164,18 @@ pub fn find_instances(
             .then_with(|| left.raw_symbol().cmp(right.raw_symbol()))
     });
     let total_matches = matches.len();
-    let instances = matches.into_iter().take(limit).cloned().collect::<Vec<_>>();
+    let instances = matches
+        .into_iter()
+        .take(limit)
+        .map(|(ordinal, record)| FoundInstance {
+            reference: InstanceRef::new(
+                capture_id.clone(),
+                u64::try_from(ordinal)
+                    .expect("manifest positions fit in u64 on supported platforms"),
+            ),
+            record: record.clone(),
+        })
+        .collect::<Vec<_>>();
 
     Ok(FindResults {
         capture_id: capture_id.clone(),
@@ -143,6 +195,23 @@ fn is_substring_match(instance: &InstanceRecord, query: &str) -> bool {
     instance.definition().definition_path().contains(query)
         || instance.display_name().contains(query)
         || instance.raw_symbol().contains(query)
+}
+
+fn referenced_instance<'a>(
+    manifest: &'a InstanceManifest,
+    reference: &InstanceRef,
+) -> Result<&'a InstanceRecord, Error> {
+    let instance = usize::try_from(reference.ordinal())
+        .ok()
+        .and_then(|ordinal| manifest.instances().get(ordinal));
+
+    instance.ok_or_else(|| {
+        error::InvalidInstanceReferenceSnafu {
+            reference: reference.clone(),
+            instance_count: manifest.instances().len(),
+        }
+        .build()
+    })
 }
 
 #[cfg(test)]

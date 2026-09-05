@@ -1,9 +1,13 @@
 [package]
 name = "cargo-optic-compiler"
-version = "0.0.1"
-publish = false
+description = "Cargo freshness and exact-version compiler evidence collection for Cargo Optic"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+exclude = ["tests/**"]
 
 [lib]
 name = "optic_compiler"
@@ -11,5 +15,10 @@ name = "optic_compiler"
 [dependencies]
 cargo-optic-records.workspace = true
 cargo_metadata.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 snafu.workspace = true
 tempfile.workspace = true
+
+[dev-dependencies]
+cargo-optic-test-support = { path = "../cargo-optic-test-support" }

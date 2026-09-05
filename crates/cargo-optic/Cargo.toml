@@ -1,9 +1,13 @@
 [package]
 name = "cargo-optic"
-version = "0.0.1"
-publish = false
+description = "Capture concrete Rust instances and inspect their source and optimized LLVM"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+exclude = ["tests/**"]
 
 [dependencies]
 cargo-optic-api.workspace = true
@@ -12,4 +16,5 @@ snafu.workspace = true
 time.workspace = true
 
 [dev-dependencies]
+cargo-optic-test-support = { path = "../cargo-optic-test-support" }
 tempfile.workspace = true

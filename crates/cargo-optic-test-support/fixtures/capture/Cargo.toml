@@ -1,0 +1,38 @@
+[package]
+name = "capture_fixture"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+members = ["dependency"]
+
+[dependencies]
+fixture_dependency = { path = "dependency" }
+
+[features]
+default = ["ordinary"]
+ordinary = []
+gated = []
+
+[[bin]]
+name = "generic"
+path = "src/generic.rs"
+
+[[bin]]
+name = "feature-gated"
+path = "src/feature_gated.rs"
+required-features = ["gated"]
+
+[[example]]
+name = "selected_example"
+path = "examples/selected_example.rs"
+
+[[bench]]
+name = "selected_benchmark"
+path = "benches/selected_benchmark.rs"
+harness = false
+
+[profile.checked]
+inherits = "release"
+opt-level = 1
+debug-assertions = true

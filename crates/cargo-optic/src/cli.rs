@@ -8,6 +8,7 @@ use std::env;
 use std::io;
 use std::io::Write;
 
+use optic::CaptureOutcome;
 use optic::Optic;
 use snafu::ResultExt;
 use snafu::Snafu;
@@ -32,9 +33,13 @@ fn run_with_output(mut stdout: impl Write) -> Result<(), Error> {
     let optic = Optic::open(&directory)?;
 
     match command {
-        arguments::Command::Capture(request) => {
-            let capture = optic.capture(&request)?;
-            let output = CaptureOutput::new("Captured", &capture)?;
+        arguments::Command::Capture { request, policy } => {
+            let outcome = optic.capture(&request, policy)?;
+            let title = match &outcome {
+                CaptureOutcome::Captured(_) => "Captured",
+                CaptureOutcome::Reused(_) => "Reused",
+            };
+            let output = CaptureOutput::new(title, outcome.record())?;
 
             write!(stdout, "{output}").context(WriteSnafu)?;
         }
@@ -71,7 +76,7 @@ fn run_with_output(mut stdout: impl Write) -> Result<(), Error> {
                     writeln!(stdout).context(WriteSnafu)?;
                 }
 
-                let output = InstanceOutput::new(results.capture_id(), instance);
+                let output = InstanceOutput::new(instance);
                 write!(stdout, "{output}").context(WriteSnafu)?;
             }
 
@@ -85,6 +90,9 @@ fn run_with_output(mut stdout: impl Write) -> Result<(), Error> {
                 )
                 .context(WriteSnafu)?;
             }
+        }
+        arguments::Command::Show { instance, output } => {
+            crate::show::run(&optic, &instance, output, &mut stdout)?;
         }
     }
 
@@ -127,5 +135,16 @@ pub(crate) enum Error {
     Output {
         /// The output adapter error.
         source: crate::output::Error,
+    },
+
+    /// The reference is valid, but the requested captured evidence is unavailable.
+    #[snafu(display("{output} evidence for {instance} must be available, got {reason}"))]
+    EvidenceUnavailable {
+        /// The exact capture-scoped instance that the user selected.
+        instance: optic::InstanceRef,
+        /// The selected source or LLVM output form.
+        output: &'static str,
+        /// The stored support boundary or exact-symbol result.
+        reason: String,
     },
 }

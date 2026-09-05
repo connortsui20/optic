@@ -12,6 +12,7 @@ use serde::Serialize;
 use crate::DefinitionRecord;
 use crate::Error;
 use crate::PlacementRecord;
+use crate::SourceAvailability;
 use crate::error::InvalidFieldSnafu;
 use crate::validation::require_text;
 
@@ -23,6 +24,7 @@ pub struct InstanceRecord {
     display_name: String,
     raw_symbol: String,
     placements: Vec<PlacementRecord>,
+    source: SourceAvailability,
 }
 
 impl InstanceRecord {
@@ -37,6 +39,7 @@ impl InstanceRecord {
         display_name: impl Into<String>,
         raw_symbol: impl Into<String>,
         placements: Vec<PlacementRecord>,
+        source: SourceAvailability,
     ) -> Result<Self, Error> {
         let display_name = display_name.into();
         let raw_symbol = raw_symbol.into();
@@ -67,6 +70,7 @@ impl InstanceRecord {
             display_name,
             raw_symbol,
             placements,
+            source,
         })
     }
 
@@ -89,6 +93,11 @@ impl InstanceRecord {
     pub fn placements(&self) -> &[PlacementRecord] {
         &self.placements
     }
+
+    /// Returns the source relationship recorded once for this instance.
+    pub fn source(&self) -> &SourceAvailability {
+        &self.source
+    }
 }
 
 #[derive(Deserialize)]
@@ -98,6 +107,7 @@ struct RawInstanceRecord {
     display_name: String,
     raw_symbol: String,
     placements: Vec<PlacementRecord>,
+    source: SourceAvailability,
 }
 
 impl TryFrom<RawInstanceRecord> for InstanceRecord {
@@ -109,6 +119,7 @@ impl TryFrom<RawInstanceRecord> for InstanceRecord {
             instance.display_name,
             instance.raw_symbol,
             instance.placements,
+            instance.source,
         )
     }
 }

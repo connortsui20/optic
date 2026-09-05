@@ -119,6 +119,8 @@ impl BuildRequest {
 
     /// Enables the listed Cargo features.
     ///
+    /// Splits Cargo's comma and whitespace separators, removes duplicate features, and sorts names.
+    ///
     /// # Errors
     ///
     /// Returns an error when an explicitly selected feature name is empty.
@@ -127,7 +129,16 @@ impl BuildRequest {
             require_text("feature name", feature)?;
         }
 
-        self.features = features;
+        self.features = features
+            .iter()
+            .flat_map(|feature| {
+                feature.split(|character: char| character == ',' || character.is_whitespace())
+            })
+            .filter(|feature| !feature.is_empty())
+            .map(str::to_owned)
+            .collect();
+        self.features.sort();
+        self.features.dedup();
 
         Ok(self)
     }

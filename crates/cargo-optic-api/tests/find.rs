@@ -3,25 +3,25 @@
 //! These tests use the actual selected compiler because only rustc can establish monomorphization,
 //! placement, and raw-symbol behavior. Evidence remains scoped to the capture that produced it.
 
+mod common;
+
 use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
 
 use optic::BuildRequest;
+use optic::CapturePolicy;
 use optic::CaptureRecord;
 use optic::CargoTarget;
 use optic::Optic;
 
+use common::workspace_in_child;
+
 const FIRST_SCOPE: &str = "first_scope_kernel";
 const SECOND_SCOPE: &str = "second_scope_kernel";
-const FIXTURE_SOURCE: &str = include_str!("fixtures/find/main.rs");
+const FIXTURE_SOURCE: &str = include_str!("fixtures/find/src/main.rs");
 
 fn write_fixture(workspace: &Path, scoped_kernel: &str) {
-    fs::create_dir_all(workspace.join("src")).expect("the fixture source directory can be created");
-    fs::write(
-        workspace.join("Cargo.toml"),
-        "[package]\nname = \"find_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n",
-    )
-    .expect("the fixture manifest can be written");
     fs::write(
         workspace.join("src/main.rs"),
         FIXTURE_SOURCE.replace("SCOPED_KERNEL", scoped_kernel),
@@ -30,8 +30,8 @@ fn write_fixture(workspace: &Path, scoped_kernel: &str) {
 }
 
 struct CapturedFindFixture {
-    /// Keeps the captured workspace and its store alive for each test.
-    workspace: tempfile::TempDir,
+    /// Locates the workspace retained by the parent process.
+    workspace: PathBuf,
     /// The application handle bound to the temporary workspace.
     optic: Optic,
     /// The reusable request for captures before and after a source change.
@@ -41,10 +41,9 @@ struct CapturedFindFixture {
 }
 
 impl CapturedFindFixture {
-    fn new() -> Self {
-        let workspace = tempfile::tempdir().expect("the test workspace can be created");
-        write_fixture(workspace.path(), FIRST_SCOPE);
-        let optic = Optic::open(workspace.path()).expect("the fixture workspace can be opened");
+    fn new(workspace: PathBuf) -> Self {
+        write_fixture(&workspace, FIRST_SCOPE);
+        let optic = Optic::open(&workspace).expect("the fixture workspace can be opened");
         let request = BuildRequest::new(
             "find_fixture",
             CargoTarget::Binary("find_fixture".to_owned()),
@@ -52,8 +51,9 @@ impl CapturedFindFixture {
         )
         .expect("the fixture request is valid");
         let first = optic
-            .capture(&request)
-            .expect("the first generic fixture capture succeeds");
+            .capture(&request, CapturePolicy::Reuse)
+            .expect("the first generic fixture capture succeeds")
+            .into_record();
 
         Self {
             workspace,
@@ -66,7 +66,12 @@ impl CapturedFindFixture {
 
 #[test]
 fn finds_concrete_generic_instances() {
-    let fixture = CapturedFindFixture::new();
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/find");
+    let Some(workspace) = workspace_in_child("finds_concrete_generic_instances", fixture_path)
+    else {
+        return;
+    };
+    let fixture = CapturedFindFixture::new(workspace);
     let found = fixture
         .optic
         .find(fixture.first.id(), "find_fixture::generic_kernel", 100)
@@ -75,18 +80,25 @@ fn finds_concrete_generic_instances() {
     assert_eq!(found.capture_id(), fixture.first.id());
     assert_eq!(found.instances().len(), 2);
     assert_ne!(
-        found.instances()[0].display_name(),
-        found.instances()[1].display_name(),
+        found.instances()[0].record().display_name(),
+        found.instances()[1].record().display_name(),
     );
     assert_ne!(
-        found.instances()[0].raw_symbol(),
-        found.instances()[1].raw_symbol(),
+        found.instances()[0].record().raw_symbol(),
+        found.instances()[1].record().raw_symbol(),
     );
 }
 
 #[test]
 fn finds_nested_generics_and_canonical_trait_methods() {
-    let fixture = CapturedFindFixture::new();
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/find");
+    let Some(workspace) = workspace_in_child(
+        "finds_nested_generics_and_canonical_trait_methods",
+        fixture_path,
+    ) else {
+        return;
+    };
+    let fixture = CapturedFindFixture::new(workspace);
     let nested = fixture
         .optic
         .find(fixture.first.id(), "nested_kernel::chunk", 100)
@@ -107,12 +119,18 @@ fn finds_nested_generics_and_canonical_trait_methods() {
 
 #[test]
 fn isolates_instances_between_captures() {
-    let fixture = CapturedFindFixture::new();
-    write_fixture(fixture.workspace.path(), SECOND_SCOPE);
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/find");
+    let Some(workspace) = workspace_in_child("isolates_instances_between_captures", fixture_path)
+    else {
+        return;
+    };
+    let fixture = CapturedFindFixture::new(workspace);
+    write_fixture(&fixture.workspace, SECOND_SCOPE);
     let second = fixture
         .optic
-        .capture(&fixture.request)
-        .expect("the changed generic fixture capture succeeds");
+        .capture(&fixture.request, CapturePolicy::Reuse)
+        .expect("the changed generic fixture capture succeeds")
+        .into_record();
 
     assert!(
         !fixture

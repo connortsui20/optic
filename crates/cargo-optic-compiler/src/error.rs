@@ -6,6 +6,12 @@ use std::path::PathBuf;
 
 use snafu::Snafu;
 
+pub(crate) fn invalid_environment(message: impl Into<String>) -> Error {
+    Error::CompilerEnvironment {
+        message: message.into(),
+    }
+}
+
 /// Explains why selected-target compiler evidence could not be produced for a request.
 #[derive(Debug, Snafu)]
 #[non_exhaustive]

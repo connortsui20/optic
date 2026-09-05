@@ -7,9 +7,8 @@
 
 use std::fmt;
 
-use optic::CaptureId;
 use optic::CaptureRecord;
-use optic::InstanceRecord;
+use optic::FoundInstance;
 use snafu::ResultExt;
 use snafu::Snafu;
 use time::OffsetDateTime;
@@ -67,33 +66,35 @@ impl fmt::Display for CaptureOutput<'_> {
 
 /// A human-readable view of one concrete compiler instance.
 pub(crate) struct InstanceOutput<'a> {
-    /// The capture that contains the instance.
-    capture_id: &'a CaptureId,
-    /// The concrete compiler instance to render.
-    instance: &'a InstanceRecord,
+    /// The concrete compiler instance and its immutable reference.
+    found: &'a FoundInstance,
 }
 
 impl<'a> InstanceOutput<'a> {
-    pub(crate) fn new(capture_id: &'a CaptureId, instance: &'a InstanceRecord) -> Self {
-        Self {
-            capture_id,
-            instance,
-        }
+    pub(crate) fn new(found: &'a FoundInstance) -> Self {
+        Self { found }
     }
 }
 
 impl fmt::Display for InstanceOutput<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(formatter, "Instance {}", self.instance.display_name())?;
-        writeln!(formatter, "  Capture     {}", self.capture_id)?;
+        let instance = self.found.record();
+
+        writeln!(formatter, "Instance {}", instance.display_name())?;
+        writeln!(formatter, "  Reference   {}", self.found.reference())?;
+        writeln!(
+            formatter,
+            "  Capture     {}",
+            self.found.reference().capture_id()
+        )?;
         writeln!(
             formatter,
             "  Definition  {}",
-            self.instance.definition().definition_path()
+            instance.definition().definition_path()
         )?;
-        writeln!(formatter, "  Symbol      {}", self.instance.raw_symbol())?;
+        writeln!(formatter, "  Symbol      {}", instance.raw_symbol())?;
 
-        for placement in self.instance.placements() {
+        for placement in instance.placements() {
             writeln!(
                 formatter,
                 "  Placement   {}; linkage={}; visibility={}; local-copy={}; size={}",

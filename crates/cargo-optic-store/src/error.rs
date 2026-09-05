@@ -5,6 +5,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use optic_records::ArtifactId;
 use optic_records::CaptureId;
 use snafu::Snafu;
 
@@ -13,6 +14,84 @@ use snafu::Snafu;
 #[non_exhaustive]
 #[snafu(visibility(pub(crate)))]
 pub enum Error {
+    /// The caller's evidence writer failed after zero or more bytes reached it.
+    #[snafu(display("failed to write evidence"))]
+    WriteEvidence {
+        /// The caller-writer failure, distinct from stored-file read errors.
+        source: std::io::Error,
+    },
+
+    /// A requested artifact was not declared by the capture.
+    #[snafu(display("artifact must be declared by capture {capture}, got {}", artifact.value()))]
+    UnknownArtifact {
+        /// The requested capture.
+        capture: CaptureId,
+        /// The undeclared artifact ID.
+        artifact: ArtifactId,
+    },
+
+    /// A finite requested range extended beyond the artifact.
+    #[snafu(display("artifact {} range must fit within {byte_len} bytes, got start {start} and length {length}", artifact.value()))]
+    ArtifactRange {
+        /// The requested artifact.
+        artifact: ArtifactId,
+        /// The requested starting byte offset.
+        start: u64,
+        /// The requested length in bytes.
+        length: u64,
+        /// The declared and validated file length.
+        byte_len: u64,
+    },
+
+    /// An artifact file's actual length disagreed with its manifest.
+    #[snafu(display("artifact at {} must contain {expected} bytes, got {actual}", path.display()))]
+    ArtifactLength {
+        /// The invalid artifact file.
+        path: PathBuf,
+        /// The exact declared length.
+        expected: u64,
+        /// The observed file length.
+        actual: u64,
+    },
+
+    /// The Optic ignore file contained user configuration that initialization cannot replace.
+    #[snafu(display("Optic initialization requires `*` and a newline in {}, got different contents. Preserve or move this file before capture", path.display()))]
+    ConflictingIgnoreFile {
+        /// The existing ignore file that needs user attention.
+        path: PathBuf,
+    },
+
+    /// A store path was a symlink or had the wrong filesystem type.
+    #[snafu(display("store path must be a regular {expected}, got another file type at {}", path.display()))]
+    UnexpectedFileType {
+        /// The expected filesystem type.
+        expected: &'static str,
+        /// The rejected store path.
+        path: PathBuf,
+    },
+
+    /// Encoded durable data exceeded the shared reader and writer budget.
+    #[snafu(display("record at {} must contain at most {limit} encoded bytes, got {actual}", path.display()))]
+    RecordTooLarge {
+        /// The rejected record path.
+        path: PathBuf,
+        /// The maximum encoded length in bytes.
+        limit: u64,
+        /// The observed length or the first length known to exceed the limit.
+        actual: u64,
+    },
+
+    /// A candidate pointer used an unsupported revision or disagreed with its capture.
+    #[snafu(display("candidate at {} must match {expected}, got {actual}", path.display()))]
+    InvalidCandidate {
+        /// The rejected candidate pointer path.
+        path: PathBuf,
+        /// The required identity or format.
+        expected: String,
+        /// The rejected identity or format.
+        actual: String,
+    },
+
     /// The workspace root was not absolute.
     #[snafu(display("workspace root must be absolute, got {}", path.display()))]
     WorkspaceRootNotAbsolute {

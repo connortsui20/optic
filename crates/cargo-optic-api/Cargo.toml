@@ -1,9 +1,13 @@
 [package]
 name = "cargo-optic-api"
-version = "0.0.1"
-publish = false
+description = "Application API for Cargo Optic capture, search, and stored evidence"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+exclude = ["tests/**"]
 
 [lib]
 name = "optic"
@@ -17,4 +21,5 @@ cargo-optic-store.workspace = true
 snafu.workspace = true
 
 [dev-dependencies]
+cargo-optic-test-support = { path = "../cargo-optic-test-support" }
 tempfile.workspace = true

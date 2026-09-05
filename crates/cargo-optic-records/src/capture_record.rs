@@ -1,8 +1,9 @@
 //! Defines the complete durable entry published for one successful capture.
 //!
 //! [`CaptureRecord`] joins a stable [`CaptureId`], completion time, compiler identity, and a
-//! validated [`BuildRecord`]. Construction writes the current format version and canonical capture
-//! ID. Deserialization rejects versions that this crate does not understand.
+//! validated [`BuildRecord`]. Its [`CaptureAnalysis`] associates the evidence with one Cargo
+//! observation. Construction writes the current format version and canonical capture ID.
+//! Deserialization rejects versions that this crate does not understand.
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -10,6 +11,7 @@ use snafu::ensure;
 
 use crate::BuildRecord;
 use crate::CAPTURE_FORMAT_VERSION;
+use crate::CaptureAnalysis;
 use crate::CaptureId;
 use crate::CompilerIdentity;
 use crate::Error;
@@ -25,6 +27,7 @@ pub struct CaptureRecord {
     completed_at_unix_ms: u64,
     build: BuildRecord,
     compiler: CompilerIdentity,
+    analysis: CaptureAnalysis,
 }
 
 impl CaptureRecord {
@@ -34,6 +37,7 @@ impl CaptureRecord {
         completed_at_unix_ms: u64,
         build: BuildRecord,
         compiler: CompilerIdentity,
+        analysis: CaptureAnalysis,
     ) -> Self {
         Self {
             format_version: CAPTURE_FORMAT_VERSION,
@@ -41,6 +45,7 @@ impl CaptureRecord {
             completed_at_unix_ms,
             build,
             compiler,
+            analysis,
         }
     }
 
@@ -68,6 +73,11 @@ impl CaptureRecord {
     pub fn compiler(&self) -> &CompilerIdentity {
         &self.compiler
     }
+
+    /// Returns the analysis identity and Cargo artifact needed for freshness verification.
+    pub fn analysis(&self) -> &CaptureAnalysis {
+        &self.analysis
+    }
 }
 
 #[derive(Deserialize)]
@@ -79,6 +89,8 @@ struct RawCaptureRecord {
     build: BuildRecord,
     #[serde(default)]
     compiler: Option<CompilerIdentity>,
+    #[serde(default)]
+    analysis: Option<CaptureAnalysis>,
 }
 
 impl TryFrom<RawCaptureRecord> for CaptureRecord {
@@ -100,11 +112,20 @@ impl TryFrom<RawCaptureRecord> for CaptureRecord {
             }
             .build()
         })?;
+        let analysis = record.analysis.ok_or_else(|| {
+            InvalidFieldSnafu {
+                field: "analysis",
+                actual: "no value",
+            }
+            .build()
+        })?;
+
         Ok(Self::new(
             record.id,
             record.completed_at_unix_ms,
             record.build,
             compiler,
+            analysis,
         ))
     }
 }
