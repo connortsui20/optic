@@ -15,11 +15,12 @@ use rustc_middle::ty::TyCtxt;
 use rustc_span::FileName;
 
 use crate::manifest::ManifestWriter;
+use crate::protocol;
 
 pub(crate) enum Source {
     /// A checked whole-item range in a compiler-loaded snapshot.
     Available(SourceSpan),
-    /// Uses the nonzero availability codes defined by the shared private protocol.
+    /// Uses one of the unavailable source codes defined by the shared private protocol.
     Unavailable(u32),
 }
 
@@ -59,51 +60,51 @@ impl Snapshots {
         manifest: &mut ManifestWriter,
     ) -> io::Result<Source> {
         let Some(local) = instance.def_id().as_local() else {
-            return Ok(Source::Unavailable(1));
+            return Ok(Source::Unavailable(protocol::SOURCE_NONLOCAL));
         };
         if !matches!(instance.def, InstanceKind::Item(_)) {
-            return Ok(Source::Unavailable(3));
+            return Ok(Source::Unavailable(protocol::SOURCE_GENERATED));
         }
         let hir_id = tcx.local_def_id_to_hir_id(local);
         if matches!(tcx.hir_node(hir_id), Node::Synthetic) {
-            return Ok(Source::Unavailable(3));
+            return Ok(Source::Unavailable(protocol::SOURCE_GENERATED));
         }
 
         // `def_span` can end at the signature. HIR's whole-item span includes the function body.
         let span = tcx.hir_span_with_body(hir_id);
         if span.from_expansion() {
-            return Ok(Source::Unavailable(3));
+            return Ok(Source::Unavailable(protocol::SOURCE_GENERATED));
         }
         if span.is_dummy() || span.hi() < span.lo() {
-            return Ok(Source::Unavailable(4));
+            return Ok(Source::Unavailable(protocol::SOURCE_UNSUPPORTED_SPAN));
         }
 
         let source_map = tcx.sess.source_map();
         let file = source_map.lookup_source_file(span.lo());
         let last = source_map.lookup_source_file(span.hi());
         if file.start_pos != last.start_pos {
-            return Ok(Source::Unavailable(4));
+            return Ok(Source::Unavailable(protocol::SOURCE_UNSUPPORTED_SPAN));
         }
         let Some(text) = &file.src else {
-            return Ok(Source::Unavailable(2));
+            return Ok(Source::Unavailable(protocol::SOURCE_UNLOADED));
         };
         let FileName::Real(name) = &file.name else {
-            return Ok(Source::Unavailable(3));
+            return Ok(Source::Unavailable(protocol::SOURCE_GENERATED));
         };
         let Some(path) = name.local_path() else {
-            return Ok(Source::Unavailable(2));
+            return Ok(Source::Unavailable(protocol::SOURCE_UNLOADED));
         };
         let Ok(path) = fs::canonicalize(path) else {
-            return Ok(Source::Unavailable(4));
+            return Ok(Source::Unavailable(protocol::SOURCE_UNSUPPORTED_SPAN));
         };
         if !path.starts_with(&self.package_root) {
-            return Ok(Source::Unavailable(5));
+            return Ok(Source::Unavailable(protocol::SOURCE_OUTSIDE_PACKAGE));
         }
 
         let start = (span.lo() - file.start_pos).0 as usize;
         let end = (span.hi() - file.start_pos).0 as usize;
         if text.get(start..end).is_none() {
-            return Ok(Source::Unavailable(4));
+            return Ok(Source::Unavailable(protocol::SOURCE_UNSUPPORTED_SPAN));
         }
         let artifact = match self.files.get(&path) {
             Some(&(position, id)) => {

@@ -13,6 +13,8 @@ use rustc_session::config::LtoCli;
 use rustc_session::config::OptLevel;
 use rustc_target::spec::Target;
 
+use crate::protocol;
+
 /// The compiler source revision exercised by the retained-bitcode unit reproducer.
 const VERIFIED_COMMIT: &str = "48a229ceaefd4985c50990b14116b6d856af0985";
 
@@ -31,7 +33,7 @@ pub(crate) struct Configuration {
     pub(crate) linker_plugin: bool,
     /// The configured CGU count, independent of the actual regular module count.
     pub(crate) codegen_units: u32,
-    /// The private protocol's unsupported-configuration code, with zero for supported collection.
+    /// The LLVM-support code defined by the private protocol.
     pub(crate) unsupported: u32,
 }
 
@@ -51,24 +53,24 @@ pub(crate) fn configure(config: &mut Config, directory: &Path) -> io::Result<u32
         .or(target.default_codegen_backend.as_deref())
         .unwrap_or("llvm");
     let unsupported = if env!("OPTIC_RUSTC_COMMIT") != VERIFIED_COMMIT {
-        6
+        protocol::LLVM_UNSUPPORTED_UNVERIFIED_COMPILER
     } else if backend != "llvm" {
-        5
+        protocol::LLVM_UNSUPPORTED_OTHER_BACKEND
     } else if options.incremental.is_some() {
-        1
+        protocol::LLVM_UNSUPPORTED_INCREMENTAL
     } else if options.cg.linker_plugin_lto.enabled() {
-        4
+        protocol::LLVM_UNSUPPORTED_LINKER_PLUGIN
     } else if target.requires_lto
         || matches!(options.cg.lto, LtoCli::Yes | LtoCli::NoParam | LtoCli::Fat)
     {
-        3
+        protocol::LLVM_UNSUPPORTED_FAT
     } else if matches!(options.cg.lto, LtoCli::Thin) {
-        2
+        protocol::LLVM_UNSUPPORTED_CROSS_CRATE_THIN
     } else {
-        0
+        protocol::LLVM_SUPPORTED
     };
 
-    if unsupported == 0 {
+    if unsupported == protocol::LLVM_SUPPORTED {
         std::fs::create_dir(directory)?;
         config.opts.cg.save_temps = true;
         config.opts.unstable_opts.temps_dir = Some(
@@ -86,13 +88,15 @@ impl Configuration {
     pub(crate) fn observed(compiler: &Compiler, unsupported: u32) -> io::Result<Self> {
         let session = &compiler.sess;
         let lto = match session.lto() {
-            Lto::No => 0,
-            Lto::ThinLocal => 1,
-            Lto::Thin => 2,
-            Lto::Fat => 3,
+            Lto::No => protocol::LTO_OFF,
+            Lto::ThinLocal => protocol::LTO_LOCAL_THIN,
+            Lto::Thin => protocol::LTO_CROSS_CRATE_THIN,
+            Lto::Fat => protocol::LTO_FAT,
         };
         let backend = compiler.codegen_backend.name().to_owned();
-        if unsupported == 0 && (backend != "llvm" || lto > 1) {
+        if unsupported == protocol::LLVM_SUPPORTED
+            && (backend != "llvm" || !matches!(lto, protocol::LTO_OFF | protocol::LTO_LOCAL_THIN))
+        {
             return Err(io::Error::other(
                 "retained LLVM requires the supported backend and LTO mode",
             ));
@@ -128,14 +132,10 @@ impl Configuration {
     /// [No LTO]: https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/compiler/rustc_codegen_ssa/src/back/write.rs#L819-L840
     /// [Local ThinLTO]: https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/compiler/rustc_codegen_llvm/src/back/lto.rs#L778-L782
     pub(crate) fn extension(&self) -> Option<&'static str> {
-        if self.unsupported != 0 {
-            return None;
+        match (self.unsupported, self.lto) {
+            (protocol::LLVM_SUPPORTED, protocol::LTO_OFF) => Some("bc"),
+            (protocol::LLVM_SUPPORTED, protocol::LTO_LOCAL_THIN) => Some("thin-lto-after-pm.bc"),
+            _ => None,
         }
-
-        Some(if self.lto == 0 {
-            "bc"
-        } else {
-            "thin-lto-after-pm.bc"
-        })
     }
 }

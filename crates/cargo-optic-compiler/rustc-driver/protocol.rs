@@ -13,10 +13,8 @@
 //! string = byte-length u32, UTF-8 bytes
 //! ```
 //!
-//! Booleans use zero or one. LTO uses 0=off, 1=local thin, 2=cross-crate thin, 3=fat. Unsupported
-//! uses 0=supported, 1=incremental, 2=cross-crate thin, 3=fat, 4=linker plugin, 5=other backend,
-//! 6=unverified compiler. Source availability uses 0=available with the bracketed fields,
-//! 1=nonlocal, 2=unloaded, 3=generated, 4=unsupported span, 5=outside package.
+//! Booleans use zero or one. The named source-availability, LTO, and LLVM-support constants define
+//! the other field codes. Only [`SOURCE_AVAILABLE`] includes the bracketed source fields.
 //!
 //! Source files use `artifact-<16-lowercase-hex-id>` in the attempt directory. Module paths come
 //! from rustc's output naming API and must name immediate files in the attempt's `llvm` directory.
@@ -41,6 +39,43 @@ pub(crate) const CONFIGURATION_RECORD: u32 = 2;
 pub(crate) const SOURCE_FILE_RECORD: u32 = 3;
 /// Declares one expected regular codegen unit, including units with no function placements.
 pub(crate) const MODULE_RECORD: u32 = 4;
+
+/// Includes a whole-item range in a compiler-loaded source snapshot.
+pub(crate) const SOURCE_AVAILABLE: u32 = 0;
+/// Identifies a definition outside the selected crate.
+pub(crate) const SOURCE_NONLOCAL: u32 = 1;
+/// Indicates that the compiler has no loaded source text or local path.
+pub(crate) const SOURCE_UNLOADED: u32 = 2;
+/// Identifies generated, synthetic, or macro-expanded source.
+pub(crate) const SOURCE_GENERATED: u32 = 3;
+/// Indicates that the span cannot identify one valid local source range.
+pub(crate) const SOURCE_UNSUPPORTED_SPAN: u32 = 4;
+/// Identifies a source path outside the canonical selected package root.
+pub(crate) const SOURCE_OUTSIDE_PACKAGE: u32 = 5;
+
+/// Indicates that the compiler performs neither local nor cross-crate LTO.
+pub(crate) const LTO_OFF: u32 = 0;
+/// Identifies ThinLTO within the selected crate.
+pub(crate) const LTO_LOCAL_THIN: u32 = 1;
+/// Identifies ThinLTO across crates.
+pub(crate) const LTO_CROSS_CRATE_THIN: u32 = 2;
+/// Identifies fat LTO.
+pub(crate) const LTO_FAT: u32 = 3;
+
+/// Selects the verified optimized-LLVM collection recipe.
+pub(crate) const LLVM_SUPPORTED: u32 = 0;
+/// Excludes incremental compilation from optimized-LLVM collection.
+pub(crate) const LLVM_UNSUPPORTED_INCREMENTAL: u32 = 1;
+/// Excludes cross-crate ThinLTO from optimized-LLVM collection.
+pub(crate) const LLVM_UNSUPPORTED_CROSS_CRATE_THIN: u32 = 2;
+/// Excludes fat LTO from optimized-LLVM collection.
+pub(crate) const LLVM_UNSUPPORTED_FAT: u32 = 3;
+/// Excludes linker-plugin LTO from optimized-LLVM collection.
+pub(crate) const LLVM_UNSUPPORTED_LINKER_PLUGIN: u32 = 4;
+/// Identifies a backend other than LLVM.
+pub(crate) const LLVM_UNSUPPORTED_OTHER_BACKEND: u32 = 5;
+/// Identifies a compiler whose optimized-artifact mapping has not been verified.
+pub(crate) const LLVM_UNSUPPORTED_UNVERIFIED_COMPILER: u32 = 6;
 
 /// Versions the verified optimized-artifact collection recipe independently of the wire format.
 pub(crate) const LLVM_RECIPE_REVISION: u32 = 1;

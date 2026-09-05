@@ -91,7 +91,7 @@ impl ManifestWriter {
             ))
         })?)?;
         if let Source::Available(span) = source {
-            self.write_u32(0)?;
+            self.write_u32(crate::protocol::SOURCE_AVAILABLE)?;
             self.write_u64(span.artifact)?;
             self.write_u64(span.start)?;
             self.write_u64(span.length)?;

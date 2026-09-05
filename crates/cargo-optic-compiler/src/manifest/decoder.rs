@@ -27,6 +27,7 @@ use super::InstanceKey;
 use super::InstancePlacements;
 use super::PlacementsByInstance;
 use crate::Error;
+use crate::protocol;
 use crate::protocol::CONFIGURATION_RECORD;
 use crate::protocol::END_RECORD;
 use crate::protocol::MANIFEST_MAGIC;
@@ -149,10 +150,10 @@ impl<R: Read> ManifestDecoder<R> {
         let target = self.read_string("effective target")?;
         let optimization = self.read_string("optimization level")?;
         let lto = match self.read_u32("effective LTO")? {
-            0 => LlvmLto::Off,
-            1 => LlvmLto::LocalThin,
-            2 => LlvmLto::CrossCrateThin,
-            3 => LlvmLto::Fat,
+            protocol::LTO_OFF => LlvmLto::Off,
+            protocol::LTO_LOCAL_THIN => LlvmLto::LocalThin,
+            protocol::LTO_CROSS_CRATE_THIN => LlvmLto::CrossCrateThin,
+            protocol::LTO_FAT => LlvmLto::Fat,
             actual => {
                 return Err(
                     self.invalid(format!("LTO must be a known protocol code, got {actual}"))
@@ -169,13 +170,23 @@ impl<R: Read> ManifestDecoder<R> {
             )));
         }
         let unsupported = match self.read_u32("unsupported LLVM configuration")? {
-            0 => None,
-            1 => Some(UnsupportedLlvmConfiguration::Incremental),
-            2 => Some(UnsupportedLlvmConfiguration::CrossCrateThinLto),
-            3 => Some(UnsupportedLlvmConfiguration::FatLto),
-            4 => Some(UnsupportedLlvmConfiguration::LinkerPluginLto),
-            5 => Some(UnsupportedLlvmConfiguration::OtherBackend),
-            6 => Some(UnsupportedLlvmConfiguration::UnverifiedCompiler),
+            protocol::LLVM_SUPPORTED => None,
+            protocol::LLVM_UNSUPPORTED_INCREMENTAL => {
+                Some(UnsupportedLlvmConfiguration::Incremental)
+            }
+            protocol::LLVM_UNSUPPORTED_CROSS_CRATE_THIN => {
+                Some(UnsupportedLlvmConfiguration::CrossCrateThinLto)
+            }
+            protocol::LLVM_UNSUPPORTED_FAT => Some(UnsupportedLlvmConfiguration::FatLto),
+            protocol::LLVM_UNSUPPORTED_LINKER_PLUGIN => {
+                Some(UnsupportedLlvmConfiguration::LinkerPluginLto)
+            }
+            protocol::LLVM_UNSUPPORTED_OTHER_BACKEND => {
+                Some(UnsupportedLlvmConfiguration::OtherBackend)
+            }
+            protocol::LLVM_UNSUPPORTED_UNVERIFIED_COMPILER => {
+                Some(UnsupportedLlvmConfiguration::UnverifiedCompiler)
+            }
             actual => {
                 return Err(self.invalid(format!(
                     "unsupported configuration must be a known protocol code, got {actual}"
@@ -197,7 +208,7 @@ impl<R: Read> ManifestDecoder<R> {
 
     fn read_source(&mut self) -> Result<SourceAvailability, Error> {
         let reason = match self.read_u32("source availability")? {
-            0 => {
+            protocol::SOURCE_AVAILABLE => {
                 let artifact = ArtifactId::new(self.read_u64("source artifact")?);
                 let start = self.read_u64("source start")?;
                 let length = self.read_u64("source length")?;
@@ -211,11 +222,11 @@ impl<R: Read> ManifestDecoder<R> {
                     line,
                 )?));
             }
-            1 => SourceUnavailable::Nonlocal,
-            2 => SourceUnavailable::Unloaded,
-            3 => SourceUnavailable::Generated,
-            4 => SourceUnavailable::UnsupportedSpan,
-            5 => SourceUnavailable::OutsidePackage,
+            protocol::SOURCE_NONLOCAL => SourceUnavailable::Nonlocal,
+            protocol::SOURCE_UNLOADED => SourceUnavailable::Unloaded,
+            protocol::SOURCE_GENERATED => SourceUnavailable::Generated,
+            protocol::SOURCE_UNSUPPORTED_SPAN => SourceUnavailable::UnsupportedSpan,
+            protocol::SOURCE_OUTSIDE_PACKAGE => SourceUnavailable::OutsidePackage,
             actual => {
                 return Err(self.invalid(format!(
                     "source availability must be a known protocol code, got {actual}"
