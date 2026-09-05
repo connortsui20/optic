@@ -17,6 +17,7 @@ fn each_precommit_failure_keeps_old_evidence_readable() {
     for boundary in [
         PublicationBoundary::CaptureWrite,   // First staged record write.
         PublicationBoundary::InstancesWrite, // Second staged record write.
+        PublicationBoundary::ArtifactCopy,   // Declared artifact copying.
         PublicationBoundary::PointerWrite,   // Staged pointer write.
         PublicationBoundary::PointerReplace, // Pointer installation.
         PublicationBoundary::CaptureRename,  // Final capture commit.
@@ -35,7 +36,9 @@ fn each_precommit_failure_keeps_old_evidence_readable() {
         let old_pointer = fs::read(&pointer).unwrap();
         store.publication_failure = Some(boundary);
 
-        store.publish(&newer, &manifest(newer.id())).unwrap_err();
+        store
+            .publish(&newer, &manifest(newer.id()), &store.root)
+            .unwrap_err();
         assert_eq!(
             store.list_captures().unwrap(),
             vec![older.clone()],
@@ -72,7 +75,7 @@ fn each_precommit_failure_keeps_old_evidence_readable() {
                 store
                     .read_candidate(older.analysis().request_key())
                     .unwrap(),
-                Some(older.clone())
+                Some((older.clone(), manifest(older.id())))
             );
         }
 
@@ -81,7 +84,7 @@ fn each_precommit_failure_keeps_old_evidence_readable() {
         publish_capture(&store, &next);
         assert_eq!(
             store.read_candidate(next.analysis().request_key()).unwrap(),
-            Some(next.clone())
+            Some((next.clone(), manifest(next.id())))
         );
         assert_eq!(store.list_captures().unwrap(), vec![next, older]);
     }
@@ -97,12 +100,14 @@ fn obstructed_staging_preserves_the_old_candidate() {
     let staging = store.root.join("staging").join(newer.id().as_str());
     fs::write(&staging, b"obstruction").unwrap();
 
-    store.publish(&newer, &manifest(newer.id())).unwrap_err();
+    store
+        .publish(&newer, &manifest(newer.id()), &store.root)
+        .unwrap_err();
     assert_eq!(
         store
             .read_candidate(older.analysis().request_key())
             .unwrap(),
-        Some(older.clone())
+        Some((older.clone(), manifest(older.id())))
     );
     assert_eq!(store.list_captures().unwrap(), vec![older.clone()]);
     assert_eq!(
@@ -123,7 +128,9 @@ fn obstructed_pointer_replacement_does_not_publish_a_capture() {
     fs::remove_file(&pointer).unwrap();
     fs::create_dir(&pointer).unwrap();
 
-    store.publish(&newer, &manifest(newer.id())).unwrap_err();
+    store
+        .publish(&newer, &manifest(newer.id()), &store.root)
+        .unwrap_err();
     assert_eq!(store.list_captures().unwrap(), vec![older.clone()]);
     assert_eq!(store.read_capture(older.id()).unwrap(), older);
     assert_eq!(
@@ -148,7 +155,7 @@ fn rejects_symlinked_publication_namespaces() {
         let capture = record("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzy", 1_000);
 
         store
-            .publish(&capture, &manifest(capture.id()))
+            .publish(&capture, &manifest(capture.id()), &store.root)
             .unwrap_err();
         assert_eq!(fs::read_dir(outside).unwrap().count(), 0);
     }

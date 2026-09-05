@@ -2,6 +2,7 @@
 //!
 //! Valid and corrupt layouts cover staging, visibility, identity, and decoding failures.
 
+mod artifacts;
 mod bounds;
 mod candidates;
 mod initialization;
@@ -85,13 +86,35 @@ fn analysis(completed_at_unix_ms: u64) -> CaptureAnalysis {
 }
 
 fn manifest(id: &CaptureId) -> InstanceManifest {
-    InstanceManifest::new(id.clone(), Vec::new()).expect("the fixture instance manifest is valid")
+    InstanceManifest::new(
+        id.clone(),
+        Vec::new(),
+        Vec::new(),
+        provenance(),
+        optic_records::LlvmCollection::Collected(vec![]),
+    )
+    .expect("the fixture instance manifest is valid")
+}
+
+fn provenance() -> optic_records::LlvmProvenance {
+    optic_records::LlvmProvenance::new(
+        "llvm",
+        Some("22.1.0".into()),
+        "x86_64-unknown-linux-gnu",
+        "3",
+        optic_records::LlvmLto::Off,
+        false,
+        false,
+        16,
+        1,
+    )
+    .unwrap()
 }
 
 #[track_caller]
 fn publish_capture(store: &Store, capture: &CaptureRecord) {
     store
-        .publish(capture, &manifest(capture.id()))
+        .publish(capture, &manifest(capture.id()), &store.root)
         .expect("the capture can be published");
 }
 
@@ -127,7 +150,7 @@ fn publishes_and_reads_the_capture_and_instances_together() {
     let instances = manifest(capture.id());
 
     store
-        .publish(&capture, &instances)
+        .publish(&capture, &instances, &store.root)
         .expect("the complete capture can be published");
 
     let completed = store.root.join("captures").join(capture.id().as_str());
@@ -187,7 +210,7 @@ fn rejects_a_duplicate_capture_id() {
     publish_capture(&store, &capture);
 
     let error = store
-        .publish(&capture, &manifest(capture.id()))
+        .publish(&capture, &manifest(capture.id()), &store.root)
         .expect_err("the duplicate capture ID must be rejected");
 
     assert!(matches!(
@@ -226,7 +249,7 @@ fn rejects_records_for_different_captures_before_staging() {
     let instances = manifest(&manifest_id);
 
     let error = store
-        .publish(&capture, &instances)
+        .publish(&capture, &instances, &store.root)
         .expect_err("records for different captures must be rejected");
 
     assert!(matches!(
@@ -482,7 +505,7 @@ fn failed_publication_leaves_no_completed_capture() {
     fs::create_dir_all(&staging).expect("the conflicting staging directory can be created");
 
     store
-        .publish(&capture, &manifest(capture.id()))
+        .publish(&capture, &manifest(capture.id()), &store.root)
         .expect_err("the staging collision must fail publication");
 
     assert!(

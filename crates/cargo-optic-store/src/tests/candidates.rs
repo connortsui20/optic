@@ -4,6 +4,7 @@
 
 use std::fs;
 
+use super::manifest;
 use super::publish_capture;
 use super::record;
 use crate::CAPTURE_FILE_NAME;
@@ -25,10 +26,16 @@ fn replaces_the_candidate_without_rewriting_history() {
         .unwrap()
         .join(CAPTURE_FILE_NAME);
     let original_header = fs::read(&header_path).unwrap();
-    assert_eq!(store.read_candidate(key).unwrap(), Some(older.clone()));
+    assert_eq!(
+        store.read_candidate(key).unwrap(),
+        Some((older.clone(), manifest(older.id())))
+    );
 
     publish_capture(&store, &newer);
-    assert_eq!(store.read_candidate(key).unwrap(), Some(newer.clone()));
+    assert_eq!(
+        store.read_candidate(key).unwrap(),
+        Some((newer.clone(), manifest(newer.id())))
+    );
     assert_eq!(store.read_capture(older.id()).unwrap(), older);
     assert!(
         store
@@ -57,13 +64,13 @@ fn keeps_independent_candidates_for_different_request_keys() {
         store
             .read_candidate(first.analysis().request_key())
             .unwrap(),
-        Some(first.clone())
+        Some((first.clone(), manifest(first.id())))
     );
     assert_eq!(
         store
             .read_candidate(second.analysis().request_key())
             .unwrap(),
-        Some(second.clone())
+        Some((second.clone(), manifest(second.id())))
     );
     assert_eq!(store.list_captures().unwrap(), vec![second, first]);
 }

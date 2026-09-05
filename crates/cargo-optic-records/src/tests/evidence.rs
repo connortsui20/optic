@@ -192,6 +192,19 @@ fn rejects_invalid_graphs_and_provenance_on_deserialization() {
             serde_json::json!("local_thin_lto_post_pass_manager"),
         ), // Wrong stage.
         ("/llvm_provenance/backend", serde_json::json!("")), // Missing backend.
+        (
+            "/llvm_provenance/backend",
+            serde_json::json!("another-backend"),
+        ), // Unsupported backend.
+        (
+            "/llvm_provenance/lto",
+            serde_json::json!("cross_crate_thin"),
+        ), // Unsupported cross-crate ThinLTO.
+        ("/llvm_provenance/lto", serde_json::json!("fat")), // Unsupported fat LTO.
+        (
+            "/llvm_provenance/linker_plugin_lto",
+            serde_json::json!(true),
+        ), // Unsupported linker-plugin LTO.
         ("/llvm_provenance/llvm_version", serde_json::json!(null)), // Missing collected LLVM identity.
         ("/llvm_provenance/optimization", serde_json::json!("fast")), // Unknown optimization.
         ("/llvm_provenance/codegen_units", serde_json::json!(0)),   // Invalid CGUs.

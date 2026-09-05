@@ -5,6 +5,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use optic_records::ArtifactId;
 use optic_records::CaptureId;
 use snafu::Snafu;
 
@@ -13,6 +14,46 @@ use snafu::Snafu;
 #[non_exhaustive]
 #[snafu(visibility(pub(crate)))]
 pub enum Error {
+    /// The caller's evidence writer failed after zero or more bytes reached it.
+    #[snafu(display("failed to write evidence"))]
+    WriteEvidence {
+        /// The caller-writer failure, distinct from stored-file read errors.
+        source: std::io::Error,
+    },
+
+    /// A requested artifact was not declared by the capture.
+    #[snafu(display("artifact must be declared by capture {capture}, got {}", artifact.value()))]
+    UnknownArtifact {
+        /// The requested capture.
+        capture: CaptureId,
+        /// The undeclared artifact ID.
+        artifact: ArtifactId,
+    },
+
+    /// A finite requested range extended beyond the artifact.
+    #[snafu(display("artifact {} range must fit within {byte_len} bytes, got start {start} and length {length}", artifact.value()))]
+    ArtifactRange {
+        /// The requested artifact.
+        artifact: ArtifactId,
+        /// The requested starting byte offset.
+        start: u64,
+        /// The requested length in bytes.
+        length: u64,
+        /// The declared and validated file length.
+        byte_len: u64,
+    },
+
+    /// An artifact file's actual length disagreed with its manifest.
+    #[snafu(display("artifact at {} must contain {expected} bytes, got {actual}", path.display()))]
+    ArtifactLength {
+        /// The invalid artifact file.
+        path: PathBuf,
+        /// The exact declared length.
+        expected: u64,
+        /// The observed file length.
+        actual: u64,
+    },
+
     /// The Optic ignore file contained user configuration that initialization cannot replace.
     #[snafu(display("Optic initialization requires `*` and a newline in {}, got different contents. Preserve or move this file before capture", path.display()))]
     ConflictingIgnoreFile {

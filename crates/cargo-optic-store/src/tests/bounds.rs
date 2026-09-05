@@ -116,7 +116,7 @@ fn oversized_capture_output_preserves_the_old_candidate() {
     let oversized: CaptureRecord = serde_json::from_value(oversized).unwrap();
 
     assert!(matches!(
-        store.publish(&oversized, &manifest(newer.id())),
+        store.publish(&oversized, &manifest(newer.id()), &store.root),
         Err(Error::RecordTooLarge {
             limit: MAX_HEADER_BYTES,
             ..
@@ -126,7 +126,7 @@ fn oversized_capture_output_preserves_the_old_candidate() {
         store
             .read_candidate(older.analysis().request_key())
             .unwrap(),
-        Some(older.clone())
+        Some((older.clone(), manifest(older.id())))
     );
     assert_eq!(store.list_captures().unwrap(), vec![older.clone()]);
     assert_eq!(store.read_capture(older.id()).unwrap(), older);
@@ -144,12 +144,20 @@ fn oversized_instance_output_preserves_the_old_candidate() {
         "x".repeat(MAX_INSTANCES_BYTES as usize),
         "_Rkernel",
         vec![PlacementRecord::new("cgu.0", "External", "Default", false, 1).unwrap()],
+        optic_records::SourceAvailability::Unavailable(optic_records::SourceUnavailable::Nonlocal),
     )
     .unwrap();
-    let oversized = InstanceManifest::new(newer.id().clone(), vec![instance]).unwrap();
+    let oversized = InstanceManifest::new(
+        newer.id().clone(),
+        vec![instance],
+        vec![],
+        super::provenance(),
+        optic_records::LlvmCollection::Collected(vec![]),
+    )
+    .unwrap();
 
     assert!(matches!(
-        store.publish(&newer, &oversized),
+        store.publish(&newer, &oversized, &store.root),
         Err(Error::RecordTooLarge {
             limit: MAX_INSTANCES_BYTES,
             ..
@@ -159,7 +167,7 @@ fn oversized_instance_output_preserves_the_old_candidate() {
         store
             .read_candidate(older.analysis().request_key())
             .unwrap(),
-        Some(older.clone())
+        Some((older.clone(), manifest(older.id())))
     );
     assert_eq!(store.list_captures().unwrap(), vec![older.clone()]);
     assert_eq!(

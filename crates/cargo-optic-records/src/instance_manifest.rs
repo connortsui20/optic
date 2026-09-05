@@ -199,56 +199,61 @@ fn validate_llvm(
     provenance: &LlvmProvenance,
     llvm: &LlvmCollection,
 ) -> Result<(), Error> {
+    let collected = match llvm {
+        LlvmCollection::NotCaptured(_) => &[][..],
+        LlvmCollection::Collected(collected) => {
+            if provenance.backend() != "llvm"
+                || provenance.llvm_version().is_none()
+                || provenance.incremental()
+                || provenance.linker_plugin_lto()
+                || !matches!(provenance.lto(), LlvmLto::Off | LlvmLto::LocalThin)
+            {
+                return InvalidFieldSnafu {
+                    field: "LLVM collection",
+                    actual: "collected modules with an unsupported configuration",
+                }
+                .fail();
+            }
+
+            collected.as_slice()
+        }
+    };
+
     let mut modules = HashSet::new();
     let mut module_artifacts = HashSet::new();
-    if let LlvmCollection::Collected(collected) = llvm {
-        if provenance.backend() != "llvm"
-            || provenance.llvm_version().is_none()
-            || provenance.incremental()
-            || provenance.linker_plugin_lto()
-            || !matches!(provenance.lto(), LlvmLto::Off | LlvmLto::LocalThin)
+    for module in collected {
+        if !modules.insert(module.compiler_module()) || !module_artifacts.insert(module.artifact())
         {
             return InvalidFieldSnafu {
-                field: "LLVM collection",
-                actual: "collected modules with an unsupported configuration",
+                field: "LLVM modules",
+                actual: "duplicate module identity or artifact",
             }
             .fail();
         }
-        for module in collected {
-            if !modules.insert(module.compiler_module())
-                || !module_artifacts.insert(module.artifact())
-            {
-                return InvalidFieldSnafu {
-                    field: "LLVM modules",
-                    actual: "duplicate module identity or artifact",
-                }
-                .fail();
+        if !matches!(
+            (module.stage(), provenance.lto()),
+            (LlvmStage::NoLtoOptimized, LlvmLto::Off)
+                | (LlvmStage::LocalThinLtoPostPassManager, LlvmLto::LocalThin)
+        ) {
+            return InvalidFieldSnafu {
+                field: "LLVM module stage",
+                actual: "a stage that disagrees with effective LTO",
             }
-            let expected_stage = match provenance.lto() {
-                LlvmLto::Off => LlvmStage::NoLtoOptimized,
-                _ => LlvmStage::LocalThinLtoPostPassManager,
-            };
-            if module.stage() != expected_stage {
-                return InvalidFieldSnafu {
-                    field: "LLVM module stage",
-                    actual: "a stage that disagrees with effective LTO",
-                }
-                .fail();
-            }
+            .fail();
+        }
+        validate_artifact_range(
+            artifacts,
+            module.artifact(),
+            ArtifactKind::Llvm,
+            ByteRange::new(0, 0)?,
+        )?;
+        for definition in module.definitions() {
             validate_artifact_range(
                 artifacts,
                 module.artifact(),
                 ArtifactKind::Llvm,
-                ByteRange::new(0, 0)?,
+                definition.range(),
             )?;
-            for definition in module.definitions() {
-                validate_artifact_range(
-                    artifacts,
-                    module.artifact(),
-                    ArtifactKind::Llvm,
-                    definition.range(),
-                )?;
-            }
         }
     }
     for artifact in artifacts.values() {

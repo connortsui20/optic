@@ -18,6 +18,7 @@ use crate::INSTANCES_FILE_NAME;
 use crate::MAX_HEADER_BYTES;
 use crate::MAX_INSTANCES_BYTES;
 use crate::Store;
+use crate::artifacts::validate_artifacts;
 use crate::captures::read_capture_from_directory;
 use crate::captures::validate_capture_scope;
 use crate::error::InvalidCandidateSnafu;
@@ -48,16 +49,20 @@ impl CandidatePointer {
 }
 
 impl Store {
-    /// Returns the candidate only after its header and complete instance manifest pass validation.
+    /// Returns the candidate and manifest after record and artifact validation.
     ///
     /// An absent pointer or referenced capture directory returns `None`. This operation does not
     /// change store state or establish Cargo freshness.
+    /// The returned manifest retains stored LLVM unavailability without requiring another read.
     ///
     /// # Errors
     ///
     /// Returns an error for present malformed, oversized, incompatible, or inconsistent records,
     /// symlinks, wrong file types, and filesystem failures.
-    pub fn read_candidate(&self, key: &CaptureKey) -> Result<Option<CaptureRecord>, Error> {
+    pub fn read_candidate(
+        &self,
+        key: &CaptureKey,
+    ) -> Result<Option<(CaptureRecord, InstanceManifest)>, Error> {
         if !self.namespace_exists("candidates")? {
             return Ok(None);
         }
@@ -115,8 +120,9 @@ impl Store {
         let instances_path = directory.join(INSTANCES_FILE_NAME);
         let instances: InstanceManifest = read_record(&instances_path, MAX_INSTANCES_BYTES)?;
         validate_capture_scope(&instances_path, capture.id(), instances.capture_id())?;
+        validate_artifacts(&directory, &instances)?;
 
-        Ok(Some(capture))
+        Ok(Some((capture, instances)))
     }
 
     pub(crate) fn candidate_path(&self, key: &CaptureKey) -> PathBuf {

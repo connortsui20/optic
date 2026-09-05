@@ -1,8 +1,8 @@
 //! Reads completed captures without trusting the store contents.
 //!
 //! Capture history reads validate the small capture header and require its instance manifest file.
-//! Evidence reads additionally deserialize the full manifest and validate that it agrees with the
-//! header. This keeps listing cost proportional to capture history rather than evidence size.
+//! Evidence reads additionally deserialize the full manifest, validate its capture identity, and
+//! check every declared artifact's file type and length. Listing reads only the small headers.
 
 use std::fs;
 use std::path::Path;
@@ -20,6 +20,7 @@ use crate::INSTANCES_FILE_NAME;
 use crate::MAX_HEADER_BYTES;
 use crate::MAX_INSTANCES_BYTES;
 use crate::Store;
+use crate::artifacts::validate_artifacts;
 use crate::error::CaptureNotFoundSnafu;
 use crate::error::ExpectedCaptureDirectorySnafu;
 use crate::error::ExpectedInstanceFileSnafu;
@@ -97,14 +98,15 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Returns an error if the instance manifest or its capture record is missing, invalid, scoped
-    /// to a different capture.
+    /// Returns an error if the manifest or header is missing, invalid, or scoped to another capture.
+    /// Missing artifacts, nonregular files, symlinks, and mismatched file lengths are errors.
     pub fn read_instances(&self, id: &CaptureId) -> Result<InstanceManifest, Error> {
         let directory = self.capture_directory(id)?;
         read_capture_from_directory(&directory, id)?;
         let instances_path = require_instances_file(&directory)?;
         let instances: InstanceManifest = read_record(&instances_path, MAX_INSTANCES_BYTES)?;
         validate_capture_scope(&instances_path, id, instances.capture_id())?;
+        validate_artifacts(&directory, &instances)?;
 
         Ok(instances)
     }

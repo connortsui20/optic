@@ -1,9 +1,9 @@
 //! Owns the local persistence boundary for completed captures.
 //!
 //! Each Cargo workspace has one [`Store`] beneath `.optic/store`. [`Store::publish`] writes a
-//! complete capture and instance manifest under `staging`. It renames that directory into
-//! `captures` to make both records visible in one atomic namespace change. A process error before
-//! the rename can leave staging data, but it cannot leave a partially visible capture.
+//! complete capture, instance manifest, and declared artifacts under `staging`. It renames that
+//! directory into `captures` to make the evidence visible in one atomic namespace change. An error
+//! before the rename can leave staging data, but it cannot leave a partially visible capture.
 //!
 //! This boundary does not guarantee persistence after a system crash or power loss. Moving the
 //! workspace, store, or an ancestor directory also invalidates an open handle. The caller must open
@@ -11,7 +11,8 @@
 //!
 //! [`Store::list_captures`], [`Store::read_capture`], and [`Store::read_instances`] ignore staging
 //! and treat every completed directory and file as untrusted. Record deserialization enforces
-//! structural invariants before a value reaches the caller.
+//! structural invariants before a value reaches the caller. Manifest and candidate reads also
+//! validate every declared artifact's file type and byte length, without reparsing LLVM.
 //!
 //! The caller must serialize captures and prevent external store mutation during each operation.
 //! [`Store::initialize`] excludes store output from ordinary Cargo package tracking before builds.
@@ -36,6 +37,8 @@ pub const MAX_HEADER_BYTES: u64 = 1024 * 1024;
 pub const MAX_INSTANCES_BYTES: u64 = 128 * 1024 * 1024;
 
 mod captures;
+
+mod artifacts;
 
 mod candidate;
 

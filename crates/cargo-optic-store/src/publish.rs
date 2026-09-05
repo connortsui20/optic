@@ -4,6 +4,7 @@
 //! leaves a dangling pointer, which is a miss. No required fallible operation follows capture commit.
 
 use std::fs;
+use std::path::Path;
 
 use optic_records::CaptureRecord;
 use optic_records::InstanceManifest;
@@ -15,6 +16,7 @@ use crate::INSTANCES_FILE_NAME;
 use crate::MAX_HEADER_BYTES;
 use crate::MAX_INSTANCES_BYTES;
 use crate::Store;
+use crate::artifacts::copy_artifacts;
 use crate::candidate::CandidatePointer;
 use crate::error::CaptureExistsSnafu;
 use crate::error::FilesystemSnafu;
@@ -28,15 +30,21 @@ impl Store {
     /// No fallible cache update follows that rename. The caller must serialize publication and
     /// prevent external store mutation throughout this operation.
     ///
+    /// `artifact_directory` contains the generated names from [`optic_records::ArtifactRecord`].
+    /// Only declared artifacts are copied. The caller retains the directory and its files until
+    /// this operation returns. Input files and the input directory must not be symlinks.
+    ///
     /// # Errors
     ///
-    /// Returns an error for conflicting identities, oversized records, or failed publication.
+    /// Returns an error for conflicting identities, oversized records, invalid artifact files or
+    /// lengths, or failed publication.
     /// A failure publishes no new capture. A failure after pointer replacement invalidates reuse
     /// of the previous candidate. Old completed captures remain explicitly readable.
     pub fn publish(
         &self,
         capture: &CaptureRecord,
         instances: &InstanceManifest,
+        artifact_directory: &Path,
     ) -> Result<(), Error> {
         if capture.id() != instances.capture_id() {
             return MismatchedPublishedCaptureIdSnafu {
@@ -82,6 +90,10 @@ impl Store {
             MAX_INSTANCES_BYTES,
         )?;
 
+        #[cfg(test)]
+        self.interrupt_publication(PublicationBoundary::ArtifactCopy)?;
+        copy_artifacts(artifact_directory, &staging, instances)?;
+
         let staged_pointer = staging.join("candidate.json");
         #[cfg(test)]
         self.interrupt_publication(PublicationBoundary::PointerWrite)?;
@@ -119,6 +131,8 @@ pub(crate) enum PublicationBoundary {
     CaptureWrite,
     /// After the header is flushed and before the instance manifest is written.
     InstancesWrite,
+    /// After both records are flushed and before declared artifacts are copied.
+    ArtifactCopy,
     /// After both records are flushed and before the candidate pointer is written.
     PointerWrite,
     /// After the staged pointer is flushed and before it replaces the old pointer.

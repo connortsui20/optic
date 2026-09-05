@@ -202,7 +202,7 @@ fn reports_the_previous_capture_format_before_its_missing_fields() {
 }
 
 #[test]
-fn round_trips_a_current_instance_manifest_without_body_metadata() {
+fn round_trips_a_manifest_with_no_collected_llvm_modules() {
     let expected = manifest();
     let encoded = serde_json::to_string(&expected).expect("the fixture manifest can be encoded");
     let actual = serde_json::from_str::<InstanceManifest>(&encoded)
