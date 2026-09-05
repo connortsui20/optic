@@ -15,7 +15,10 @@ use crate::protocol::MANIFEST_PATH_ENV;
 use crate::protocol::SELECTED_TARGET_MARKER_ENV;
 
 const DRIVER_SOURCE: &str = include_str!("../rustc-driver/main.rs");
+const ANALYSIS_SOURCE: &str = include_str!("../rustc-driver/analysis.rs");
+const MANIFEST_SOURCE: &str = include_str!("../rustc-driver/manifest.rs");
 const PROTOCOL_SOURCE: &str = include_str!("../rustc-driver/protocol.rs");
+const WRAPPER_SOURCE: &str = include_str!("../rustc-driver/wrapper.rs");
 
 /// A standalone driver compiled for one collection.
 pub(crate) struct RustcDriver {
@@ -27,7 +30,10 @@ impl RustcDriver {
     pub(crate) fn build(workspace: &Workspace, directory: &Path) -> Result<Self, Error> {
         for (name, contents) in [
             ("optic-rustc-driver.rs", DRIVER_SOURCE),
+            ("analysis.rs", ANALYSIS_SOURCE),
+            ("manifest.rs", MANIFEST_SOURCE),
             ("protocol.rs", PROTOCOL_SOURCE),
+            ("wrapper.rs", WRAPPER_SOURCE),
         ] {
             let path = directory.join(name);
             fs::write(&path, contents).map_err(|source| Error::Filesystem {
