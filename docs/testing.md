@@ -16,10 +16,14 @@ RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 bash scripts/check-install.sh
 ```
 
-The installation check needs registry access during package and dependency setup. It does not
-publish packages. It verifies archives, installs outside the checkout, and starts runtime tests
+The installation check requires Python 3.11+, Git, and clean committed source. It needs registry
+access during package and dependency setup. It does not publish packages.
+It verifies archives, installs outside the checkout, and starts runtime tests
 with a fresh driver cache. Linux also checks an independent library consumer and runs the installed
 CLI on this repository's `cargo-optic-records` crate.
+
+The script prints its temporary evidence directory and retains it for diagnosis. Each run also
+leaves the self-hosted capture in the checkout's ignored `.optic` store on Linux.
 
 CI runs workspace and installed-CLI tests on Linux and macOS. Formatting includes standalone
 compiler sources, not just modules that Cargo discovers.

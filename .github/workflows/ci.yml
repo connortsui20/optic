@@ -48,3 +48,5 @@ jobs:
         run: rustup component add llvm-tools rustc-dev
       - name: Run workspace tests
         run: cargo test --workspace
+      - name: Verify packaged installation
+        run: bash scripts/check-install.sh
