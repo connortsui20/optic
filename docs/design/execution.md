@@ -129,6 +129,29 @@ the worker. They are ready for integration and full process acceptance.
 These partial commits are not a validated B implementation and have not replaced the accepted A
 revision on the PR.
 
+The integrated B revision is now `ed164a3`. All 226 workspace tests, formatting, Clippy, and rustdoc
+pass locally. PR #17 runs both-host acceptance in
+[CI run 33997850037](https://github.com/connortsui20/optic/actions/runs/33997850037).
+
+## Checkpoint C handoff
+
+After B acceptance, the integration owner updates the seven product packages to `0.1.0`, adds
+release metadata, owns root manifests/lockfile and CI, and finishes the product documentation.
+An installation worker owns only `scripts/check-install.sh` and its copied consumer/fixture assets.
+The script packages with verification enabled, installs from extracted sibling archives, and tests
+the installed CLI. Linux also runs the independent consumer and the self-hosting check.
+
+The compiler and testing workers coordinate retained tests before package verification. The testing
+worker moves public protocol, diagnostic, source, LTO, and stage-proof journeys to compiler
+integration tests. The proof source moves under their fixtures. The compiler worker removes the
+originals only after those tests exist. It retains actual provisioning-count, failed-provisioning,
+and missing/corrupt-bitcode unit tests with a small self-contained isolated package fixture.
+The retained tests cannot require the unpublished helper. Pure compiler tests stay in place.
+
+The moved protocol test does not assert the private unit-test-only provisioning counter. The
+dedicated cache unit test still proves actual driver builds. The integration owner verifies
+`cargo test --lib` against unpacked compiler sources with only extracted-sibling patches.
+
 ## Additional acceptance
 
 The user suggested exercising Optic on its own source during implementation. Add the single Linux
