@@ -16,13 +16,14 @@ jobs:
   quality:
     name: Quality
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v7
       - name: Install Rust components
         run: rustup component add clippy rustfmt
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: bash scripts/check-format.sh
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Build documentation
@@ -33,6 +34,7 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
 
     strategy:
       matrix:
