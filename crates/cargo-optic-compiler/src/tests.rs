@@ -5,12 +5,16 @@
 
 use std::env;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use std::process::Command;
 
 use cargo_optic_test_support::TestWorkspace;
+use optic_records::CompilerIdentity;
 
 use crate::BuildRequest;
 use crate::CargoTarget;
+use crate::Error;
 use crate::Freshness;
 use crate::discover_workspace;
 use crate::driver::RustcDriver;
@@ -68,6 +72,80 @@ fn driver_cache_child() {
     let workspace = discover_workspace(&env::current_dir().unwrap()).unwrap();
     let compiler = CompilerContext::discover(&workspace).unwrap();
     RustcDriver::provision(&workspace, compiler.identity()).unwrap();
+}
+
+#[test]
+fn failed_driver_build_reports_components_without_publishing_a_cache_entry() {
+    let fixture = TestWorkspace::new("capture");
+    child(&fixture, "tests::failed_driver_build_child");
+
+    assert_eq!(
+        fs::read_to_string(fixture.observations().join("driver-builds")).unwrap(),
+        "build\n"
+    );
+    assert_eq!(
+        fs::read_dir(fixture.cargo_home().join("optic/drivers"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn failed_driver_build_child() {
+    if env::var_os("OPTIC_TEST_CHILD").is_none() {
+        return;
+    }
+
+    let workspace = discover_workspace(&env::current_dir().unwrap()).unwrap();
+    let compiler = CompilerContext::discover(&workspace).unwrap();
+    let executable = PathBuf::from(env::var_os("TMPDIR").unwrap()).join("failed-rustc");
+    fs::write(
+        &executable,
+        r#"#!/bin/sh
+set -eu
+previous=
+for argument in "$@"; do
+    if [ "$previous" = -o ]; then
+        printf '%s\n' incomplete-driver > "$argument"
+    fi
+    previous=$argument
+done
+printf '%s\n' 'error[E0463]: rustc_driver is unavailable in this sysroot' >&2
+exit 23
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let identity = compiler.identity();
+    let failing = CompilerIdentity::new(
+        executable.clone(),
+        identity.release(),
+        identity.commit_hash(),
+        identity.host(),
+        identity.sysroot().to_owned(),
+    )
+    .unwrap();
+
+    let Err(Error::ProcessFailed {
+        program,
+        status,
+        diagnostics,
+    }) = RustcDriver::provision(&workspace, &failing)
+    else {
+        panic!("the compiler shim must return its driver-build failure");
+    };
+    assert_eq!(program, executable);
+    assert_eq!(status, "exit status: 23");
+    let diagnostics = diagnostics.expect("driver-build failures retain compiler diagnostics");
+    assert!(
+        diagnostics.contains("error[E0463]: rustc_driver is unavailable in this sysroot"),
+        "{diagnostics}"
+    );
+    assert!(
+        diagnostics.contains("rustup component add rustc-dev llvm-tools"),
+        "{diagnostics}"
+    );
 }
 
 #[test]
