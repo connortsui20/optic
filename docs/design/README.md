@@ -2,6 +2,8 @@
 
 The `planning` branch contains the active Cargo Optic roadmap and retained prototype evidence.
 
+The [execution ledger](execution.md) records current implementation ownership and checkpoint status.
+
 Read these active documents in order:
 
 1. [Cargo Optic plan](PLAN.md).
