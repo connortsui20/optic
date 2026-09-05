@@ -15,6 +15,8 @@
 //! selected-target compiler invocation. A probe stops before analysis if Cargo requests compilation.
 //! A successful [`CollectedBuild`] proves that this compiler ran successfully and returned a complete
 //! instance manifest. Publication and durable storage belong to the capture and store crates.
+//! Captured source and complete optimized LLVM modules remain in an owned temporary directory until
+//! publication. Unsupported LLVM configurations retain source and concrete-instance evidence.
 
 mod build;
 
@@ -30,6 +32,10 @@ pub use prepared::prepare_build;
 mod collection;
 pub use collection::CollectedBuild;
 pub use collection::collect_build;
+
+mod artifacts;
+
+mod llvm_index;
 
 mod driver;
 

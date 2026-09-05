@@ -5,8 +5,8 @@
 //! selected probe writes a stale receipt and exits before rustc analysis. A selected collection
 //! contains a private marker argument. The wrapper removes that marker and starts this executable
 //! again with [`protocol::DRIVER_INNER_ENV`] set. The second invocation
-//! enters [`analysis::run`], drives rustc, and writes the selected target's monomorphized functions
-//! to the private manifest.
+//! enters [`analysis::run`] and drives rustc. Its private manifest contains monomorphized functions,
+//! normalized source relationships, effective codegen configuration, and expected optimized modules.
 //!
 //! This two-stage entry point keeps Cargo's wrapper calling convention out of the rustc callback.
 //! The process boundary also lets ordinary compiler invocations use `exec`, so the wrapper does not
@@ -18,10 +18,15 @@ extern crate rustc_driver;
 extern crate rustc_hir;
 extern crate rustc_interface;
 extern crate rustc_middle;
+extern crate rustc_session;
+extern crate rustc_span;
+extern crate rustc_target;
 
 mod analysis;
+mod llvm;
 mod manifest;
 mod protocol;
+mod source;
 mod wrapper;
 
 use std::env;

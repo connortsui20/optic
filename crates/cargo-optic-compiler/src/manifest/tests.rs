@@ -21,10 +21,30 @@ fn write_string(bytes: &mut Vec<u8>, value: &str) {
     bytes.extend(value.as_bytes());
 }
 
-fn manifest() -> Vec<u8> {
+fn configuration(unsupported: u32) -> Vec<u8> {
     let mut bytes = MANIFEST_MAGIC.to_vec();
     write_u32(&mut bytes, PROTOCOL_VERSION);
     write_string(&mut bytes, MARKER);
+    write_u32(&mut bytes, crate::protocol::CONFIGURATION_RECORD);
+    for value in ["llvm", "x86_64-unknown-linux-gnu", "3"] {
+        write_string(&mut bytes, value);
+    }
+    for value in [
+        1,
+        0,
+        0,
+        16,
+        crate::protocol::LLVM_RECIPE_REVISION,
+        unsupported,
+    ] {
+        write_u32(&mut bytes, value);
+    }
+
+    bytes
+}
+
+fn manifest() -> Vec<u8> {
+    let mut bytes = configuration(0);
     write_u32(&mut bytes, PLACEMENT_RECORD);
     for value in [
         "fixture",
@@ -39,6 +59,7 @@ fn manifest() -> Vec<u8> {
     }
     write_u32(&mut bytes, 0);
     write_u64(&mut bytes, 17);
+    write_u32(&mut bytes, 1);
     write_u32(&mut bytes, END_RECORD);
 
     bytes
@@ -50,7 +71,7 @@ fn reads_a_complete_manifest() {
     let path = temporary.path().join("manifest.bin");
     fs::write(&path, manifest()).unwrap();
 
-    let instances = read_manifest(&path, MARKER).unwrap();
+    let instances = read_manifest(&path, MARKER).unwrap().instances;
 
     assert_eq!(instances.len(), 1);
     assert_eq!(instances[0].display_name(), "fixture::kernel::<u64>");
@@ -80,7 +101,11 @@ fn rejects_a_wrong_protocol_version() {
 
     let error = read_manifest(&path, MARKER).unwrap_err();
 
-    assert!(error.to_string().contains("protocol version must be 2"));
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("protocol version must be {PROTOCOL_VERSION}"))
+    );
 }
 
 #[test]
@@ -123,6 +148,48 @@ fn rejects_wrong_magic_and_truncated_headers() {
         let path = temporary.path().join("manifest.bin");
         fs::write(&path, bytes).unwrap();
 
+        assert!(read_manifest(&path, MARKER).is_err());
+    }
+}
+
+#[test]
+fn reads_expected_modules_without_function_placements() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("manifest");
+    let bitcode = temporary.path().join("llvm/empty.rcgu.bc");
+    let mut bytes = configuration(0);
+    write_u32(&mut bytes, crate::protocol::MODULE_RECORD);
+    write_string(&mut bytes, "empty");
+    write_string(&mut bytes, bitcode.to_str().unwrap());
+    write_u32(&mut bytes, END_RECORD);
+    fs::write(&path, bytes).unwrap();
+
+    let manifest = read_manifest(&path, MARKER).unwrap();
+    assert!(manifest.instances.is_empty());
+    assert_eq!(manifest.modules.len(), 1);
+    assert_eq!(manifest.modules[0].name, "empty");
+    assert_eq!(manifest.modules[0].path, bitcode);
+}
+
+#[test]
+fn rejects_unsupported_duplicate_and_outside_module_paths() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("manifest");
+
+    for (unsupported, count, name) in [
+        (1, 1, "llvm/expected.bc"),   // Unsupported incremental collection.
+        (0, 2, "llvm/expected.bc"),   // Duplicate module identity and path.
+        (0, 1, "outside.bc"),         // Outside the private LLVM directory.
+        (0, 1, "llvm/../outside.bc"), // Parent traversal.
+    ] {
+        let mut bytes = configuration(unsupported);
+        for _ in 0..count {
+            write_u32(&mut bytes, crate::protocol::MODULE_RECORD);
+            write_string(&mut bytes, "module");
+            write_string(&mut bytes, temporary.path().join(name).to_str().unwrap());
+        }
+        write_u32(&mut bytes, END_RECORD);
+        fs::write(&path, bytes).unwrap();
         assert!(read_manifest(&path, MARKER).is_err());
     }
 }

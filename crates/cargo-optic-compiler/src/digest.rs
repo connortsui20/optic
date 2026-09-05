@@ -15,8 +15,8 @@ use sha2::Sha256;
 use crate::Error;
 use crate::error::invalid_environment;
 
-/// Identifies instance-only evidence and the explicit-request key layout.
-const REQUEST_REVISION: &[u8] = b"optic-request-1:instances-1";
+/// Identifies source/LLVM evidence and the explicit-request key layout.
+const REQUEST_REVISION: &[u8] = b"optic-request-2:source-llvm-1";
 
 pub(crate) fn request_key(
     build: &BuildRecord,

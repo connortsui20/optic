@@ -125,6 +125,11 @@ impl CargoAttempt {
         self.temporary.path().join(name)
     }
 
+    /// Transfers source snapshots and retained LLVM files after diagnostics have been replayed.
+    pub(crate) fn into_temporary(self) -> tempfile::TempDir {
+        self.temporary
+    }
+
     pub(crate) fn relay_warnings(&mut self) -> Result<(), Error> {
         for warning in &self.warnings {
             write_diagnostic(warning.as_bytes())?;

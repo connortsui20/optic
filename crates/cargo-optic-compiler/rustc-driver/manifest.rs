@@ -13,9 +13,11 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::llvm::Configuration;
 use crate::protocol::END_RECORD;
 use crate::protocol::PLACEMENT_RECORD;
 use crate::protocol::SELECTED_TARGET_MARKER_ENV;
+use crate::source::Source;
 
 pub(crate) struct ConcreteInstance {
     /// The crate that owns the generic or nongeneric function definition.
@@ -69,6 +71,7 @@ impl ManifestWriter {
         &mut self,
         instance: &ConcreteInstance,
         placement: &Placement,
+        source: &Source,
     ) -> io::Result<()> {
         self.write_u32(PLACEMENT_RECORD)?;
 
@@ -86,7 +89,51 @@ impl ManifestWriter {
                 "placement size estimate must fit in u64, got {}",
                 placement.size_estimate
             ))
-        })?)
+        })?)?;
+        if let Source::Available(span) = source {
+            self.write_u32(0)?;
+            self.write_u64(span.artifact)?;
+            self.write_u64(span.start)?;
+            self.write_u64(span.length)?;
+            self.write_string(
+                span.display_path
+                    .to_str()
+                    .ok_or_else(|| invalid_data("source display path must be UTF-8"))?,
+            )?;
+            self.write_u64(span.starting_line)?;
+        } else if let Source::Unavailable(reason) = source {
+            self.write_u32(*reason)?;
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn write_configuration(&mut self, configuration: &Configuration) -> io::Result<()> {
+        self.write_u32(crate::protocol::CONFIGURATION_RECORD)?;
+        self.write_string(&configuration.backend)?;
+        self.write_string(&configuration.target)?;
+        self.write_string(configuration.optimization)?;
+        self.write_u32(configuration.lto)?;
+        self.write_u32(u32::from(configuration.incremental))?;
+        self.write_u32(u32::from(configuration.linker_plugin))?;
+        self.write_u32(configuration.codegen_units)?;
+        self.write_u32(crate::protocol::LLVM_RECIPE_REVISION)?;
+        self.write_u32(configuration.unsupported)
+    }
+
+    pub(crate) fn write_source_file(&mut self, id: u64, length: u64) -> io::Result<()> {
+        self.write_u32(crate::protocol::SOURCE_FILE_RECORD)?;
+        self.write_u64(id)?;
+        self.write_u64(length)
+    }
+
+    pub(crate) fn write_module(&mut self, name: &str, path: &Path) -> io::Result<()> {
+        self.write_u32(crate::protocol::MODULE_RECORD)?;
+        self.write_string(name)?;
+        self.write_string(
+            path.to_str()
+                .ok_or_else(|| invalid_data("bitcode path must be UTF-8"))?,
+        )
     }
 
     /// Completes the stream and makes the final manifest path visible to the parent process.

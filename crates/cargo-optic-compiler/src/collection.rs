@@ -1,12 +1,19 @@
-//! Owns validated selected-target instances and their Cargo analysis identity.
+//! Owns selected-target evidence and its temporary files through store publication.
 //!
-//! Collection loads the complete private manifest before its temporary directory is removed.
-//! Publication belongs to the capture and store crates.
+//! Collection materializes and indexes complete optimized modules before returning this owner.
+//! The capture layer supplies an ID, validates the durable manifest, then retains the returned
+//! directory until the store has copied its declared artifacts.
 
+use optic_records::ArtifactRecord;
 use optic_records::BuildRecord;
 use optic_records::CaptureAnalysis;
+use optic_records::CaptureId;
 use optic_records::CompilerIdentity;
+use optic_records::InstanceManifest;
 use optic_records::InstanceRecord;
+use optic_records::LlvmCollection;
+use optic_records::LlvmProvenance;
+use tempfile::TempDir;
 
 use crate::BuildRequest;
 use crate::Error;
@@ -18,33 +25,67 @@ pub struct CollectedBuild {
     compiler: CompilerIdentity,
     instances: Vec<InstanceRecord>,
     analysis: CaptureAnalysis,
+    artifacts: Vec<ArtifactRecord>,
+    provenance: LlvmProvenance,
+    llvm: LlvmCollection,
+    temporary: TempDir,
 }
 
 impl CollectedBuild {
     pub(crate) fn new(
         build: BuildRecord,
         compiler: CompilerIdentity,
-        instances: Vec<InstanceRecord>,
+        evidence: crate::artifacts::CollectedEvidence,
         analysis: CaptureAnalysis,
+        temporary: TempDir,
     ) -> Self {
         Self {
             build,
             compiler,
-            instances,
+            instances: evidence.instances,
             analysis,
+            artifacts: evidence.artifacts,
+            provenance: evidence.provenance,
+            llvm: evidence.llvm,
+            temporary,
         }
     }
 
-    /// Separates build provenance, compiler identity, concrete instances, and analysis identity.
+    /// Validates the capture-scoped manifest and transfers its temporary artifact directory.
+    ///
+    /// The caller must retain the directory until store publication finishes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the complete evidence violates the durable manifest contract.
     pub fn into_parts(
         self,
-    ) -> (
-        BuildRecord,
-        CompilerIdentity,
-        Vec<InstanceRecord>,
-        CaptureAnalysis,
-    ) {
-        (self.build, self.compiler, self.instances, self.analysis)
+        capture_id: CaptureId,
+    ) -> Result<
+        (
+            BuildRecord,
+            CompilerIdentity,
+            CaptureAnalysis,
+            InstanceManifest,
+            TempDir,
+        ),
+        Error,
+    > {
+        let manifest = InstanceManifest::new(
+            capture_id,
+            self.instances,
+            self.artifacts,
+            self.provenance,
+            self.llvm,
+        )?;
+
+        Ok((
+            self.build,
+            self.compiler,
+            self.analysis,
+            manifest,
+            self.temporary,
+        ))
     }
 }
 

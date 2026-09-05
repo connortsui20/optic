@@ -17,16 +17,18 @@ use crate::digest::digest;
 use crate::protocol;
 
 /// The complete embedded source set, shared by cache hashing and standalone compilation.
-const SOURCES: [(&str, &str); 5] = [
+const SOURCES: [(&str, &str); 7] = [
     ("main.rs", include_str!("../rustc-driver/main.rs")),
     ("analysis.rs", include_str!("../rustc-driver/analysis.rs")),
     ("manifest.rs", include_str!("../rustc-driver/manifest.rs")),
     ("protocol.rs", include_str!("../rustc-driver/protocol.rs")),
     ("wrapper.rs", include_str!("../rustc-driver/wrapper.rs")),
+    ("llvm.rs", include_str!("../rustc-driver/llvm.rs")),
+    ("source.rs", include_str!("../rustc-driver/source.rs")),
 ];
 
 /// Identifies the source layout, cache header, and scoped bootstrap compilation recipe.
-const RECIPE_REVISION: &[u8] = b"optic-driver-recipe-1";
+const RECIPE_REVISION: &[u8] = b"optic-driver-recipe-2";
 /// Fixed build options in command order. The resolved compiler supplies the final sysroot value.
 const BUILD_OPTIONS: [&str; 8] = [
     "--crate-name",
@@ -179,6 +181,7 @@ fn driver_key(
         &version,
         b"RUSTC_BOOTSTRAP=optic_rustc_driver",
         b"OPTIC_DRIVER_KEY=recipe-digest",
+        b"OPTIC_RUSTC_COMMIT=compiler-commit",
         b"-o=optic-rustc-driver",
     ];
 
@@ -304,6 +307,7 @@ fn build_driver(
         .arg(executable)
         .env("RUSTC_BOOTSTRAP", "optic_rustc_driver")
         .env("OPTIC_DRIVER_KEY", key)
+        .env("OPTIC_RUSTC_COMMIT", compiler.commit_hash())
         .output()
         .map_err(|source| Error::StartProcess {
             program: compiler.rustc().to_owned(),

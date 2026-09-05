@@ -6,6 +6,7 @@
 use std::env;
 use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 
 use cargo_metadata::PackageId;
@@ -52,6 +53,8 @@ pub struct PreparedBuild<'a> {
     build: BuildRecord,
     compiler: CompilerIdentity,
     package: PackageId,
+    /// The canonical selected package root, not the broader workspace root.
+    package_root: PathBuf,
     target: Target,
     driver: RustcDriver,
     request_key: CaptureKey,
@@ -72,6 +75,17 @@ pub fn prepare_build<'a>(
     let metadata = workspace.read_metadata(request)?;
     let package = resolve_package(&metadata, request.package())?;
     let target = resolve_target(package, request.target())?.clone();
+    let package_root = fs::canonicalize(
+        package
+            .manifest_path
+            .parent()
+            .expect("Cargo manifests have parent directories"),
+    )
+    .map_err(|source| Error::Filesystem {
+        operation: "resolve selected package root",
+        path: package.manifest_path.clone().into(),
+        source,
+    })?;
     let compiler = CompilerContext::discover(workspace)?;
     let driver = RustcDriver::provision(workspace, compiler.identity())?;
 
@@ -127,6 +141,7 @@ pub fn prepare_build<'a>(
         build,
         compiler: compiler.identity().clone(),
         package: package.id.clone(),
+        package_root,
         target,
         driver,
         request_key,
@@ -218,14 +233,16 @@ impl PreparedBuild<'_> {
         }
 
         let artifact = attempt.observation.completed(&self.target, false)?;
-        let instances = read_manifest(&attempt.path("manifest"), &marker)?;
+        let manifest = read_manifest(&attempt.path("manifest"), &marker)?;
+        let evidence = crate::artifacts::collect(manifest, &self.compiler, &attempt.path(""))?;
         let analysis = CaptureAnalysis::new(self.request_key.clone(), token, artifact);
 
         Ok(CollectedBuild::new(
             self.build.clone(),
             self.compiler.clone(),
-            instances,
+            evidence,
             analysis,
+            attempt.into_temporary(),
         ))
     }
 
@@ -290,6 +307,7 @@ impl PreparedBuild<'_> {
             .env("RUSTC", self.compiler.rustc())
             .env(protocol::RUSTC_ENV, self.compiler.rustc())
             .env(protocol::SOURCE_ENV, source)
+            .env(protocol::PACKAGE_ROOT_ENV, &self.package_root)
             .env(protocol::CRATE_NAME_ENV, self.target.name.replace('-', "_"))
             .env(protocol::STALE_RECEIPT_ENV, directory.join("stale"));
         self.driver

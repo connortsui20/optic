@@ -4,19 +4,36 @@
 //! failure reports the manifest that caused it. The methods follow the wire format from header to
 //! end marker, which makes the decoder readable in the same order as the protocol documentation.
 
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
 
+use optic_records::ArtifactId;
+use optic_records::ArtifactKind;
+use optic_records::ArtifactRecord;
+use optic_records::ByteRange;
+use optic_records::LlvmLto;
 use optic_records::PlacementRecord;
+use optic_records::SourceAvailability;
+use optic_records::SourceRecord;
+use optic_records::SourceUnavailable;
+use optic_records::UnsupportedLlvmConfiguration;
 
+use super::CompilerManifest;
+use super::Configuration;
+use super::ExpectedModule;
 use super::InstanceKey;
+use super::InstancePlacements;
 use super::PlacementsByInstance;
 use crate::Error;
+use crate::protocol::CONFIGURATION_RECORD;
 use crate::protocol::END_RECORD;
 use crate::protocol::MANIFEST_MAGIC;
+use crate::protocol::MODULE_RECORD;
 use crate::protocol::PLACEMENT_RECORD;
 use crate::protocol::PROTOCOL_VERSION;
+use crate::protocol::SOURCE_FILE_RECORD;
 
 pub(super) struct ManifestDecoder<R> {
     path: PathBuf,
@@ -34,28 +51,179 @@ impl<R: Read> ManifestDecoder<R> {
     }
 
     /// Reads one complete manifest and rejects partial or trailing data.
-    pub(super) fn read(mut self) -> Result<PlacementsByInstance, Error> {
+    pub(super) fn read(mut self) -> Result<CompilerManifest, Error> {
         self.read_header()?;
+        let configuration = self.read_configuration()?;
 
         let mut placements = PlacementsByInstance::new();
+        let mut artifacts = Vec::new();
+        let mut artifact_ids = HashSet::new();
+        let mut modules = Vec::new();
+        let mut module_names = HashSet::new();
+        let mut module_paths = HashSet::new();
         loop {
             match self.read_u32("record kind")? {
                 END_RECORD => {
                     self.require_end_of_file()?;
 
-                    return Ok(placements);
+                    return Ok(CompilerManifest {
+                        instances: super::instances(placements)?,
+                        artifacts,
+                        configuration,
+                        modules,
+                    });
                 }
                 PLACEMENT_RECORD => {
                     let (key, placement) = self.read_placement()?;
-                    placements.entry(key).or_default().push(placement);
+                    let source = self.read_source()?;
+                    if let Some(existing) = placements.get_mut(&key) {
+                        if existing.source != source {
+                            return Err(self.invalid("one instance must have one source relationship, got conflicting source records"));
+                        }
+                        existing.placements.push(placement);
+                    } else {
+                        placements.insert(
+                            key,
+                            InstancePlacements {
+                                placements: vec![placement],
+                                source,
+                            },
+                        );
+                    }
+                }
+                SOURCE_FILE_RECORD => {
+                    let id = ArtifactId::new(self.read_u64("source artifact ID")?);
+                    let length = self.read_u64("source byte length")?;
+                    if !artifact_ids.insert(id) {
+                        return Err(
+                            self.invalid("source artifact IDs must be unique, got a duplicate ID")
+                        );
+                    }
+                    artifacts.push(ArtifactRecord::new(id, ArtifactKind::Source, length));
+                }
+                MODULE_RECORD => {
+                    let name = self.read_string("compiler module")?;
+                    let path = PathBuf::from(self.read_string("expected bitcode path")?);
+                    if configuration.unsupported.is_some() {
+                        return Err(self
+                            .invalid("unsupported LLVM requires no module records, got a module"));
+                    }
+                    let directory = self
+                        .path
+                        .parent()
+                        .expect("the manifest has a parent directory")
+                        .join("llvm");
+                    if name.is_empty()
+                        || path.parent() != Some(directory.as_path())
+                        || path.file_name().is_none()
+                    {
+                        return Err(self.invalid(format!(
+                            "expected bitcode must be an immediate private LLVM file, got {}",
+                            path.display()
+                        )));
+                    }
+                    if !module_names.insert(name.clone()) || !module_paths.insert(path.clone()) {
+                        return Err(self.invalid(
+                            "expected modules and paths must be unique, got a duplicate",
+                        ));
+                    }
+                    modules.push(ExpectedModule { name, path });
                 }
                 actual => {
                     return Err(self.invalid(format!(
-                        "record kind must be {END_RECORD} or {PLACEMENT_RECORD}, got {actual}"
+                        "record kind must identify an end, placement, source file, or module, got {actual}"
                     )));
                 }
             }
         }
+    }
+
+    fn read_configuration(&mut self) -> Result<Configuration, Error> {
+        let kind = self.read_u32("configuration record kind")?;
+        if kind != CONFIGURATION_RECORD {
+            return Err(self.invalid(format!(
+                "the first record must be configuration, got {kind}"
+            )));
+        }
+        let backend = self.read_string("codegen backend")?;
+        let target = self.read_string("effective target")?;
+        let optimization = self.read_string("optimization level")?;
+        let lto = match self.read_u32("effective LTO")? {
+            0 => LlvmLto::Off,
+            1 => LlvmLto::LocalThin,
+            2 => LlvmLto::CrossCrateThin,
+            3 => LlvmLto::Fat,
+            actual => {
+                return Err(
+                    self.invalid(format!("LTO must be a known protocol code, got {actual}"))
+                );
+            }
+        };
+        let incremental = self.read_bool("incremental compilation")?;
+        let linker_plugin = self.read_bool("linker-plugin LTO")?;
+        let codegen_units = self.read_u32("configured codegen units")?;
+        let recipe = self.read_u32("LLVM recipe revision")?;
+        if recipe != crate::protocol::LLVM_RECIPE_REVISION {
+            return Err(self.invalid(format!(
+                "LLVM recipe revision must match this collector, got {recipe}"
+            )));
+        }
+        let unsupported = match self.read_u32("unsupported LLVM configuration")? {
+            0 => None,
+            1 => Some(UnsupportedLlvmConfiguration::Incremental),
+            2 => Some(UnsupportedLlvmConfiguration::CrossCrateThinLto),
+            3 => Some(UnsupportedLlvmConfiguration::FatLto),
+            4 => Some(UnsupportedLlvmConfiguration::LinkerPluginLto),
+            5 => Some(UnsupportedLlvmConfiguration::OtherBackend),
+            6 => Some(UnsupportedLlvmConfiguration::UnverifiedCompiler),
+            actual => {
+                return Err(self.invalid(format!(
+                    "unsupported configuration must be a known protocol code, got {actual}"
+                )));
+            }
+        };
+
+        Ok(Configuration {
+            backend,
+            target,
+            optimization,
+            lto,
+            incremental,
+            linker_plugin,
+            codegen_units,
+            unsupported,
+        })
+    }
+
+    fn read_source(&mut self) -> Result<SourceAvailability, Error> {
+        let reason = match self.read_u32("source availability")? {
+            0 => {
+                let artifact = ArtifactId::new(self.read_u64("source artifact")?);
+                let start = self.read_u64("source start")?;
+                let length = self.read_u64("source length")?;
+                let path = PathBuf::from(self.read_string("source display path")?);
+                let line = self.read_u64("source starting line")?;
+
+                return Ok(SourceAvailability::Available(SourceRecord::new(
+                    artifact,
+                    ByteRange::new(start, length)?,
+                    path,
+                    line,
+                )?));
+            }
+            1 => SourceUnavailable::Nonlocal,
+            2 => SourceUnavailable::Unloaded,
+            3 => SourceUnavailable::Generated,
+            4 => SourceUnavailable::UnsupportedSpan,
+            5 => SourceUnavailable::OutsidePackage,
+            actual => {
+                return Err(self.invalid(format!(
+                    "source availability must be a known protocol code, got {actual}"
+                )));
+            }
+        };
+
+        Ok(SourceAvailability::Unavailable(reason))
     }
 
     fn read_header(&mut self) -> Result<(), Error> {

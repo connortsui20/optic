@@ -2,8 +2,10 @@
 //!
 //! Rustc calls [`InstanceCallbacks::after_analysis`] after type analysis. The callback asks rustc
 //! for the same mono-item partitions that code generation consumes, then records each function in
-//! every codegen unit where rustc placed it. A successful rustc invocation publishes the manifest
-//! only if that callback completed without an encoding error.
+//! every codegen unit where rustc placed it. The callback also records every regular codegen unit,
+//! including units with no functions, and snapshots supported source from rustc's loaded text.
+//! A successful rustc invocation publishes the manifest only if the callback completed without an
+//! encoding error. The parent converts expected bitcode only after this compilation succeeds.
 
 use std::env;
 use std::io;
@@ -14,6 +16,7 @@ use rustc_driver::Callbacks;
 use rustc_driver::Compilation;
 use rustc_hir::attrs::Linkage;
 use rustc_interface::interface::Compiler;
+use rustc_interface::interface::Config;
 use rustc_middle::mono::MonoItem;
 use rustc_middle::mono::Visibility;
 use rustc_middle::ty::TyCtxt;
@@ -21,26 +24,65 @@ use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_middle::ty::print::with_resolve_crate_name;
 
 use crate::failure;
+use crate::llvm::Configuration;
 use crate::manifest::ConcreteInstance;
 use crate::manifest::ManifestWriter;
 use crate::manifest::Placement;
 use crate::protocol::MANIFEST_PATH_ENV;
+use crate::source::Snapshots;
 
 struct InstanceCallbacks {
     manifest: ManifestWriter,
     analysis: Option<io::Result<()>>,
+    /// Retains the pre-retention classification or setup error until the analysis callback.
+    configuration: Option<io::Result<u32>>,
+    directory: PathBuf,
+    sources: Snapshots,
 }
 
 struct DriverInvocation {
     arguments: Vec<String>,
     manifest_path: PathBuf,
+    package_root: PathBuf,
 }
 
 impl Callbacks for InstanceCallbacks {
-    fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
+    fn config(&mut self, config: &mut Config) {
+        self.configuration = Some(crate::llvm::configure(config, &self.directory.join("llvm")));
+    }
+
+    fn after_analysis<'tcx>(&mut self, compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
+        let result = self.collect(compiler, tcx);
+        let compilation = if result.is_ok() {
+            Compilation::Continue
+        } else {
+            Compilation::Stop
+        };
+        self.analysis = Some(result);
+
+        compilation
+    }
+}
+
+impl InstanceCallbacks {
+    fn collect<'tcx>(&mut self, compiler: &Compiler, tcx: TyCtxt<'tcx>) -> io::Result<()> {
+        let unsupported = self
+            .configuration
+            .take()
+            .expect("config runs before after_analysis")?;
+        let configuration = Configuration::observed(compiler, unsupported)?;
+        self.manifest.write_configuration(&configuration)?;
         let partitions = tcx.collect_and_partition_mono_items(());
 
         for codegen_unit in partitions.codegen_units {
+            if let Some(extension) = configuration.extension() {
+                let name = codegen_unit.name().to_string();
+                let path = tcx
+                    .output_filenames(())
+                    .temp_path_ext_for_cgu(extension, &name);
+                self.manifest.write_module(&name, &path)?;
+            }
+
             for (mono_item, data) in codegen_unit.items_in_deterministic_order(tcx) {
                 let MonoItem::Fn(instance) = mono_item else {
                     continue;
@@ -65,17 +107,13 @@ impl Callbacks for InstanceCallbacks {
                     size_estimate: data.size_estimate,
                 };
 
-                if let Err(error) = self.manifest.write_placement(&concrete, &placement) {
-                    self.analysis = Some(Err(error));
-
-                    return Compilation::Stop;
-                }
+                let source = self.sources.capture(tcx, instance, &mut self.manifest)?;
+                self.manifest
+                    .write_placement(&concrete, &placement, &source)?;
             }
         }
 
-        self.analysis = Some(Ok(()));
-
-        Compilation::Continue
+        Ok(())
     }
 }
 
@@ -94,9 +132,17 @@ pub(crate) fn run() -> ExitCode {
             ));
         }
     };
+    let directory = invocation
+        .manifest_path
+        .parent()
+        .expect("the collector supplies an absolute manifest path")
+        .to_owned();
     let mut callbacks = InstanceCallbacks {
         manifest,
         analysis: None,
+        configuration: None,
+        sources: Snapshots::new(directory.clone(), invocation.package_root),
+        directory,
     };
 
     let exit_code = rustc_driver::catch_with_exit_code(|| {
@@ -152,6 +198,9 @@ fn prepare_invocation() -> Result<DriverInvocation, String> {
     Ok(DriverInvocation {
         arguments,
         manifest_path,
+        package_root: env::var_os(crate::protocol::PACKAGE_ROOT_ENV)
+            .map(PathBuf::from)
+            .ok_or_else(|| format!("{} is not set", crate::protocol::PACKAGE_ROOT_ENV))?,
     })
 }
 
