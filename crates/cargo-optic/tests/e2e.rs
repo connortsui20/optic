@@ -3,68 +3,50 @@
 //! Each test runs the built executable against an isolated workspace.
 
 use std::ffi::OsStr;
-use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::process::Output;
 use std::process::Stdio;
 
-fn run<I, S>(directory: &Path, arguments: I) -> Output
+use cargo_optic_test_support::TestWorkspace;
+use cargo_optic_test_support::assert_success;
+use cargo_optic_test_support::run as run_command;
+
+fn run<I, S>(workspace: &TestWorkspace, arguments: I) -> Output
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    command(directory)
-        .args(arguments)
-        .output()
-        .expect("the Cargo Optic binary can run")
+    let mut command = command(workspace);
+    command.args(arguments);
+    let output = run_command(&mut command);
+    assert_success(&command, &output);
+
+    output
 }
 
-fn command(directory: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-optic"));
-
-    // These tests assert fixture artifacts below `target/release`. Remove the developer's target
-    // override so it cannot redirect those artifacts outside the isolated workspace.
+fn command(workspace: &TestWorkspace) -> Command {
+    let mut command = Command::new("cargo");
+    workspace.apply(&mut command);
+    let executable = Path::new(env!("CARGO_BIN_EXE_cargo-optic"));
+    let path = command
+        .get_envs()
+        .find(|(name, _)| *name == "PATH")
+        .unwrap()
+        .1
+        .unwrap();
+    let mut paths = vec![executable.parent().unwrap().to_owned()];
+    paths.extend(std::env::split_paths(path));
     command
-        .current_dir(directory)
-        .env_remove("CARGO_TARGET_DIR")
+        .env("PATH", std::env::join_paths(paths).unwrap())
         .arg("optic");
 
     command
 }
 
-fn copy_fixture(directory: &Path) {
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/capture");
-    fs::copy(fixture.join("Cargo.toml"), directory.join("Cargo.toml"))
-        .expect("the fixture manifest can be copied");
-    fs::create_dir(directory.join("src")).expect("the fixture source directory can be created");
-    fs::copy(fixture.join("src/lib.rs"), directory.join("src/lib.rs"))
-        .expect("the fixture source can be copied");
-    fs::copy(
-        fixture.join("src/generic.rs"),
-        directory.join("src/generic.rs"),
-    )
-    .expect("the generic fixture source can be copied");
-    fs::copy(
-        fixture.join("src/feature_gated.rs"),
-        directory.join("src/feature_gated.rs"),
-    )
-    .expect("the feature-gated fixture source can be copied");
-}
-
-#[track_caller]
-fn assert_success(output: &Output) {
-    assert!(
-        output.status.success(),
-        "command failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
-}
-
 struct CapturedGenericFixture {
     /// Keeps the captured workspace and its store alive for each command.
-    workspace: tempfile::TempDir,
+    workspace: TestWorkspace,
     /// The opaque ID parsed from the successful capture output.
     capture_id: String,
     /// The original capture output retained for capture-specific assertions.
@@ -73,11 +55,10 @@ struct CapturedGenericFixture {
 
 impl CapturedGenericFixture {
     fn new() -> Self {
-        let workspace = tempfile::tempdir().expect("the test workspace can be created");
-        copy_fixture(workspace.path());
+        let workspace = TestWorkspace::new("capture");
 
         let captured = run(
-            workspace.path(),
+            &workspace,
             [
                 "capture",
                 "-p",
@@ -87,7 +68,6 @@ impl CapturedGenericFixture {
                 "--release",
             ],
         );
-        assert_success(&captured);
         let capture_output = String::from_utf8(captured.stdout).expect("capture output is UTF-8");
         let capture_id = capture_output
             .lines()
@@ -104,13 +84,16 @@ impl CapturedGenericFixture {
     }
 
     fn find(&self, arguments: &[&str]) -> Output {
-        command(self.workspace.path())
+        let mut command = command(&self.workspace);
+        command
             .arg("find")
             .arg("--capture")
             .arg(&self.capture_id)
-            .args(arguments)
-            .output()
-            .expect("the Cargo Optic find command can run")
+            .args(arguments);
+        let output = run_command(&mut command);
+        assert_success(&command, &output);
+
+        output
     }
 }
 
@@ -123,13 +106,9 @@ fn instance_names(output: &str) -> Vec<&str> {
 
 #[test]
 fn exposes_the_cargo_subcommand_entry_point() {
-    let temporary = tempfile::tempdir().expect("the test directory can be created");
+    let temporary = TestWorkspace::new("capture");
 
-    let output = command(temporary.path())
-        .arg("--help")
-        .output()
-        .expect("the Cargo Optic binary can run");
-    assert_success(&output);
+    let output = run(&temporary, ["--help"]);
     let stdout = String::from_utf8(output.stdout).expect("help output is UTF-8");
 
     assert!(stdout.contains("Usage: cargo optic <COMMAND>"));
@@ -137,11 +116,9 @@ fn exposes_the_cargo_subcommand_entry_point() {
 
 #[test]
 fn reports_an_empty_capture_history() {
-    let temporary = tempfile::tempdir().expect("the test workspace can be created");
-    copy_fixture(temporary.path());
+    let temporary = TestWorkspace::new("capture");
 
-    let output = run(temporary.path(), ["list-captures"]);
-    assert_success(&output);
+    let output = run(&temporary, ["list-captures"]);
 
     assert_eq!(output.stdout, b"No captures.\n");
     assert!(output.stderr.is_empty());
@@ -168,16 +145,12 @@ fn captures_and_lists_a_generic_fixture_target() {
     assert!(
         fixture
             .workspace
-            .path()
-            .join(format!(
-                "target/release/generic{}",
-                std::env::consts::EXE_SUFFIX
-            ))
+            .target()
+            .join(format!("release/generic{}", std::env::consts::EXE_SUFFIX))
             .is_file()
     );
 
-    let listed = run(fixture.workspace.path(), ["list-captures"]);
-    assert_success(&listed);
+    let listed = run(&fixture.workspace, ["list-captures"]);
     let listed_text = String::from_utf8(listed.stdout).expect("listing output is UTF-8");
 
     assert!(listed_text.starts_with("Captures\n\n"));
@@ -190,7 +163,6 @@ fn captures_and_lists_a_generic_fixture_target() {
 fn finds_and_renders_concrete_instances() {
     let fixture = CapturedGenericFixture::new();
     let found = fixture.find(&["kernel"]);
-    assert_success(&found);
     let found_text = String::from_utf8(found.stdout).expect("find output is UTF-8");
     let names = instance_names(&found_text);
     let outlined_instances = names
@@ -219,8 +191,6 @@ fn finds_and_renders_concrete_instances() {
 fn applies_the_find_result_limit() {
     let fixture = CapturedGenericFixture::new();
     let limited = fixture.find(&["--limit", "1", "kernel"]);
-
-    assert_success(&limited);
     let limited_text = String::from_utf8(limited.stdout).expect("limited output is UTF-8");
     let total_matches = limited_text
         .lines()
@@ -243,39 +213,33 @@ fn reports_when_no_instances_match() {
     let fixture = CapturedGenericFixture::new();
     let missing = fixture.find(&["not_a_compiler_instance"]);
 
-    assert_success(&missing);
-
     assert_eq!(missing.stdout, b"No instances found.\n");
 }
 
 #[test]
 fn captures_the_documented_library_target() {
-    let temporary = tempfile::tempdir().expect("the test workspace can be created");
-    copy_fixture(temporary.path());
+    let temporary = TestWorkspace::new("capture");
 
     let captured = run(
-        temporary.path(),
+        &temporary,
         ["capture", "-p", "capture_fixture", "--lib", "--release"],
     );
-
-    assert_success(&captured);
     let captured_text = String::from_utf8(captured.stdout).expect("capture output is UTF-8");
     assert!(captured_text.contains("Target     lib capture_fixture"));
     assert!(
         temporary
-            .path()
-            .join("target/release/libcapture_fixture.rlib")
+            .target()
+            .join("release/libcapture_fixture.rlib")
             .is_file()
     );
 }
 
 #[test]
 fn forwards_named_feature_and_no_default_feature_selection() {
-    let temporary = tempfile::tempdir().expect("the test workspace can be created");
-    copy_fixture(temporary.path());
+    let temporary = TestWorkspace::new("capture");
 
-    let captured = run(
-        temporary.path(),
+    run(
+        &temporary,
         [
             "capture",
             "-p",
@@ -288,13 +252,11 @@ fn forwards_named_feature_and_no_default_feature_selection() {
             "--no-default-features",
         ],
     );
-
-    assert_success(&captured);
     assert!(
         temporary
-            .path()
+            .target()
             .join(format!(
-                "target/release/feature-gated{}",
+                "release/feature-gated{}",
                 std::env::consts::EXE_SUFFIX
             ))
             .is_file()
@@ -303,11 +265,10 @@ fn forwards_named_feature_and_no_default_feature_selection() {
 
 #[test]
 fn forwards_all_feature_selection() {
-    let temporary = tempfile::tempdir().expect("the test workspace can be created");
-    copy_fixture(temporary.path());
+    let temporary = TestWorkspace::new("capture");
 
-    let captured = run(
-        temporary.path(),
+    run(
+        &temporary,
         [
             "capture",
             "-p",
@@ -318,15 +279,13 @@ fn forwards_all_feature_selection() {
             "--all-features",
         ],
     );
-
-    assert_success(&captured);
 }
 
 #[test]
 fn exits_successfully_when_stdout_closes() {
-    let temporary = tempfile::tempdir().expect("the test directory can be created");
-    copy_fixture(temporary.path());
-    let mut child = command(temporary.path())
+    let temporary = TestWorkspace::new("capture");
+    let mut command = command(&temporary);
+    let mut child = command
         .arg("list-captures")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -337,7 +296,6 @@ fn exits_successfully_when_stdout_closes() {
     let output = child
         .wait_with_output()
         .expect("the Cargo Optic binary can exit");
-
-    assert_success(&output);
+    assert_success(&command, &output);
     assert!(!String::from_utf8_lossy(&output.stderr).contains("panicked"));
 }

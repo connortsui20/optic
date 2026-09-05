@@ -13,31 +13,9 @@ use optic::CargoTarget;
 use optic::CargoTargetKind;
 use optic::Error;
 use optic::Optic;
-use tempfile::TempDir;
+mod common;
 
-fn fixture_workspace(version: &str) -> TempDir {
-    let temporary = tempfile::tempdir().expect("the test workspace can be created");
-    write_manifest(&temporary, version);
-    fs::create_dir(temporary.path().join("src"))
-        .expect("the fixture source directory can be created");
-    fs::write(
-        temporary.path().join("src/lib.rs"),
-        "pub fn captured() -> bool { true }\n",
-    )
-    .expect("the fixture source can be written");
-
-    temporary
-}
-
-fn write_manifest(workspace: &TempDir, version: &str) {
-    fs::write(
-        workspace.path().join("Cargo.toml"),
-        format!(
-            "[package]\nname = \"capture_fixture\"\nversion = \"{version}\"\nedition = \"2024\"\n"
-        ),
-    )
-    .expect("the fixture manifest can be written");
-}
+use common::workspace_in_child;
 
 fn library_request() -> BuildRequest {
     BuildRequest::new("capture_fixture", CargoTarget::Library, "release")
@@ -73,8 +51,13 @@ fn rejects_relative_invocation_directories() {
 
 #[test]
 fn captures_and_lists_builds_through_the_product_api() {
-    let temporary = fixture_workspace("0.1.0");
-    let optic = Optic::open(temporary.path()).expect("the fixture workspace can be opened");
+    let Some(workspace) = workspace_in_child(
+        "captures_and_lists_builds_through_the_product_api",
+        "capture",
+    ) else {
+        return;
+    };
+    let optic = Optic::open(&workspace).expect("the fixture workspace can be opened");
     let request = library_request();
     let first = optic.capture(&request).expect("the first capture succeeds");
     let second = optic
@@ -88,19 +71,24 @@ fn captures_and_lists_builds_through_the_product_api() {
         .expect("completed captures can be listed");
     assert_eq!(captures.len(), 2);
     for capture in &captures {
-        assert_library_capture(capture, temporary.path());
+        assert_library_capture(capture, &workspace);
     }
 }
 
 #[test]
 fn captures_when_cargo_appends_selected_target_flags() {
-    let temporary = fixture_workspace("0.1.0");
+    let Some(workspace) = workspace_in_child(
+        "captures_when_cargo_appends_selected_target_flags",
+        "capture",
+    ) else {
+        return;
+    };
     fs::write(
-        temporary.path().join("build.rs"),
+        workspace.join("build.rs"),
         "fn main() { println!(\"cargo::rustc-cfg=optic_fixture\"); }\n",
     )
     .expect("the fixture build script can be written");
-    let optic = Optic::open(temporary.path()).expect("the fixture workspace can be opened");
+    let optic = Optic::open(&workspace).expect("the fixture workspace can be opened");
 
     let capture = optic
         .capture(&library_request())
@@ -121,8 +109,13 @@ fn captures_when_cargo_appends_selected_target_flags() {
 
 #[test]
 fn failed_target_resolution_does_not_publish_a_capture() {
-    let temporary = fixture_workspace("0.1.0");
-    let optic = Optic::open(temporary.path()).expect("the fixture workspace can be opened");
+    let Some(workspace) = workspace_in_child(
+        "failed_target_resolution_does_not_publish_a_capture",
+        "capture",
+    ) else {
+        return;
+    };
+    let optic = Optic::open(&workspace).expect("the fixture workspace can be opened");
     let request = BuildRequest::new(
         "capture_fixture",
         CargoTarget::Binary("missing".to_owned()),
@@ -152,10 +145,14 @@ fn failed_target_resolution_does_not_publish_a_capture() {
 
 #[test]
 fn failed_cargo_process_does_not_publish_a_capture() {
-    let temporary = fixture_workspace("0.1.0");
-    fs::write(temporary.path().join("src/lib.rs"), "pub fn broken( {\n")
+    let Some(workspace) =
+        workspace_in_child("failed_cargo_process_does_not_publish_a_capture", "capture")
+    else {
+        return;
+    };
+    fs::write(workspace.join("src/lib.rs"), "pub fn broken( {\n")
         .expect("the invalid fixture source can be written");
-    let optic = Optic::open(temporary.path()).expect("the fixture workspace can be opened");
+    let optic = Optic::open(&workspace).expect("the fixture workspace can be opened");
 
     let error = optic
         .capture(&library_request())
@@ -184,9 +181,19 @@ fn failed_cargo_process_does_not_publish_a_capture() {
 
 #[test]
 fn refreshes_cargo_metadata_for_each_capture() {
-    let temporary = fixture_workspace("0.1.0");
-    let optic = Optic::open(temporary.path()).expect("the fixture workspace can be opened");
-    write_manifest(&temporary, "0.2.0");
+    let Some(workspace) =
+        workspace_in_child("refreshes_cargo_metadata_for_each_capture", "capture")
+    else {
+        return;
+    };
+    let optic = Optic::open(&workspace).expect("the fixture workspace can be opened");
+    let manifest = workspace.join("Cargo.toml");
+    let contents = fs::read_to_string(&manifest).unwrap();
+    fs::write(
+        manifest,
+        contents.replace("version = \"0.1.0\"", "version = \"0.2.0\""),
+    )
+    .unwrap();
 
     let capture = optic
         .capture(&library_request())
