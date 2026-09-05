@@ -217,6 +217,63 @@ fn reports_when_no_instances_match() {
 }
 
 #[test]
+fn reports_reuse_and_forced_capture_through_cargo_discovery() {
+    let fixture = CapturedGenericFixture::new();
+    let arguments = [
+        "capture",
+        "-p",
+        "capture_fixture",
+        "--bin",
+        "generic",
+        "--release",
+    ];
+    let reused = run(&fixture.workspace, arguments);
+    let reused_text = String::from_utf8(reused.stdout).unwrap();
+    assert_eq!(
+        reused_text.lines().next().unwrap(),
+        format!("Reused {}", fixture.capture_id)
+    );
+
+    let listed = run(&fixture.workspace, ["list-captures"]);
+    let listed_text = String::from_utf8(listed.stdout).unwrap();
+    assert_eq!(
+        listed_text
+            .lines()
+            .filter(|line| line.starts_with("Capture "))
+            .count(),
+        1
+    );
+
+    let fresh = run(&fixture.workspace, arguments.into_iter().chain(["--fresh"]));
+    let fresh_text = String::from_utf8(fresh.stdout).unwrap();
+    let fresh_id = fresh_text
+        .lines()
+        .next()
+        .unwrap()
+        .strip_prefix("Captured ")
+        .unwrap();
+    assert_ne!(fresh_id, fixture.capture_id);
+    let repeated = run(&fixture.workspace, arguments);
+    let repeated_text = String::from_utf8(repeated.stdout).unwrap();
+    assert_eq!(
+        repeated_text.lines().next().unwrap(),
+        format!("Reused {fresh_id}")
+    );
+
+    let listed = run(&fixture.workspace, ["list-captures"]);
+    let listed_text = String::from_utf8(listed.stdout).unwrap();
+    assert_eq!(
+        listed_text
+            .lines()
+            .filter(|line| line.starts_with("Capture "))
+            .count(),
+        2
+    );
+    assert!(listed_text.contains(&format!("Capture {}", fixture.capture_id)));
+    assert!(listed_text.contains(&format!("Capture {fresh_id}")));
+}
+
+#[test]
 fn captures_the_documented_library_target() {
     let temporary = TestWorkspace::new("capture");
 

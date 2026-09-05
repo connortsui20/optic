@@ -1,4 +1,4 @@
-//! Counts selected-target collection independently from dependency compilation.
+//! Counts selected-target probes and collection independently from dependency compilation.
 //!
 //! A stable Cargo forwarding shim wraps the product driver without changing its arguments. This
 //! observes the outer selected invocation even though the driver runs rustc analysis in-process.
@@ -15,10 +15,11 @@ use cargo_optic_test_support::assert_success;
 use cargo_optic_test_support::run;
 use optic_compiler::BuildRequest;
 use optic_compiler::CargoTarget;
-use optic_compiler::collect_build;
+use optic_compiler::Freshness;
 use optic_compiler::discover_workspace;
+use optic_compiler::prepare_build;
 
-fn collect_in_process(workspace: &TestWorkspace) {
+fn run_in_process(workspace: &TestWorkspace, operation: &str) {
     let mut command = Command::new(env::current_exe().unwrap());
     workspace.apply(&mut command);
     let cargo = command
@@ -30,7 +31,7 @@ fn collect_in_process(workspace: &TestWorkspace) {
         .to_owned();
     command
         .args(["--exact", "observed_collection_child", "--nocapture"])
-        .env("OPTIC_TEST_CHILD", "1")
+        .env("OPTIC_TEST_CHILD", operation)
         .env("CARGO", workspace.observations().join("cargo"))
         .env("OPTIC_TEST_REAL_CARGO", cargo)
         .env(
@@ -38,7 +39,10 @@ fn collect_in_process(workspace: &TestWorkspace) {
             workspace.observations().join("rustc-observer"),
         )
         .env("OPTIC_TEST_EVENTS", workspace.observations().join("events"))
-        .env("OPTIC_COMPILER_MODE", "collect");
+        .env(
+            "OPTIC_TEST_ANALYSIS",
+            workspace.observations().join("analysis.json"),
+        );
     let output = run(&mut command);
     eprintln!(
         "observations: {}",
@@ -48,7 +52,7 @@ fn collect_in_process(workspace: &TestWorkspace) {
 }
 
 #[test]
-fn counts_cold_collection_and_preserves_warm_dependencies() {
+fn counts_cold_warm_stale_and_forced_selected_work() {
     let workspace = TestWorkspace::new("capture");
 
     for (name, source) in [
@@ -60,44 +64,34 @@ fn counts_cold_collection_and_preserves_warm_dependencies() {
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    collect_in_process(&workspace);
-    let cold = fs::read_to_string(workspace.observations().join("events")).unwrap();
-    assert_eq!(
-        cold.lines()
-            .filter(|line| *line == "selected-collect")
-            .count(),
-        1,
-        "{cold}"
-    );
-    assert_eq!(
-        cold.lines().filter(|line| *line == "dependency").count(),
-        1,
-        "{cold}"
-    );
-    assert!(!cold.contains("selected-probe"), "{cold}");
+    run_in_process(&workspace, "collect");
+    assert_counts(&workspace, 1, 0, 1);
 
-    collect_in_process(&workspace);
-    let warm = fs::read_to_string(workspace.observations().join("events")).unwrap();
-    assert_eq!(
-        warm.lines()
-            .filter(|line| *line == "selected-collect")
-            .count(),
-        2,
-        "{warm}"
-    );
-    assert_eq!(
-        warm.lines().filter(|line| *line == "dependency").count(),
-        1,
-        "{warm}"
-    );
-    assert!(!warm.contains("selected-probe"), "{warm}");
+    run_in_process(&workspace, "fresh");
+    assert_counts(&workspace, 1, 0, 1);
+
+    let source = workspace.workspace().join("src/generic.rs");
+    let contents = fs::read_to_string(&source).unwrap();
+    fs::write(source, contents.replace("outlined_kernel", "edited_kernel")).unwrap();
+    run_in_process(&workspace, "stale");
+    assert_counts(&workspace, 1, 1, 1);
+
+    run_in_process(&workspace, "collect");
+    assert_counts(&workspace, 2, 1, 1);
+    run_in_process(&workspace, "fresh");
+    assert_counts(&workspace, 2, 1, 1);
+
+    run_in_process(&workspace, "collect");
+    assert_counts(&workspace, 3, 1, 1);
+    run_in_process(&workspace, "fresh");
+    assert_counts(&workspace, 3, 1, 1);
 }
 
 #[test]
 fn observed_collection_child() {
-    if env::var_os("OPTIC_TEST_CHILD").is_none() {
+    let Ok(operation) = env::var("OPTIC_TEST_CHILD") else {
         return;
-    }
+    };
 
     let workspace = discover_workspace(&env::current_dir().unwrap()).unwrap();
     let request = BuildRequest::new(
@@ -106,7 +100,58 @@ fn observed_collection_child() {
         "release",
     )
     .unwrap();
-    let collection = collect_build(&workspace, &request).unwrap();
-    let (_, _, instances) = collection.into_parts();
-    assert!(!instances.is_empty());
+    let mut prepared = prepare_build(&workspace, &request).unwrap();
+    let analysis_path = env::var_os("OPTIC_TEST_ANALYSIS").unwrap();
+
+    match operation.as_str() {
+        "collect" => {
+            let request_key = prepared.request_key().clone();
+            let collection = prepared.collect().unwrap();
+            let (_, _, instances, analysis) = collection.into_parts();
+            assert!(!instances.is_empty());
+            assert_eq!(analysis.request_key(), &request_key);
+            fs::write(analysis_path, serde_json::to_vec(&analysis).unwrap()).unwrap();
+        }
+        "fresh" | "stale" => {
+            let analysis = serde_json::from_slice(&fs::read(analysis_path).unwrap()).unwrap();
+            let freshness = prepared.probe(&analysis).unwrap();
+            match operation.as_str() {
+                "fresh" => assert!(matches!(freshness, Freshness::Fresh)),
+                "stale" => assert!(matches!(freshness, Freshness::Stale)),
+                _ => unreachable!(),
+            }
+        }
+        _ => panic!("unknown observation operation {operation}"),
+    }
+}
+
+#[track_caller]
+fn assert_counts(
+    workspace: &TestWorkspace,
+    collections: usize,
+    probes: usize,
+    dependencies: usize,
+) {
+    let events = fs::read_to_string(workspace.observations().join("events")).unwrap();
+    assert_eq!(
+        events
+            .lines()
+            .filter(|line| *line == "selected-collect")
+            .count(),
+        collections,
+        "{events}"
+    );
+    assert_eq!(
+        events
+            .lines()
+            .filter(|line| *line == "selected-probe")
+            .count(),
+        probes,
+        "{events}"
+    );
+    assert_eq!(
+        events.lines().filter(|line| *line == "dependency").count(),
+        dependencies,
+        "{events}"
+    );
 }

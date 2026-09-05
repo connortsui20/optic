@@ -3,17 +3,19 @@
 //! Tests run the real compiler and store through [`Optic`](optic::Optic); subsystem tests cover
 //! local errors.
 
+mod common;
+
 use std::fs;
 use std::path::Path;
 
 use optic::BuildRequest;
 use optic::CaptureError;
+use optic::CapturePolicy;
 use optic::CaptureRecord;
 use optic::CargoTarget;
 use optic::CargoTargetKind;
 use optic::Error;
 use optic::Optic;
-mod common;
 
 use common::workspace_in_child;
 
@@ -59,17 +61,22 @@ fn captures_and_lists_builds_through_the_product_api() {
     };
     let optic = Optic::open(&workspace).expect("the fixture workspace can be opened");
     let request = library_request();
-    let first = optic.capture(&request).expect("the first capture succeeds");
+    let first = optic
+        .capture(&request, CapturePolicy::Reuse)
+        .expect("the first capture succeeds")
+        .into_record();
     let second = optic
-        .capture(&request)
-        .expect("the second capture succeeds");
+        .capture(&request, CapturePolicy::Reuse)
+        .expect("the second capture succeeds")
+        .into_record();
 
-    assert_ne!(first.id(), second.id());
+    assert_eq!(first.id(), second.id());
+    assert_eq!(first.completed_at_unix_ms(), second.completed_at_unix_ms());
 
     let captures = optic
         .list_captures()
         .expect("completed captures can be listed");
-    assert_eq!(captures.len(), 2);
+    assert_eq!(captures.len(), 1);
     for capture in &captures {
         assert_library_capture(capture, &workspace);
     }
@@ -91,8 +98,9 @@ fn captures_when_cargo_appends_selected_target_flags() {
     let optic = Optic::open(&workspace).expect("the fixture workspace can be opened");
 
     let capture = optic
-        .capture(&library_request())
-        .expect("the selected target can receive build-script flags");
+        .capture(&library_request(), CapturePolicy::Reuse)
+        .expect("the selected target can receive build-script flags")
+        .into_record();
 
     assert_eq!(
         capture.build().cargo_arguments(),
@@ -105,6 +113,33 @@ fn captures_when_cargo_appends_selected_target_flags() {
             "release",
         ]
     );
+}
+
+#[test]
+fn reuses_a_custom_profile_with_its_observed_settings() {
+    let Some(workspace) = workspace_in_child(
+        "reuses_a_custom_profile_with_its_observed_settings",
+        "capture",
+    ) else {
+        return;
+    };
+    let optic = Optic::open(&workspace).unwrap();
+    let request = BuildRequest::new(
+        "capture_fixture",
+        CargoTarget::Binary("generic".to_owned()),
+        "checked",
+    )
+    .unwrap();
+    let first = optic
+        .capture(&request, CapturePolicy::Reuse)
+        .unwrap()
+        .into_record();
+    let second = optic.capture(&request, CapturePolicy::Reuse).unwrap();
+
+    assert!(matches!(second, optic::CaptureOutcome::Reused(_)));
+    assert_eq!(first, second.into_record());
+    assert_eq!(first.build().profile(), "checked");
+    assert_eq!(optic.list_captures().unwrap().len(), 1);
 }
 
 #[test]
@@ -124,7 +159,7 @@ fn failed_target_resolution_does_not_publish_a_capture() {
     .expect("the missing target is syntactically valid");
 
     let error = optic
-        .capture(&request)
+        .capture(&request, CapturePolicy::Reuse)
         .expect_err("the missing target must fail capture");
 
     assert!(matches!(
@@ -155,7 +190,7 @@ fn failed_cargo_process_does_not_publish_a_capture() {
     let optic = Optic::open(&workspace).expect("the fixture workspace can be opened");
 
     let error = optic
-        .capture(&library_request())
+        .capture(&library_request(), CapturePolicy::Reuse)
         .expect_err("the invalid source must fail capture");
 
     assert!(matches!(
@@ -196,8 +231,9 @@ fn refreshes_cargo_metadata_for_each_capture() {
     .unwrap();
 
     let capture = optic
-        .capture(&library_request())
-        .expect("the changed workspace can be captured");
+        .capture(&library_request(), CapturePolicy::Reuse)
+        .expect("the changed workspace can be captured")
+        .into_record();
 
     assert_eq!(capture.build().package_version(), "0.2.0");
 }

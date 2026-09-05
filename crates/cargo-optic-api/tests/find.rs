@@ -3,18 +3,19 @@
 //! These tests use the actual selected compiler because only rustc can establish monomorphization,
 //! placement, and raw-symbol behavior. Evidence remains scoped to the capture that produced it.
 
+mod common;
+
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
-mod common;
-
-use common::workspace_in_child;
-
 use optic::BuildRequest;
+use optic::CapturePolicy;
 use optic::CaptureRecord;
 use optic::CargoTarget;
 use optic::Optic;
+
+use common::workspace_in_child;
 
 const FIRST_SCOPE: &str = "first_scope_kernel";
 const SECOND_SCOPE: &str = "second_scope_kernel";
@@ -50,8 +51,9 @@ impl CapturedFindFixture {
         )
         .expect("the fixture request is valid");
         let first = optic
-            .capture(&request)
-            .expect("the first generic fixture capture succeeds");
+            .capture(&request, CapturePolicy::Reuse)
+            .expect("the first generic fixture capture succeeds")
+            .into_record();
 
         Self {
             workspace,
@@ -126,8 +128,9 @@ fn isolates_instances_between_captures() {
     write_fixture(&fixture.workspace, SECOND_SCOPE);
     let second = fixture
         .optic
-        .capture(&fixture.request)
-        .expect("the changed generic fixture capture succeeds");
+        .capture(&fixture.request, CapturePolicy::Reuse)
+        .expect("the changed generic fixture capture succeeds")
+        .into_record();
 
     assert!(
         !fixture
