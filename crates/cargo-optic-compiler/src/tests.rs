@@ -242,3 +242,169 @@ fn driver_protocol_child() {
         "build\n"
     );
 }
+
+#[test]
+fn retained_bitcode_proves_no_lto_and_local_thin_lto_stages() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let compiler = Command::new("rustc")
+        .args(["--print", "sysroot"])
+        .output()
+        .unwrap();
+    assert!(compiler.status.success());
+    let sysroot = PathBuf::from(String::from_utf8(compiler.stdout).unwrap().trim());
+    let rustc = sysroot.join("bin/rustc");
+    let version = Command::new(&rustc).arg("-vV").output().unwrap();
+    let version = String::from_utf8(version.stdout).unwrap();
+    assert!(version.contains("commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985"));
+    let host = version
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .unwrap();
+    let llvm_dis = sysroot.join("lib/rustlib").join(host).join("bin/llvm-dis");
+    let driver = root.join("stage-proof");
+    let source = root.join("stage-proof.rs");
+    fs::write(&source, include_str!("../rustc-driver/stage-proof.rs")).unwrap();
+    let mut compile = Command::new(&rustc);
+    compile
+        .args([
+            "--crate-name",
+            "optic_stage_proof",
+            "--edition=2024",
+            "-C",
+            "prefer-dynamic",
+            "-C",
+            "rpath",
+        ])
+        .arg(&source)
+        .arg("-o")
+        .arg(&driver)
+        .env("RUSTC_BOOTSTRAP", "optic_stage_proof");
+    let output = compile.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let input = root.join("input.rs");
+    fs::write(&input, r#"
+pub mod first {
+    #[unsafe(no_mangle)]
+    #[inline(never)]
+    pub fn folded_first(value: u64) -> u64 { value.wrapping_add(7).wrapping_sub(value).wrapping_add(35) }
+}
+pub mod second {
+    #[unsafe(no_mangle)]
+    #[inline(never)]
+    pub fn folded_second(value: u64) -> u64 { value.wrapping_add(7).wrapping_sub(value).wrapping_add(10) }
+}
+fn main() { assert_eq!(first::folded_first(10) + second::folded_second(20), 59); }
+"#).unwrap();
+
+    for (label, lto) in [("no-lto", Some("lto=off")), ("local-thin", None)] {
+        let mut configurations = Vec::new();
+
+        for retain in [false, true] {
+            let directory = root.join(format!("{label}-{retain}"));
+            fs::create_dir(&directory).unwrap();
+            let executable = directory.join("proof-input");
+            let mut command = Command::new(&driver);
+            command
+                .arg(&input)
+                .args([
+                    "--crate-name",
+                    "proof_input",
+                    "--edition=2024",
+                    "-C",
+                    "opt-level=3",
+                    "-C",
+                    "codegen-units=4",
+                ])
+                .arg("-o")
+                .arg(&executable)
+                .env("OPTIC_PROOF_DIRECTORY", &directory);
+            if let Some(lto) = lto {
+                command.arg("-C").arg(lto);
+            }
+            if retain {
+                command.env("OPTIC_PROOF_RETAIN", "1");
+            }
+
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{command:?}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(Command::new(&executable).status().unwrap().success());
+            configurations.push(fs::read_to_string(directory.join("configuration")).unwrap());
+            if !retain {
+                continue;
+            }
+
+            let modules = fs::read_to_string(directory.join("modules")).unwrap();
+            assert!(modules.lines().count() > 1, "{modules}");
+            let mut folded = 0;
+
+            for module in modules.lines() {
+                let (_, paths) = module.split_once('\t').unwrap();
+                let (path, before) = paths.split_once('\t').unwrap();
+                assert!(fs::metadata(path).unwrap().len() > 0, "{path}");
+                let output = Command::new(&llvm_dis)
+                    .args([path, "-o", "-"])
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let text = String::from_utf8(output.stdout).unwrap();
+
+                for (symbol, expected) in [
+                    ("folded_first", "ret i64 42"),
+                    ("folded_second", "ret i64 17"),
+                ] {
+                    if let Some(header) = text.lines().find(|line| {
+                        line.starts_with("define ") && line.contains(&format!("@{symbol}("))
+                    }) {
+                        let start = text.find(header).unwrap();
+                        let body = text[start..].split_once("\n}").unwrap().0;
+                        assert!(body.contains(expected), "{path}: {body}");
+                        let output = Command::new(&llvm_dis)
+                            .args([before, "-o", "-"])
+                            .output()
+                            .unwrap();
+                        assert!(output.status.success());
+                        let before = String::from_utf8(output.stdout).unwrap();
+                        let header = before
+                            .lines()
+                            .find(|line| {
+                                line.starts_with("define ") && line.contains(&format!("@{symbol}("))
+                            })
+                            .unwrap();
+                        let body = before[before.find(header).unwrap()..]
+                            .split_once("\n}")
+                            .unwrap()
+                            .0;
+                        assert!(
+                            !body.contains(expected),
+                            "the no-opt module must precede constant folding: {body}"
+                        );
+                        folded += 1;
+                    }
+                }
+            }
+
+            assert_eq!(folded, 2);
+            eprintln!(
+                "{label}: {} regular modules\n{}",
+                modules.lines().count(),
+                configurations.last().unwrap()
+            );
+        }
+
+        assert_eq!(configurations[0], configurations[1]);
+    }
+}
