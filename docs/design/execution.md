@@ -33,8 +33,8 @@ The capture format revision changes with this schema. No compatibility construct
 The compiler exposes `prepare_build(workspace, request) -> PreparedBuild` and these methods:
 
 - `PreparedBuild::request_key()` returns the normalized request key.
-- `PreparedBuild::probe(&CaptureAnalysis)` returns `Freshness::{Fresh, Stale}` or an error.
-- `PreparedBuild::collect()` returns one `CollectedBuild` with a newly generated analysis token.
+- `PreparedBuild::probe(&mut self, &CaptureAnalysis)` returns `Freshness::{Fresh, Stale}` or an error.
+- `PreparedBuild::collect(self)` returns one `CollectedBuild` with a newly generated analysis token.
 - `CollectedBuild::into_parts()` returns build, compiler, instances, and analysis records.
 
 The store exposes `initialize()` before any build/probe. `read_candidate(&CaptureKey)` returns an
@@ -46,6 +46,11 @@ The integration owner adds `CapturePolicy::{Reuse, Fresh}` and
 `CaptureOutcome::{Captured(CaptureRecord), Reused(CaptureRecord)}` in the capture crate.
 `Optic::capture(request, policy)` exposes these semantics. Existing compiler convenience entry points
 can remain during test migration, but remove unused compatibility wrappers before final review.
+
+The prepared operation owns a stopped probe's diagnostic file until collection finishes. A mutable
+probe and consuming collection keep that lifetime explicit without shared or interior-mutable
+state. Collection failure replays the retained probe diagnostics. Collection success discards the
+intentional probe abort.
 
 Use `sha2` 0.10.9 for driver/request digests and the existing Cargo metadata library for structured
 messages. Keep the existing private driver protocol and extend its documented records as required.
@@ -71,6 +76,11 @@ Rust 1.98.1 and its required components are installed locally. The existing six 
 unit tests pass on that toolchain. The new standalone-driver formatting check found two baseline
 formatting differences, which the compiler worker will include in its owned changes.
 
-The integration owner has drafted capture policy/outcome and CLI reuse output against the shared
-interfaces. Compiler, records/store, and harness changes are in progress. These changes are not yet
-an integrated or accepted Checkpoint A.
+The foundation CI run passed the existing tests on Linux and macOS. Its quality job failed on the
+two standalone-driver formatting differences. This is baseline evidence, not Checkpoint A evidence.
+
+Validated analysis records, capture policy/outcome, CLI reuse output, shared fixtures, isolated child
+processes, and cache-journey tests are integrated locally. The focused records suite has 31 passing
+tests. The isolated helper test and focused Clippy checks also pass. The store worker delivered 37
+passing store tests with bounded records, candidate validation, and deterministic publication
+failures. Compiler integration and full cross-process cache verification remain in progress.
