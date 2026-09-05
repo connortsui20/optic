@@ -41,9 +41,6 @@ pub fn run_build(workspace: &Workspace, request: &BuildRequest) -> Result<BuildR
     let target = resolve_target(package, request.target())?;
     let arguments = cargo_arguments(request);
 
-    // TODO(connor)[Capture output]: Replace the inherited streams with bounded event supervision
-    // when capture reads Cargo JSON. The supervisor must drain both output pipes and stop Cargo
-    // when its consumer stops.
     let status = Command::new(workspace.cargo())
         .current_dir(workspace.invocation_directory())
         .args(&arguments)
