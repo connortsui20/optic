@@ -10,8 +10,36 @@
 //! do not prove that recorded provenance is true. Readers accept only the format version written by
 //! this release.
 
-// Revision 3 requires the analysis identity and normalized Cargo artifact observation.
-const CAPTURE_FORMAT_VERSION: u32 = 3;
+// Revision 4 requires source availability, artifact references, and complete LLVM collection state.
+const CAPTURE_FORMAT_VERSION: u32 = 4;
+
+mod artifact;
+pub use artifact::ArtifactId;
+pub use artifact::ArtifactKind;
+pub use artifact::ArtifactRecord;
+
+mod byte_range;
+pub use byte_range::ByteRange;
+
+mod instance_ref;
+pub use instance_ref::InstanceRef;
+
+mod source;
+pub use source::SourceAvailability;
+pub use source::SourceRecord;
+pub use source::SourceUnavailable;
+
+mod llvm;
+pub use llvm::LlvmCollection;
+pub use llvm::LlvmDefinitionKind;
+pub use llvm::LlvmDefinitionRecord;
+pub use llvm::LlvmModuleRecord;
+pub use llvm::LlvmStage;
+pub use llvm::UnsupportedLlvmConfiguration;
+
+mod llvm_provenance;
+pub use llvm_provenance::LlvmLto;
+pub use llvm_provenance::LlvmProvenance;
 
 mod analysis_token;
 pub use analysis_token::AnalysisToken;

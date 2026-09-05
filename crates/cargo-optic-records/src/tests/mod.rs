@@ -2,6 +2,8 @@
 //!
 //! Constructors and deserializers must reject the same malformed fields.
 
+mod evidence;
+
 use std::path::PathBuf;
 
 use crate::AnalysisToken;
@@ -16,7 +18,12 @@ use crate::CompilerIdentity;
 use crate::DefinitionRecord;
 use crate::InstanceManifest;
 use crate::InstanceRecord;
+use crate::LlvmCollection;
+use crate::LlvmLto;
+use crate::LlvmProvenance;
 use crate::PlacementRecord;
+use crate::SourceAvailability;
+use crate::SourceUnavailable;
 use crate::TargetRecord;
 
 fn capture_id() -> CaptureId {
@@ -103,13 +110,35 @@ fn instance() -> InstanceRecord {
         "example::kernel::<u64>",
         "_RNvCexample6kernelm",
         vec![placement],
+        SourceAvailability::Unavailable(SourceUnavailable::Nonlocal),
     )
     .expect("the fixture instance is valid")
 }
 
 fn manifest() -> InstanceManifest {
-    InstanceManifest::new(capture_id(), vec![instance()])
-        .expect("the fixture instance manifest is valid")
+    InstanceManifest::new(
+        capture_id(),
+        vec![instance()],
+        vec![],
+        provenance(),
+        LlvmCollection::Collected(vec![]),
+    )
+    .expect("the fixture instance manifest is valid")
+}
+
+fn provenance() -> LlvmProvenance {
+    LlvmProvenance::new(
+        "llvm",
+        Some("22.1.0".into()),
+        "x86_64-unknown-linux-gnu",
+        "3",
+        LlvmLto::Off,
+        false,
+        false,
+        16,
+        1,
+    )
+    .unwrap()
 }
 
 #[track_caller]
@@ -147,11 +176,11 @@ fn round_trips_a_valid_record() {
 #[test]
 fn rejects_an_unknown_capture_format() {
     let encoded = serde_json::to_string(&record()).expect("the fixture record can be encoded");
-    let unsupported_version = encoded.replace(r#""format_version":3"#, r#""format_version":4"#);
+    let unsupported_version = encoded.replace(r#""format_version":4"#, r#""format_version":5"#);
 
     assert_record_error(
         &unsupported_version,
-        "capture format version must be 3, got 4",
+        "capture format version must be 4, got 5",
     );
 }
 
@@ -169,7 +198,7 @@ fn reports_the_previous_capture_format_before_its_missing_fields() {
         serde_json::from_value::<CaptureRecord>(serde_json::Value::Object(previous.clone()))
             .expect_err("the previous capture format must be rejected");
 
-    assert_eq!(error.to_string(), "capture format version must be 3, got 1");
+    assert_eq!(error.to_string(), "capture format version must be 4, got 1");
 }
 
 #[test]
@@ -180,7 +209,7 @@ fn round_trips_a_current_instance_manifest_without_body_metadata() {
         .expect("the encoded fixture manifest can be read");
 
     assert_eq!(actual, expected);
-    assert_eq!(actual.format_version(), 3);
+    assert_eq!(actual.format_version(), 4);
     assert_eq!(actual.capture_id(), record().id());
     assert!(!encoded.contains("body"));
 }
@@ -188,11 +217,11 @@ fn round_trips_a_current_instance_manifest_without_body_metadata() {
 #[test]
 fn rejects_an_unknown_instance_manifest_format() {
     let encoded = serde_json::to_string(&manifest()).expect("the fixture manifest can be encoded");
-    let unsupported_version = encoded.replace(r#""format_version":3"#, r#""format_version":4"#);
+    let unsupported_version = encoded.replace(r#""format_version":4"#, r#""format_version":5"#);
     let error = serde_json::from_str::<InstanceManifest>(&unsupported_version)
         .expect_err("the unsupported manifest must be rejected");
 
-    assert_eq!(error.to_string(), "capture format version must be 3, got 4");
+    assert_eq!(error.to_string(), "capture format version must be 4, got 5");
 }
 
 #[test]
@@ -224,6 +253,7 @@ fn rejects_duplicate_codegen_unit_placements() {
         "example::kernel::<u64>",
         "_RNvCexample6kernelm",
         vec![placement.clone(), placement],
+        SourceAvailability::Unavailable(SourceUnavailable::Nonlocal),
     )
     .expect_err("duplicate codegen units must be rejected");
 
@@ -233,8 +263,14 @@ fn rejects_duplicate_codegen_unit_placements() {
 #[test]
 fn rejects_duplicate_instance_identities() {
     let duplicate = instance();
-    let error = InstanceManifest::new(capture_id(), vec![duplicate.clone(), duplicate])
-        .expect_err("duplicate instance identities must be rejected");
+    let error = InstanceManifest::new(
+        capture_id(),
+        vec![duplicate.clone(), duplicate],
+        vec![],
+        provenance(),
+        LlvmCollection::Collected(vec![]),
+    )
+    .expect_err("duplicate instance identities must be rejected");
 
     assert!(error.to_string().contains("duplicate instance"));
 }
