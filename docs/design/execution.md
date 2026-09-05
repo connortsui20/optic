@@ -2,7 +2,7 @@
 
 Implementation starts from `main` at `684991a` plus the CI commit `b18b658` on `ct/complete-mvp`.
 The approved specification is the plan at `15a4ccb`. Draft PR #17 carries the implementation.
-No checkpoint is complete yet.
+Checkpoint A is accepted at `0813fba`. Checkpoints B and C remain incomplete.
 
 ## Ownership
 
@@ -61,7 +61,7 @@ messages. Keep the existing private driver protocol and extend its documented re
 - [x] Allocate isolated compiler, storage, and testing worktrees.
 - [x] Commit the pinned toolchain, standalone formatting check, CI timeouts, and contributor guide.
 - [x] Establish reproducible checks and the shared test harness.
-- [ ] Implement and verify Checkpoint A on Linux and macOS.
+- [x] Implement and verify Checkpoint A on Linux and macOS.
 - [ ] Implement and verify narrow show with the final cache format.
 - [ ] Verify packaged installation and external library use.
 - [ ] Resolve independent correctness and Rust-style reviews.
@@ -74,10 +74,11 @@ The [show interfaces](show-interfaces.md) fix the next checkpoint's worker bound
 
 ## Current verification
 
-Rust 1.98.1 and its required components are installed locally. The integrated revision `6d3b847`
-passes 148 workspace tests, standalone/workspace formatting, Clippy with warnings denied, and
-rustdoc with warnings denied. Draft PR #17 contains this revision. CI quality passes, with Linux
-and macOS workspace tests still running.
+Rust 1.98.1 and its required components are installed locally. The accepted revision `0813fba`
+passes 149 workspace tests, standalone/workspace formatting, Clippy with warnings denied, and
+rustdoc with warnings denied. Draft PR #17 contains this revision. All jobs in
+[CI run 33996076997](https://github.com/connortsui20/optic/actions/runs/33996076997) pass, including
+Linux and macOS workspace tests. Checkpoint A is complete.
 
 The cache tests cover real selected-target and driver work counts, cold/warm/stale/forced requests,
 source/dependency/build-script changes, tracked environment, RUSTFLAGS, and A/B/A configuration
@@ -89,6 +90,7 @@ bookkeeping file on a fresh invocation. The corrected test preserves full stored
 target/build inventories and sizes, and the selected executable's modification time. Independent
 positive work counts still establish that warm reuse performs no compiler analysis.
 
-Real example/benchmark selection and invocation-subdirectory coverage are the final request-matrix
-additions before accepting A. No B implementation has started. Before C packaging, remove the
-compiler unit process tests' dependency on the unpublished helper from retained package tests.
+Real example/benchmark selection and invocation-subdirectory coverage pass in the final A revision.
+B starts from this accepted revision under [the persisted interfaces](show-interfaces.md). Before C
+packaging, remove the compiler unit process tests' dependency on the unpublished helper from retained
+package tests.
