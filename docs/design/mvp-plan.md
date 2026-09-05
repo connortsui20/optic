@@ -3,10 +3,13 @@
 This plan finishes the product defined in [PLAN.md](PLAN.md). It replaces the previous sequence of
 small stabilization and feature PRs. One integration branch carries the complete implementation.
 
+All required work is complete in [PR #17](https://github.com/connortsui20/optic/pull/17), merged as
+`bae4ca0`. The [acceptance index](acceptance-evidence.md) records the final evidence.
+
 ## Work ledger
 
-The user-visible completion criterion applies to the whole MVP. The following unchecked items are
-required work, including tests and documentation.
+The user-visible completion criterion applies to the whole MVP. This ledger retains the completed
+work, its dependencies, and the acceptance owners.
 
 | ID | Work | Dependency | Acceptance owner |
 | --- | --- | --- | --- |
@@ -103,7 +106,7 @@ reader semantics. Do not add convenience query selection or another compiler out
 - [x] Reconcile public APIs, record constants, help text, tests, and the architecture guide.
 - [x] Complete independent correctness and Rust-style reviews of the whole implementation.
 - [x] Run the final CI suite on the exact revision to merge.
-- [ ] Squash-merge the complete MVP and update `planning` with its evidence and status.
+- [x] Squash-merge the complete MVP and update `planning` with its evidence and status.
 
 The [installation document](installation.md) owns packaging and the external-consumer test. The
 [agent workflow](agent-workflow.md) owns assignments, review, and merging.
@@ -138,5 +141,5 @@ Their findings added explicit capture-orchestrator ownership, unsupported-LLVM t
 profile observations, and protection against default build-script tracking of store output.
 Both reviewers verified their findings were resolved. Local Markdown links and anchors pass validation.
 
-This is planning evidence, not implementation acceptance. The optimized artifact-stage mapping still
-requires the compiler reproduction specified in the show contract.
+This section records planning evidence, not implementation acceptance. The completed compiler
+reproduction and implementation acceptance are recorded in the [execution ledger](execution.md).

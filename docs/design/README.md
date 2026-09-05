@@ -2,7 +2,9 @@
 
 The `planning` branch contains the active Cargo Optic roadmap and retained prototype evidence.
 
-The [execution ledger](execution.md) records current implementation ownership and checkpoint status.
+The MVP is complete on `main` through [PR #17](https://github.com/connortsui20/optic/pull/17).
+The [execution ledger](execution.md) records ownership, accepted checkpoints, and the final merge.
+The contracts below describe the completed MVP. They do not authorize deferred features.
 
 Read these active documents in order:
 

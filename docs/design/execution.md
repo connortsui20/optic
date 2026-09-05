@@ -1,8 +1,12 @@
 # MVP execution ledger
 
-Implementation starts from `main` at `684991a` plus the CI commit `b18b658` on `ct/complete-mvp`.
-The approved specification is the plan at `15a4ccb`. Draft PR #17 carries the implementation.
-Checkpoint A is accepted at `0813fba`. Checkpoint B is accepted at `ed164a3`. C remains incomplete.
+The complete MVP is merged in [PR #17](https://github.com/connortsui20/optic/pull/17) as `bae4ca0`.
+Implementation started from `main` at `684991a` plus CI commit `b18b658` on `ct/complete-mvp`, under
+the approved specification originally committed as `15a4ccb`. All checkpoints are accepted:
+A at `0813fba`, B at `ed164a3`, and C at final reviewed revision `514b8a0`.
+
+The sections below retain the ordered execution history. Later acceptance supersedes earlier pending
+statuses. Current product documentation lives on `main`, and this planning history is rebased onto it.
 
 ## Ownership
 
@@ -67,7 +71,7 @@ messages. Keep the existing private driver protocol and extend its documented re
 - [x] Implement and verify narrow show with the final cache format.
 - [x] Verify packaged installation and external library use.
 - [x] Resolve independent correctness and Rust-style reviews.
-- [ ] Merge the final verified MVP and reconcile planning status.
+- [x] Merge the final verified MVP and reconcile planning status.
 
 Update this ledger with implementation findings before dependent work starts. The detailed cache,
 show, testing, and installation documents remain the owning behavior contracts.
@@ -233,3 +237,18 @@ is complete. The integration owner can now squash-merge PR #17 under the user's 
 The user suggested exercising Optic on its own source during implementation. Add the single Linux
 self-hosting smoke test specified in [installation](installation.md#ci-and-completion) to C.
 Focused fixtures still own exact behavior, and archive-only journeys still own package isolation.
+
+## Merge and handoff
+
+PR #17 was squash-merged on 2026-09-05 at 23:45:58 UTC as
+`bae4ca07c568358e556b61cf5ab1a1be47339a3d`. The merged tree exactly matches reviewed and tested
+revision `514b8a03c2981a1df45ef963bc75002932a9f883`. PR #16 is closed as superseded.
+Pre-merge acceptance was persisted on `planning` at `3e3a6ca` before the authorized rebase.
+
+The shared checkout is on clean `main`. Planning is rebased onto the merged MVP and remains confined
+to design documents and retained research. No package was published to a registry. No user store,
+worker worktree, or preexisting stash was removed.
+
+The completed MVP retains its explicit limits in the main README. These include the pinned compiler,
+serialized writers, narrow source spans, supported optimized-LLVM modes, and no migrations or crash
+recovery. Deferred features require a new plan, not automatic continuation of this effort.

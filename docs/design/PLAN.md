@@ -8,6 +8,12 @@ The user confirmed this scope on 2026-09-05. Capture, listing, search, and both 
 well before development starts on narrow `show`. The implementation lands as one coherent MVP
 change.
 
+The MVP is complete on `main` at `bae4ca0`, merged through
+[PR #17](https://github.com/connortsui20/optic/pull/17). All three checkpoints pass.
+The [acceptance index](acceptance-evidence.md) and [execution ledger](execution.md) retain exact
+revisions, tests, installed-product results, and independent reviews. Registry publication remains
+unauthorized. Future features need a new active plan before implementation.
+
 ## Definition of done
 
 The following workflow must work through both the CLI and the `optic` library:
@@ -34,9 +40,10 @@ evidence eligible for a newer successful Cargo build.
 The installed CLI and an external library consumer must pass the same workflow outside the source
 checkout. Linux and macOS CI, independent correctness review, and `$rust-style` review must pass.
 
-## Current baseline
+## Implementation baseline
 
-The baseline is `main` at `684991a`. Earlier PRs #14, #9, and #6 are merged.
+Implementation began from `main` at `684991a`. The following table records that historical baseline,
+not the completed MVP. Earlier PRs #14, #9, and #6 were already merged.
 
 | Capability | Baseline status | MVP requirement |
 | --- | --- | --- |
@@ -131,7 +138,7 @@ Current behavior belongs in documentation on `main`. Planned behavior belongs he
 implementation passes its checkpoint. The status in this plan must distinguish implemented, tested,
 and merged work.
 
-The user subsequently authorized implementation with “Implement the plan.” Execution is underway
-in draft PR #17. The [execution ledger](execution.md) records progress and verification without
-changing the checkpoint requirements. Automatic merging remains authorized after the final quality
-gate. Registry publication needs a separate release instruction.
+The user authorized implementation with “Implement the plan” and automatic merging after the final
+quality gate. PR #17 is merged, PR #16 is closed as superseded, and `planning` is rebased onto the
+completed `main`. The [execution ledger](execution.md) records the final quality gate and merge.
+Registry publication needs a separate release instruction.
