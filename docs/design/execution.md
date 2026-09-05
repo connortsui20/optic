@@ -108,7 +108,18 @@ is integrated as `f8b8d88`, with durable format 4, required source availability,
 references, generated artifacts, checked ranges, module-owned definitions, and LLVM provenance.
 All 39 records tests and focused Clippy pass locally.
 
+Store artifact I/O is integrated as `1b557c1`. Candidate reads return the validated manifest, and
+publication copies only declared generated artifact names before the existing commit boundary.
+Finite reads use checked 64-bit ranges and distinguish caller-writer errors from stored-file errors.
+Evidence queries are integrated as `0e3fe1f`, with search allocation simplified in `54303b2`.
+All 109 combined records, store, and evidence tests pass locally on the integration branch.
+
+The bounded LLVM indexer is integrated as `0cb5f8f`. Its worker passed 20 focused tests, an LLVM
+22.1.8 assembly round trip, and a Rust-generated module check. Compiler wiring is still pending.
+API/CLI process acceptance adds whole functions and methods, shared generic source, Unicode/BOM/CRLF,
+unsupported provenance, both optimized stages, stored bytes after edits, and closed stdout.
+These tests must still pass against the integrated compiler.
+
 The compiler worker is verifying the pinned compiler's optimized artifact stages before enabling
-LLVM availability. Store artifact I/O, exact indexing, evidence queries, and process acceptance are
-in progress. These partial commits are not a validated B implementation and have not replaced the
-accepted A revision on the PR.
+LLVM availability. These partial commits are not a validated B implementation and have not replaced
+the accepted A revision on the PR.

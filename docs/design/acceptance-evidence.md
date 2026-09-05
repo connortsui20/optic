@@ -36,11 +36,23 @@ The final matrix additions are `invalidates_build_script_environment_and_rustfla
 observations, stopped-probe receipts, retry diagnostics, and failed driver-build guidance. The latter
 uses an isolated failing compiler shim, without changing installed components.
 
-## Later checkpoints
+## Checkpoint B
 
-Checkpoint B follows the accepted A revision. Its evidence will cover reference resolution, normalized source
-snapshots, proven optimized LLVM stages, bounded exact indexing, checked artifact reads, and the
-complete cache journey with the final format.
+| Claim | Owning test or file | Integrated status |
+| --- | --- | --- |
+| References preserve durable ordinals through sorting and limiting. | `cargo-optic-evidence/src/tests/find.rs` and `references.rs`. | Passes locally. |
+| Source and LLVM availability remain distinct from corrupt storage. | Evidence `tests/source.rs` and `tests/llvm.rs`. | Passes locally. |
+| Exact symbols, module-local aliases, cycles, and multiple bodies have deterministic results. | Evidence `tests/llvm.rs`. | Passes locally. |
+| Artifact publication preserves the final commit boundary. | Store `tests/artifacts.rs` and `tests/publication.rs`. | Passes locally. |
+| Finite ranges support sparse offsets above 4 GiB and report caller-writer errors. | Store `tests/artifacts.rs`. | Passes locally. |
+| LLVM indexing bounds retained headers and streams unrelated input. | Compiler `src/llvm_index/` tests. | 20 worker tests pass; compiler integration pending. |
+| Normalized whole source, exact LLVM, old snapshots, and unsupported configurations reach callers. | API `tests/show.rs` and CLI `tests/e2e.rs`. | Added; runtime verification pending. |
+| Full-format evidence survives the complete cache journey. | API `tests/cache_journey.rs`. | Added; runtime verification pending. |
+
+All 109 records, store, and evidence tests pass together locally. The compiler-stage proof and full
+integration remain required before accepting this checkpoint.
+
+## Checkpoint C
 
 Checkpoint C has not started. Its evidence will cover verified package archives, both installed CLI
 hosts, the external library consumer, independent reviews, and the exact final CI revision.
