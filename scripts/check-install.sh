@@ -44,7 +44,11 @@ setup() {
 
 git rev-parse HEAD | tee "$root/revision.txt"
 setup rustc -vV | tee "$root/compiler.txt"
-setup cargo package --workspace --exclude cargo-optic-test-support --locked \
+# Cargo discovers configuration from its working directory, even with an explicit manifest path.
+# Start outside the checkout so ancestor configuration cannot select a developer's compiler wrapper.
+cd "$root"
+setup cargo package --manifest-path "$checkout/Cargo.toml" \
+    --workspace --exclude cargo-optic-test-support --locked \
     2>&1 | tee "$root/package.log"
 
 packages=(cargo-optic cargo-optic-api cargo-optic-capture cargo-optic-compiler
@@ -84,16 +88,14 @@ for package in archives.iterdir():
 PY
 
 # These copies are complete before the runtime journey leaves the checkout.
-cp -R scripts/install-fixtures/consumer "$root/consumer"
+cp -R "$checkout/scripts/install-fixtures/consumer" "$root/consumer"
 for journey in cli api; do
-    cp -R scripts/install-fixtures/default-tracking "$root/$journey-workspace"
+    cp -R "$checkout/scripts/install-fixtures/default-tracking" "$root/$journey-workspace"
     setup git -C "$root/$journey-workspace" init -q
     setup git -C "$root/$journey-workspace" add .
     setup git -C "$root/$journey-workspace" -c user.name=Optic \
         -c user.email=optic@example.invalid commit -qm "Initialize installation fixture"
 done
-cd "$root"
-
 setup cargo metadata --manifest-path "$root/archives/cargo-optic-0.1.0/Cargo.toml" \
     --format-version 1 "${patches[@]}" > "$root/cli-metadata.json"
 setup cargo metadata --manifest-path "$root/archives/cargo-optic-compiler-0.1.0/Cargo.toml" \
