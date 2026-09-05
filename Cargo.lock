@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-optic"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "cargo-optic-api",
  "cargo-optic-test-support",
@@ -96,7 +96,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-optic-api"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "cargo-optic-capture",
  "cargo-optic-compiler",
@@ -110,7 +110,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-optic-capture"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "cargo-optic-compiler",
  "cargo-optic-records",
@@ -120,7 +120,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-optic-compiler"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "cargo-optic-records",
  "cargo-optic-test-support",
@@ -133,7 +133,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-optic-evidence"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "cargo-optic-records",
  "cargo-optic-store",
@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-optic-records"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "cargo_metadata",
  "serde",
@@ -155,7 +155,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-optic-store"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "cargo-optic-records",
  "serde",

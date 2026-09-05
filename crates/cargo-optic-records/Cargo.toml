@@ -1,9 +1,12 @@
 [package]
 name = "cargo-optic-records"
-version = "0.0.1"
-publish = false
+description = "Validated identities, provenance, and durable evidence records for Cargo Optic"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
+rust-version.workspace = true
 
 [lib]
 name = "optic_records"

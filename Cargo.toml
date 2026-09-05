@@ -3,16 +3,20 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
+version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/connortsui20/optic"
+readme = "README.md"
+rust-version = "1.98.1"
 
 [workspace.dependencies]
-cargo-optic-api = { path = "crates/cargo-optic-api", version = "0.0.1" }
-cargo-optic-capture = { path = "crates/cargo-optic-capture", version = "0.0.1" }
-cargo-optic-compiler = { path = "crates/cargo-optic-compiler", version = "0.0.1" }
-cargo-optic-evidence = { path = "crates/cargo-optic-evidence", version = "0.0.1" }
-cargo-optic-records = { path = "crates/cargo-optic-records", version = "0.0.1" }
-cargo-optic-store = { path = "crates/cargo-optic-store", version = "0.0.1" }
+cargo-optic-api = { path = "crates/cargo-optic-api", version = "0.1.0" }
+cargo-optic-capture = { path = "crates/cargo-optic-capture", version = "0.1.0" }
+cargo-optic-compiler = { path = "crates/cargo-optic-compiler", version = "0.1.0" }
+cargo-optic-evidence = { path = "crates/cargo-optic-evidence", version = "0.1.0" }
+cargo-optic-records = { path = "crates/cargo-optic-records", version = "0.1.0" }
+cargo-optic-store = { path = "crates/cargo-optic-store", version = "0.1.0" }
 cargo_metadata = "0.23.1"
 clap = { version = "4.5.48", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }

@@ -1,9 +1,13 @@
 [package]
 name = "cargo-optic-compiler"
-version = "0.0.1"
-publish = false
+description = "Cargo freshness and exact-version compiler evidence collection for Cargo Optic"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+exclude = ["tests/**"]
 
 [lib]
 name = "optic_compiler"

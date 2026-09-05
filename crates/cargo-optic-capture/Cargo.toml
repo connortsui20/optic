@@ -1,9 +1,12 @@
 [package]
 name = "cargo-optic-capture"
-version = "0.0.1"
-publish = false
+description = "Capture reuse and publication orchestration for Cargo Optic"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
+rust-version.workspace = true
 
 [lib]
 name = "optic_capture"

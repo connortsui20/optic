@@ -201,7 +201,7 @@ pub enum Error {
         /// The evidence subsystem error.
         source: optic_evidence::Error,
     },
-    /// Store setup or completed-history reading failed.
+    /// Store setup, completed-history reading, or evidence copying failed.
     #[snafu(transparent)]
     Store {
         /// The store subsystem error.

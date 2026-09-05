@@ -1,9 +1,12 @@
 [package]
 name = "cargo-optic-store"
-version = "0.0.1"
-publish = false
+description = "Bounded local persistence and atomic evidence publication for Cargo Optic"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
+rust-version.workspace = true
 
 [lib]
 name = "optic_store"
