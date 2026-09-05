@@ -94,8 +94,9 @@ capture-scoped range descriptor instead of separate unscoped arguments or unrest
 ## Evidence and application views
 
 `FindResults::instances()` returns `FoundInstance` values. Each exposes `reference()` and `record()`.
-Construct references before sorting or limiting. Do not add forwarding getters that duplicate the
-existing instance record API.
+Assign ordinals before sorting or limiting. Carry those original ordinals through sorting, then
+construct references for retained results. This preserves identity without cloning the capture ID
+for every omitted match. Do not add forwarding getters that duplicate the existing instance API.
 
 The evidence crate owns `EvidenceRange`, containing capture ID, artifact ID, and `ByteRange`.
 `SourceEvidence` distinguishes available source with its range/path/line from `SourceUnavailable`.
