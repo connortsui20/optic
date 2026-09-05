@@ -152,7 +152,9 @@ fn oversized_instance_output_preserves_the_old_candidate() {
         vec![instance],
         vec![],
         super::provenance(),
-        optic_records::LlvmCollection::Collected(vec![]),
+        optic_records::LlvmCollection::NotCaptured(
+            optic_records::UnsupportedLlvmConfiguration::UnverifiedCompiler,
+        ),
     )
     .unwrap();
 

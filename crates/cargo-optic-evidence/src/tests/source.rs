@@ -12,6 +12,7 @@ use optic_records::LlvmCollection;
 use optic_records::SourceAvailability;
 use optic_records::SourceRecord;
 use optic_records::SourceUnavailable;
+use optic_records::UnsupportedLlvmConfiguration;
 
 use super::TestStore;
 use super::instance;
@@ -54,7 +55,7 @@ fn available_source_preserves_snapshot_range_and_display_metadata() {
         "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzy",
         vec![source_instance(SourceAvailability::Available(source))],
         vec![(artifact, snapshot.as_bytes())],
-        LlvmCollection::Collected(Vec::new()),
+        LlvmCollection::NotCaptured(UnsupportedLlvmConfiguration::UnverifiedCompiler),
     );
 
     let SourceEvidence::Available {
@@ -122,7 +123,7 @@ fn a_missing_snapshot_is_a_store_error_with_artifact_context() {
         "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzy",
         vec![source_instance(SourceAvailability::Available(source))],
         vec![(artifact.clone(), b"body")],
-        LlvmCollection::Collected(Vec::new()),
+        LlvmCollection::NotCaptured(UnsupportedLlvmConfiguration::UnverifiedCompiler),
     );
     let path = fixture
         .temporary

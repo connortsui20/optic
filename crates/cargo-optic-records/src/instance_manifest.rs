@@ -47,7 +47,8 @@ impl InstanceManifest {
     /// # Errors
     ///
     /// Returns an error for duplicate identities, invalid artifact references or kinds, ranges past
-    /// declared lengths, or collected LLVM that contradicts its effective configuration.
+    /// declared lengths, or collected LLVM that contradicts its effective configuration or omits a
+    /// recorded placement's codegen unit. Collected modules without instance placements are valid.
     pub fn new(
         capture_id: CaptureId,
         instances: Vec<InstanceRecord>,
@@ -90,7 +91,7 @@ impl InstanceManifest {
             }
         }
 
-        validate_llvm(&artifact_table, &llvm_provenance, &llvm)?;
+        validate_llvm(&instances, &artifact_table, &llvm_provenance, &llvm)?;
 
         Ok(Self {
             format_version: CAPTURE_FORMAT_VERSION,
@@ -195,6 +196,7 @@ fn validate_artifact_range(
 }
 
 fn validate_llvm(
+    instances: &[InstanceRecord],
     artifacts: &HashMap<ArtifactId, &ArtifactRecord>,
     provenance: &LlvmProvenance,
     llvm: &LlvmCollection,
@@ -256,6 +258,23 @@ fn validate_llvm(
             )?;
         }
     }
+
+    // A missing definition is meaningful only when collection includes every recorded codegen unit.
+    // Optimization can move or remove a body, so this checks modules rather than symbol placement.
+    if matches!(llvm, LlvmCollection::Collected(_)) {
+        let missing = instances
+            .iter()
+            .flat_map(InstanceRecord::placements)
+            .find(|placement| !modules.contains(placement.codegen_unit()));
+        if let Some(placement) = missing {
+            return InvalidFieldSnafu {
+                field: "LLVM modules",
+                actual: format!("missing module for placement {}", placement.codegen_unit()),
+            }
+            .fail();
+        }
+    }
+
     for artifact in artifacts.values() {
         if artifact.kind() == ArtifactKind::Llvm && !module_artifacts.contains(&artifact.id()) {
             return InvalidFieldSnafu {

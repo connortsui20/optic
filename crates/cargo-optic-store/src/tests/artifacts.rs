@@ -15,8 +15,15 @@ use optic_records::ArtifactKind;
 use optic_records::ArtifactRecord;
 use optic_records::ByteRange;
 use optic_records::CaptureId;
+use optic_records::DefinitionRecord;
 use optic_records::InstanceManifest;
+use optic_records::InstanceRecord;
 use optic_records::LlvmCollection;
+use optic_records::LlvmModuleRecord;
+use optic_records::LlvmStage;
+use optic_records::PlacementRecord;
+use optic_records::SourceAvailability;
+use optic_records::SourceUnavailable;
 use optic_records::UnsupportedLlvmConfiguration;
 
 use super::manifest;
@@ -26,6 +33,7 @@ use super::record;
 use super::write_completed_manifest;
 use super::write_completed_record;
 use crate::Error;
+use crate::INSTANCES_FILE_NAME;
 use crate::Store;
 use crate::artifacts::copy_evidence_bytes;
 
@@ -117,6 +125,72 @@ fn publishes_only_declared_artifacts_and_reads_stored_ranges() {
         .unwrap(),
         bytes
     );
+}
+
+#[test]
+fn missing_placement_modules_are_corruption_even_without_orphan_artifacts() {
+    let temporary = tempfile::tempdir().unwrap();
+    let inputs = tempfile::tempdir().unwrap();
+    let store = Store::new(temporary.path()).unwrap();
+    let capture = record("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzy", 1_000);
+    let artifact = ArtifactRecord::new(ArtifactId::new(0), ArtifactKind::Llvm, 0);
+    let instance = InstanceRecord::new(
+        DefinitionRecord::new("example", "example::kernel").unwrap(),
+        "example::kernel",
+        "kernel",
+        vec![PlacementRecord::new("cgu.0", "External", "Default", false, 1).unwrap()],
+        SourceAvailability::Unavailable(SourceUnavailable::Nonlocal),
+    )
+    .unwrap();
+    let evidence = InstanceManifest::new(
+        capture.id().clone(),
+        vec![instance],
+        vec![artifact.clone()],
+        provenance(),
+        LlvmCollection::Collected(vec![
+            LlvmModuleRecord::new(artifact.id(), "cgu.0", LlvmStage::NoLtoOptimized, vec![])
+                .unwrap(),
+        ]),
+    )
+    .unwrap();
+    fs::write(inputs.path().join(artifact.file_name()), []).unwrap();
+    store.publish(&capture, &evidence, inputs.path()).unwrap();
+    assert_eq!(
+        store
+            .read_candidate(capture.analysis().request_key())
+            .unwrap(),
+        Some((capture.clone(), evidence.clone()))
+    );
+
+    let mut corrupt = serde_json::to_value(evidence).unwrap();
+    corrupt["artifacts"] = serde_json::json!([]);
+    corrupt["llvm"]["collected"] = serde_json::json!([]);
+    let path = store
+        .capture_directory(capture.id())
+        .unwrap()
+        .join(INSTANCES_FILE_NAME);
+    fs::write(&path, serde_json::to_vec(&corrupt).unwrap()).unwrap();
+
+    for error in [
+        store.read_instances(capture.id()).unwrap_err(),
+        store
+            .read_candidate(capture.analysis().request_key())
+            .unwrap_err(),
+    ] {
+        let Error::Json {
+            path: actual,
+            source,
+        } = error
+        else {
+            panic!("the invalid manifest must fail deserialization: {error}");
+        };
+        assert_eq!(actual, path);
+        assert!(
+            source
+                .to_string()
+                .contains("missing module for placement cgu.0")
+        );
+    }
 }
 
 #[test]

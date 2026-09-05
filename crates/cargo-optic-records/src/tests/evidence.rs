@@ -52,7 +52,13 @@ fn evidence() -> InstanceManifest {
         ],
         provenance(),
         LlvmCollection::Collected(vec![
-            LlvmModuleRecord::new(llvm, "cgu.0", LlvmStage::NoLtoOptimized, definitions).unwrap(),
+            LlvmModuleRecord::new(
+                llvm,
+                "example-cgu.0",
+                LlvmStage::NoLtoOptimized,
+                definitions,
+            )
+            .unwrap(),
         ]),
     )
     .unwrap()
@@ -139,6 +145,71 @@ fn complete_evidence_round_trips_with_module_owned_aliases() {
         manifest.instances()[0].source(),
         SourceAvailability::Available(_)
     ));
+}
+
+#[test]
+fn collected_llvm_requires_every_placement_module_but_not_its_body() {
+    let original = evidence();
+    let LlvmCollection::Collected(modules) = original.llvm() else {
+        panic!("the evidence fixture contains collected modules");
+    };
+    let mut artifacts = original.artifacts().to_vec();
+    let mut modules = modules.clone();
+    let unplaced_artifact = ArtifactId::new(3);
+    artifacts.push(ArtifactRecord::new(
+        unplaced_artifact,
+        ArtifactKind::Llvm,
+        0,
+    ));
+    modules.push(
+        LlvmModuleRecord::new(
+            unplaced_artifact,
+            "unplaced-cgu.0",
+            LlvmStage::NoLtoOptimized,
+            vec![],
+        )
+        .unwrap(),
+    );
+    let complete = InstanceManifest::new(
+        capture_id(),
+        original.instances().to_vec(),
+        artifacts.clone(),
+        provenance(),
+        LlvmCollection::Collected(modules.clone()),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::from_value::<InstanceManifest>(serde_json::to_value(&complete).unwrap())
+            .unwrap(),
+        complete
+    );
+
+    // Removing both entries leaves no orphan artifact, but the placement still requires its CGU.
+    let removed = modules.remove(0).artifact();
+    artifacts.retain(|artifact| artifact.id() != removed);
+    let error = InstanceManifest::new(
+        capture_id(),
+        original.instances().to_vec(),
+        artifacts.clone(),
+        provenance(),
+        LlvmCollection::Collected(modules.clone()),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("missing module for placement example-cgu.0")
+    );
+
+    let mut incomplete = serde_json::to_value(complete).unwrap();
+    incomplete["artifacts"] = serde_json::to_value(artifacts).unwrap();
+    incomplete["llvm"] = serde_json::to_value(LlvmCollection::Collected(modules)).unwrap();
+    let error = serde_json::from_value::<InstanceManifest>(incomplete).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("missing module for placement example-cgu.0")
+    );
 }
 
 #[test]

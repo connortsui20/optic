@@ -25,6 +25,7 @@ use crate::PlacementRecord;
 use crate::SourceAvailability;
 use crate::SourceUnavailable;
 use crate::TargetRecord;
+use crate::UnsupportedLlvmConfiguration;
 
 fn capture_id() -> CaptureId {
     "zyxwvutsrqponmlkzyxwvutsrqponmlk"
@@ -121,7 +122,7 @@ fn manifest() -> InstanceManifest {
         vec![instance()],
         vec![],
         provenance(),
-        LlvmCollection::Collected(vec![]),
+        LlvmCollection::NotCaptured(UnsupportedLlvmConfiguration::UnverifiedCompiler),
     )
     .expect("the fixture instance manifest is valid")
 }

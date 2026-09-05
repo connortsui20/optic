@@ -24,8 +24,17 @@ use crate::llvm_evidence;
 fn publish_modules(
     fixture: &TestStore,
     raw_symbol: &str,
-    modules: Vec<LlvmModuleRecord>,
+    mut modules: Vec<LlvmModuleRecord>,
 ) -> InstanceRef {
+    // The recorded placement has no retained body. Other modules exercise cross-module lookup.
+    let placement_artifact = modules
+        .iter()
+        .map(|module| module.artifact().value())
+        .max()
+        .unwrap_or(0)
+        + 1;
+    modules.push(module(placement_artifact, "fixture.0", Vec::new()));
+
     let bytes = b"0123456789abcdef0123456789abcdef";
     let artifacts = modules
         .iter()
@@ -284,8 +293,11 @@ fn llvm_reads_stay_within_the_reference_capture() {
     let other = fixture.publish_evidence(
         "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzx",
         vec![instance("fixture", "display", "display", "entry")],
-        Vec::new(),
-        LlvmCollection::Collected(Vec::new()),
+        vec![(
+            ArtifactRecord::new(ArtifactId::new(0), ArtifactKind::Llvm, 0),
+            b"",
+        )],
+        LlvmCollection::Collected(vec![module(0, "fixture.0", Vec::new())]),
     );
 
     assert!(matches!(

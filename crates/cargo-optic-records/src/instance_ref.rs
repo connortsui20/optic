@@ -16,6 +16,9 @@ use crate::Error;
 use crate::error::InvalidFieldSnafu;
 
 /// A full capture ID and a zero-based instance ordinal.
+///
+/// The canonical text is `<full-reverse-hex-capture-id>:<decimal-ordinal>`. Serde uses this same
+/// string representation. Parsing rejects signs, whitespace, and leading ordinal zeros except `0`.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct InstanceRef {
     capture_id: CaptureId,
