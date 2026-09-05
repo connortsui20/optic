@@ -1,0 +1,10 @@
+[package]
+name = "optic-install-consumer"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+cargo-optic-api = "=0.1.0"
