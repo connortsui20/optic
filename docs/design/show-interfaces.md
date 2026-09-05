@@ -71,6 +71,11 @@ The store accepts `publish(capture, manifest, artifact_directory)`. It copies on
 filenames, validates file types and lengths, and preserves A's pointer-before-capture commit order.
 `read_instances` and candidate validation check every declared artifact, without reparsing LLVM.
 
+In B, `read_candidate` returns `Option<(CaptureRecord, InstanceManifest)>`. Candidate validation
+already loads that manifest. Returning it lets capture report stored LLVM unavailability on reuse
+without reading a potentially large manifest twice. The capture layer emits that warning only
+after accepting reuse, or after publishing a new capture. The store does not print diagnostics.
+
 The store's range reader is:
 
 ```rust
@@ -104,6 +109,13 @@ deterministic module/range order. Never join on display names.
 The API re-exports these views and exposes `source(&InstanceRef)`, `llvm(&InstanceRef)`, and
 `copy_evidence(&EvidenceRange, &mut impl Write)`. CLI output selection stays in the CLI crate.
 Unavailable output writes no stdout. Successful stdout contains only the requested bytes.
+
+The evidence entry points are `source_evidence(store, reference)` and
+`llvm_evidence(store, reference)`. Source's available variant contains `evidence`, `display_path`,
+and `starting_line`. LLVM uses `Available(Vec<LlvmBody>)`, `NotCaptured`, `NoExactDefinition`, and
+`UnsupportedAlias` variants. A body exposes its evidence range, module, stage, final raw symbol,
+and aliases in resolution order. When exact bodies exist, return all of them even if another module
+contains an unsupported alias. An alias cycle remains an error.
 
 ## Parallel implementation
 
