@@ -10,6 +10,8 @@ Checkpoint A is accepted at `0813fba`. Checkpoints B and C remain incomplete.
 - The compiler worker owns compiler product files and compiler unit tests in `/tmp/optic-mvp-compiler`.
 - The storage worker owns records, store, and their unit tests in `/tmp/optic-mvp-store`.
 - The testing worker owns test support and existing `tests/` integration files in `/tmp/optic-mvp-tests`.
+- During B, the evidence worker owns the evidence crate in `/tmp/optic-mvp-evidence`.
+- During B, the indexer worker owns only compiler `src/llvm_index/` in `/tmp/optic-mvp-llvm-index`.
 - Workers leave root manifests and the lockfile to the integration owner.
 
 Workers use separate branches and return commits with their test results. Only the integration owner
@@ -94,3 +96,19 @@ Real example/benchmark selection and invocation-subdirectory coverage pass in th
 B starts from this accepted revision under [the persisted interfaces](show-interfaces.md). Before C
 packaging, remove the compiler unit process tests' dependency on the unpublished helper from retained
 package tests.
+
+## Checkpoint B progress
+
+All B worktrees start from accepted A revision `0813fba`. Their shared signatures are fixed in
+[show interfaces](show-interfaces.md). The compiler worker owns the indexer's module declaration and
+caller, but does not edit its implementation directory.
+
+The integration owner committed API/CLI and capture-lifetime wiring as `b5fc405`. The records handoff
+is integrated as `f8b8d88`, with durable format 4, required source availability, capture-scoped
+references, generated artifacts, checked ranges, module-owned definitions, and LLVM provenance.
+All 39 records tests and focused Clippy pass locally.
+
+The compiler worker is verifying the pinned compiler's optimized artifact stages before enabling
+LLVM availability. Store artifact I/O, exact indexing, evidence queries, and process acceptance are
+in progress. These partial commits are not a validated B implementation and have not replaced the
+accepted A revision on the PR.
