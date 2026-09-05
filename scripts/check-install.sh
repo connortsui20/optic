@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Verify the seven release archives and installed journeys on Linux or macOS.
 # Requires Python 3.11+, Git, and the installed toolchain from rust-toolchain.toml.
-# Linux also runs the public API consumer and explicitly captures this checkout.
+# Linux also runs the public API consumer and captures a snapshot of this committed source.
 # The temporary root remains available after success or failure for diagnostics.
 set -Eeuo pipefail
 
@@ -96,6 +96,10 @@ for journey in cli api; do
     setup git -C "$root/$journey-workspace" -c user.name=Optic \
         -c user.email=optic@example.invalid commit -qm "Initialize installation fixture"
 done
+if [[ $(uname -s) == Linux ]]; then
+    mkdir "$root/selfhost-workspace"
+    git -C "$checkout" archive HEAD | tar -x -C "$root/selfhost-workspace"
+fi
 setup cargo metadata --manifest-path "$root/archives/cargo-optic-0.1.0/Cargo.toml" \
     --format-version 1 "${patches[@]}" > "$root/cli-metadata.json"
 setup cargo metadata --manifest-path "$root/archives/cargo-optic-compiler-0.1.0/Cargo.toml" \
@@ -149,7 +153,7 @@ if [[ $(uname -s) == Linux ]]; then
     setup cargo fetch --manifest-path "$checkout/Cargo.toml" --locked
 fi
 
-python3 - "$root" "$toolchain" "$rustup_root" "$checkout" <<'PY'
+python3 - "$root" "$toolchain" "$rustup_root" <<'PY'
 import os
 import pathlib
 import re
@@ -157,7 +161,7 @@ import shutil
 import subprocess
 import sys
 
-root, toolchain, rustup_root, checkout = map(pathlib.Path, sys.argv[1:])
+root, toolchain, rustup_root = map(pathlib.Path, sys.argv[1:])
 
 def environment(journey):
     home = root / f"{journey}-home"
@@ -264,8 +268,8 @@ if sys.platform == "linux":
     print(result.decode(), flush=True)
     selfhost = environment("selfhost")
     shutil.copytree(root / "setup-home/registry", pathlib.Path(selfhost["CARGO_HOME"]) / "registry")
-    print("Self-hosting explicitly uses the checkout:", checkout, flush=True)
-    cli_journey(checkout, selfhost, "cargo-optic-records", "CaptureId::generate", False)
+    print("Self-hosting uses the committed source snapshot:", root / "selfhost-workspace", flush=True)
+    cli_journey(root / "selfhost-workspace", selfhost, "cargo-optic-records", "CaptureId::generate", False)
 PY
 
 echo "Installation verification passed. Evidence: $root"
