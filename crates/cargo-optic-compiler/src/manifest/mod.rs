@@ -26,13 +26,13 @@ struct InstanceKey {
     raw_symbol: String,
 }
 
-pub(crate) fn read_manifest(path: &Path) -> Result<Vec<InstanceRecord>, Error> {
+pub(crate) fn read_manifest(path: &Path, marker: &str) -> Result<Vec<InstanceRecord>, Error> {
     let file = File::open(path).map_err(|source| Error::Filesystem {
         operation: "open compiler manifest",
         path: path.to_owned(),
         source,
     })?;
-    let placements = ManifestDecoder::new(path, BufReader::new(file)).read()?;
+    let placements = ManifestDecoder::new(path, BufReader::new(file), marker).read()?;
 
     placements
         .into_iter()

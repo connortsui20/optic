@@ -6,6 +6,7 @@
 //! Callers must discover a new [`Workspace`] after relocating the workspace on disk.
 
 use std::env;
+use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -64,13 +65,41 @@ pub fn discover_workspace(start: &Path) -> Result<Workspace, Error> {
     let cargo = env::var_os("CARGO")
         .filter(|value| !value.is_empty())
         .map_or_else(|| PathBuf::from("cargo"), PathBuf::from);
-    let metadata = query_metadata(&cargo, start, None)?;
+    let cargo = resolve_executable(&cargo, start)?;
+    let start = fs::canonicalize(start).map_err(|source| Error::Filesystem {
+        operation: "resolve invocation directory",
+        path: start.to_owned(),
+        source,
+    })?;
+    let metadata = query_metadata(&cargo, &start, None)?;
     let root = metadata.workspace_root.clone().into_std_path_buf();
 
     Ok(Workspace {
         root,
         cargo,
-        invocation_directory: start.to_owned(),
+        invocation_directory: start,
+    })
+}
+
+fn resolve_executable(program: &Path, directory: &Path) -> Result<PathBuf, Error> {
+    if program.components().count() > 1 || program.is_absolute() {
+        return Ok(directory.join(program));
+    }
+
+    if let Some(path) = env::var_os("PATH") {
+        for entry in env::split_paths(&path) {
+            let candidate = directory.join(entry).join(program);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    Err(Error::CompilerEnvironment {
+        message: format!(
+            "Cargo must resolve to an executable on PATH, got {}",
+            program.display()
+        ),
     })
 }
 

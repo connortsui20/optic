@@ -14,9 +14,8 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::protocol::END_RECORD;
-use crate::protocol::MANIFEST_MAGIC;
 use crate::protocol::PLACEMENT_RECORD;
-use crate::protocol::PROTOCOL_VERSION;
+use crate::protocol::SELECTED_TARGET_MARKER_ENV;
 
 pub(crate) struct ConcreteInstance {
     /// The crate that owns the generic or nongeneric function definition.
@@ -58,8 +57,9 @@ impl ManifestWriter {
             temporary_path,
             file,
         };
-        writer.write_bytes(MANIFEST_MAGIC)?;
-        writer.write_u32(PROTOCOL_VERSION)?;
+        let marker = std::env::var(SELECTED_TARGET_MARKER_ENV)
+            .map_err(|error| invalid_data(error.to_string()))?;
+        writer.write_bytes(&crate::protocol::header(&marker))?;
 
         Ok(writer)
     }
@@ -99,7 +99,10 @@ impl ManifestWriter {
 
     fn write_string(&mut self, value: &str) -> io::Result<()> {
         let length = u32::try_from(value.len()).map_err(|_| {
-            invalid_data(format!("string length must fit in u32, got {}", value.len()))
+            invalid_data(format!(
+                "string length must fit in u32, got {}",
+                value.len()
+            ))
         })?;
         self.write_u32(length)?;
         self.write_bytes(value.as_bytes())

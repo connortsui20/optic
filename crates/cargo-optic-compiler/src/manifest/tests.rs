@@ -6,6 +6,8 @@ use crate::protocol::MANIFEST_MAGIC;
 use crate::protocol::PLACEMENT_RECORD;
 use crate::protocol::PROTOCOL_VERSION;
 
+const MARKER: &str = "--cfg=cargo_optic_selected_target=\"38a90c21244546ad8a2b3770f6cb370c\"";
+
 fn write_u32(bytes: &mut Vec<u8>, value: u32) {
     bytes.extend(value.to_le_bytes());
 }
@@ -22,6 +24,7 @@ fn write_string(bytes: &mut Vec<u8>, value: &str) {
 fn manifest() -> Vec<u8> {
     let mut bytes = MANIFEST_MAGIC.to_vec();
     write_u32(&mut bytes, PROTOCOL_VERSION);
+    write_string(&mut bytes, MARKER);
     write_u32(&mut bytes, PLACEMENT_RECORD);
     for value in [
         "fixture",
@@ -47,7 +50,7 @@ fn reads_a_complete_manifest() {
     let path = temporary.path().join("manifest.bin");
     fs::write(&path, manifest()).unwrap();
 
-    let instances = read_manifest(&path).unwrap();
+    let instances = read_manifest(&path, MARKER).unwrap();
 
     assert_eq!(instances.len(), 1);
     assert_eq!(instances[0].display_name(), "fixture::kernel::<u64>");
@@ -61,7 +64,7 @@ fn rejects_a_truncated_manifest() {
     bytes.pop();
     fs::write(&path, bytes).unwrap();
 
-    let error = read_manifest(&path).unwrap_err();
+    let error = read_manifest(&path, MARKER).unwrap_err();
 
     assert!(error.to_string().contains("truncated"));
 }
@@ -71,12 +74,13 @@ fn rejects_a_wrong_protocol_version() {
     let temporary = tempfile::tempdir().unwrap();
     let path = temporary.path().join("manifest.bin");
     let mut bytes = manifest();
-    bytes[MANIFEST_MAGIC.len()..MANIFEST_MAGIC.len() + 4].copy_from_slice(&2_u32.to_le_bytes());
+    bytes[MANIFEST_MAGIC.len()..MANIFEST_MAGIC.len() + 4]
+        .copy_from_slice(&(PROTOCOL_VERSION + 1).to_le_bytes());
     fs::write(&path, bytes).unwrap();
 
-    let error = read_manifest(&path).unwrap_err();
+    let error = read_manifest(&path, MARKER).unwrap_err();
 
-    assert!(error.to_string().contains("protocol version must be 1"));
+    assert!(error.to_string().contains("protocol version must be 2"));
 }
 
 #[test]
@@ -87,7 +91,38 @@ fn rejects_trailing_bytes() {
     bytes.push(1);
     fs::write(&path, bytes).unwrap();
 
-    let error = read_manifest(&path).unwrap_err();
+    let error = read_manifest(&path, MARKER).unwrap_err();
 
     assert!(error.to_string().contains("trailing bytes"));
+}
+
+#[test]
+fn rejects_another_analysis_marker() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("manifest.bin");
+    fs::write(&path, manifest()).unwrap();
+
+    let error = read_manifest(&path, "another marker").unwrap_err();
+
+    assert!(error.to_string().contains("selected marker must match"));
+}
+
+#[test]
+fn rejects_wrong_magic_and_truncated_headers() {
+    let complete = manifest();
+    let mut wrong_magic = complete.clone();
+    wrong_magic[0] = 0;
+    let cases = [
+        wrong_magic,
+        complete[..15].to_vec(),
+        complete[..18].to_vec(),
+    ];
+
+    for bytes in cases {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("manifest.bin");
+        fs::write(&path, bytes).unwrap();
+
+        assert!(read_manifest(&path, MARKER).is_err());
+    }
 }

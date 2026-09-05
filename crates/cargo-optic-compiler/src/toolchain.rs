@@ -113,10 +113,6 @@ fn wrapper_is_configured(environment: &[&str; 2], configured: bool) -> bool {
 }
 
 fn inspect_rustc(workspace: &Workspace) -> Result<CompilerIdentity, Error> {
-    let verbose = run_rustc(workspace, &["-vV"])?;
-    let release = compiler_field(&verbose, "release")?;
-    let commit_hash = compiler_field(&verbose, "commit-hash")?;
-    let host = compiler_field(&verbose, "host")?;
     let reported_sysroot = PathBuf::from(run_rustc(workspace, &["--print", "sysroot"])?.trim());
     let sysroot = fs::canonicalize(&reported_sysroot).map_err(|source| Error::Filesystem {
         operation: "resolve rustc sysroot",
@@ -130,6 +126,25 @@ fn inspect_rustc(workspace: &Workspace) -> Result<CompilerIdentity, Error> {
             source,
         }
     })?;
+    let output =
+        Command::new(&rustc)
+            .arg("-vV")
+            .output()
+            .map_err(|source| Error::StartProcess {
+                program: rustc.clone(),
+                source,
+            })?;
+    if !output.status.success() {
+        return Err(Error::ProcessFailed {
+            program: rustc,
+            status: output.status.to_string(),
+            diagnostics: Some(String::from_utf8_lossy(&output.stderr).into_owned()),
+        });
+    }
+    let verbose = String::from_utf8_lossy(&output.stdout);
+    let release = compiler_field(&verbose, "release")?;
+    let commit_hash = compiler_field(&verbose, "commit-hash")?;
+    let host = compiler_field(&verbose, "host")?;
 
     CompilerIdentity::new(rustc, release, commit_hash, host, sysroot).map_err(Error::from)
 }

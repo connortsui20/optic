@@ -21,13 +21,15 @@ use crate::protocol::PROTOCOL_VERSION;
 pub(super) struct ManifestDecoder<R> {
     path: PathBuf,
     reader: R,
+    marker: String,
 }
 
 impl<R: Read> ManifestDecoder<R> {
-    pub(super) fn new(path: &Path, reader: R) -> Self {
+    pub(super) fn new(path: &Path, reader: R, marker: &str) -> Self {
         Self {
             path: path.to_owned(),
             reader,
+            marker: marker.to_owned(),
         }
     }
 
@@ -69,6 +71,13 @@ impl<R: Read> ManifestDecoder<R> {
         if version != PROTOCOL_VERSION {
             return Err(self.invalid(format!(
                 "protocol version must be {PROTOCOL_VERSION}, got {version}"
+            )));
+        }
+
+        let marker = self.read_string("selected marker")?;
+        if marker != self.marker {
+            return Err(self.invalid(format!(
+                "selected marker must match this analysis, got {marker:?}"
             )));
         }
 

@@ -140,7 +140,9 @@ fn prepare_invocation() -> Result<DriverInvocation, String> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     if arguments.is_empty() {
-        return Err("optic rustc driver must receive rustc as its first argument, got none".to_owned());
+        return Err(
+            "optic rustc driver must receive rustc as its first argument, got none".to_owned(),
+        );
     }
 
     let manifest_path = env::var_os(MANIFEST_PATH_ENV)
