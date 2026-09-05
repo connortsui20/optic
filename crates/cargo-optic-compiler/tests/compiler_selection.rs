@@ -18,7 +18,6 @@ use optic_compiler::BuildRequest;
 use optic_compiler::CargoTarget;
 use optic_compiler::Freshness;
 use optic_compiler::Workspace;
-use optic_compiler::collect_build;
 use optic_compiler::discover_workspace;
 use optic_compiler::prepare_build;
 use optic_records::CargoTargetKind;
@@ -200,7 +199,7 @@ fn collect_in_child() {
     }
 
     let request = BuildRequest::new("capture_fixture", CargoTarget::Library, "release").unwrap();
-    let result = collect_build(&workspace, &request);
+    let result = prepare_build(&workspace, &request).and_then(|prepared| prepared.collect());
 
     match env::var("OPTIC_TEST_SCENARIO").unwrap().as_str() {
         "success" => {
@@ -208,7 +207,10 @@ fn collect_in_child() {
         }
         "warm" => {
             result.expect("the first collection must succeed");
-            collect_build(&workspace, &request).expect("the warm collection must run rustc again");
+            prepare_build(&workspace, &request)
+                .unwrap()
+                .collect()
+                .expect("the warm collection must run rustc again");
         }
         "compiler-error" => {
             let Err(error) = result else {
