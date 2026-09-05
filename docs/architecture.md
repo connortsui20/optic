@@ -96,3 +96,4 @@ that the package works without repository-relative files or a preexisting runtim
 
 The detailed acceptance matrix and implementation status remain on `planning`. A unit-test result
 does not replace real Cargo behavior or installed-product verification.
+The [testing guide](testing.md) explains how to run checks and choose a regression's boundary.

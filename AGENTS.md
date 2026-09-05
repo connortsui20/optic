@@ -16,4 +16,5 @@ The complete MVP uses one integration branch with cached capture/list/find befor
 Persist decisions and checkpoint evidence on `planning` before dependent implementation starts.
 
 Use `bash scripts/check-format.sh` to include the standalone driver in formatting checks.
-Use `cargo test --workspace` for the repository suite. Installation checks are documented separately.
+Use `cargo test --workspace` for the repository suite and `bash scripts/check-install.sh` for archives
+and installed-product checks. Read [the testing guide](docs/testing.md) when adding a regression.
