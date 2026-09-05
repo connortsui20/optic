@@ -23,6 +23,15 @@ name = "feature-gated"
 path = "src/feature_gated.rs"
 required-features = ["gated"]
 
+[[example]]
+name = "selected_example"
+path = "examples/selected_example.rs"
+
+[[bench]]
+name = "selected_benchmark"
+path = "benches/selected_benchmark.rs"
+harness = false
+
 [profile.checked]
 inherits = "release"
 opt-level = 1
