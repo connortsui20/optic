@@ -1,7 +1,7 @@
 //! Scopes concrete compiler instances to one capture.
 //!
 //! [`InstanceManifest`] is the durable boundary between compiler collection and evidence queries.
-//! Its [`CaptureId`](crate::CaptureId) prevents evidence from one capture from satisfying a query
+//! Its [`CaptureId`] prevents evidence from one capture from satisfying a query
 //! for another capture.
 
 use std::collections::HashMap;
