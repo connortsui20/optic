@@ -48,9 +48,10 @@ impl CollectedBuild {
 /// configured compiler wrappers with a warning. Probes, dependencies, and unrelated targets pass
 /// through without instrumentation.
 ///
-/// Every capture changes Cargo's selected-target fingerprint so a warm capture still runs rustc.
-/// Cargo retains one additional fingerprint and artifact set for each capture in the selected
-/// target directory.
+/// Every capture currently changes Cargo's selected-target fingerprint so a warm capture still
+/// runs rustc and invokes the driver. This defeats Cargo's reuse for that target and retains one
+/// additional fingerprint and artifact set per capture. Reusing prior evidence requires a separate
+/// capture-cache design because Cargo does not invoke a compiler wrapper for a fresh target.
 ///
 /// # Errors
 ///
