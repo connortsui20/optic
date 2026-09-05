@@ -18,6 +18,7 @@ use optic_compiler::CargoTarget;
 use optic_compiler::Freshness;
 use optic_compiler::discover_workspace;
 use optic_compiler::prepare_build;
+use optic_records::CaptureId;
 
 fn run_in_process(workspace: &TestWorkspace, operation: &str) {
     let mut command = Command::new(env::current_exe().unwrap());
@@ -107,8 +108,9 @@ fn observed_collection_child() {
         "collect" => {
             let request_key = prepared.request_key().clone();
             let collection = prepared.collect().unwrap();
-            let (_, _, instances, analysis) = collection.into_parts();
-            assert!(!instances.is_empty());
+            let (_, _, analysis, manifest, _artifacts) =
+                collection.into_parts(CaptureId::generate()).unwrap();
+            assert!(!manifest.instances().is_empty());
             assert_eq!(analysis.request_key(), &request_key);
             fs::write(analysis_path, serde_json::to_vec(&analysis).unwrap()).unwrap();
         }

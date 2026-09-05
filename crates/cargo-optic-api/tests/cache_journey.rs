@@ -78,6 +78,39 @@ fn file_sizes(directory: &Path) -> Vec<(std::path::PathBuf, u64)> {
         .collect()
 }
 
+#[track_caller]
+fn assert_stored_evidence(optic: &Optic, instance: &optic::FoundInstance) {
+    let optic::SourceEvidence::Available { evidence, .. } =
+        optic.source(instance.reference()).unwrap()
+    else {
+        panic!("expected captured generic source");
+    };
+    let mut source = Vec::new();
+    optic.copy_evidence(&evidence, &mut source).unwrap();
+    let function = instance
+        .record()
+        .definition()
+        .definition_path()
+        .rsplit("::")
+        .next()
+        .unwrap();
+    assert!(
+        String::from_utf8(source)
+            .unwrap()
+            .contains(&format!("fn {function}<"))
+    );
+    let optic::LlvmEvidence::Available(bodies) = optic.llvm(instance.reference()).unwrap() else {
+        panic!("expected captured generic LLVM");
+    };
+    assert!(!bodies.is_empty());
+
+    for body in bodies {
+        let mut llvm = Vec::new();
+        optic.copy_evidence(body.evidence(), &mut llvm).unwrap();
+        assert!(!llvm.is_empty());
+    }
+}
+
 #[test]
 fn reuses_edits_and_forces_capture_across_processes() {
     let workspace = TestWorkspace::new("capture");
@@ -408,6 +441,15 @@ fn capture_child() {
     if !default_tracking {
         let found = optic.find(capture.id(), "kernel", 100).unwrap();
         assert!(!found.instances().is_empty());
+        let generic = found
+            .instances()
+            .iter()
+            .find(|instance| {
+                let definition = instance.record().definition().definition_path();
+                definition.ends_with("::outlined_kernel") || definition.ends_with("::edited_kernel")
+            })
+            .unwrap();
+        assert_stored_evidence(&optic, generic);
 
         if env::var_os("OPTIC_TEST_EDITED_EVIDENCE").is_some() {
             assert_eq!(
@@ -429,13 +471,9 @@ fn capture_child() {
 
         if history.len() > 1 {
             let original = history.last().unwrap();
-            assert!(
-                !optic
-                    .find(original.id(), "outlined_kernel", 100)
-                    .unwrap()
-                    .instances()
-                    .is_empty()
-            );
+            let found = optic.find(original.id(), "outlined_kernel", 100).unwrap();
+            assert!(!found.instances().is_empty());
+            assert_stored_evidence(&optic, &found.instances()[0]);
         }
     }
 

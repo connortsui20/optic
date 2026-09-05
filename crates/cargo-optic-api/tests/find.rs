@@ -80,12 +80,12 @@ fn finds_concrete_generic_instances() {
     assert_eq!(found.capture_id(), fixture.first.id());
     assert_eq!(found.instances().len(), 2);
     assert_ne!(
-        found.instances()[0].display_name(),
-        found.instances()[1].display_name(),
+        found.instances()[0].record().display_name(),
+        found.instances()[1].record().display_name(),
     );
     assert_ne!(
-        found.instances()[0].raw_symbol(),
-        found.instances()[1].raw_symbol(),
+        found.instances()[0].record().raw_symbol(),
+        found.instances()[1].record().raw_symbol(),
     );
 }
 

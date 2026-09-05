@@ -20,6 +20,7 @@ use optic_compiler::Freshness;
 use optic_compiler::Workspace;
 use optic_compiler::discover_workspace;
 use optic_compiler::prepare_build;
+use optic_records::CaptureId;
 use optic_records::CargoTargetKind;
 
 fn child_command(workspace: &TestWorkspace, scenario: &str) -> Command {
@@ -158,7 +159,9 @@ fn collect_and_probe_named_targets(workspace: &Workspace) {
             .unwrap()
             .collect()
             .unwrap();
-        let (build, _, instances, analysis) = collected.into_parts();
+        let (build, _, analysis, manifest, _artifacts) =
+            collected.into_parts(CaptureId::generate()).unwrap();
+        let instances = manifest.instances();
         let (crate_name, _) = definition.split_once("::").unwrap();
 
         assert_eq!(build.package(), "capture_fixture");

@@ -3,6 +3,7 @@
 //! Each test runs the built executable against an isolated workspace.
 
 use std::ffi::OsStr;
+use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::process::Output;
@@ -102,6 +103,189 @@ fn instance_names(output: &str) -> Vec<&str> {
         .lines()
         .filter_map(|line| line.strip_prefix("Instance "))
         .collect()
+}
+
+fn capture_show(workspace: &TestWorkspace, profile: &str) -> String {
+    let output = run(
+        workspace,
+        [
+            "capture",
+            "-p",
+            "show_fixture",
+            "--bin",
+            "show_fixture",
+            "--profile",
+            profile,
+        ],
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+
+    stdout
+        .lines()
+        .next()
+        .unwrap()
+        .strip_prefix("Captured ")
+        .unwrap()
+        .to_owned()
+}
+
+#[track_caller]
+fn find_reference(workspace: &TestWorkspace, capture: &str, query: &str) -> String {
+    let output = run(workspace, ["find", "--capture", capture, query]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let references = stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("  Reference   "))
+        .collect::<Vec<_>>();
+    assert_eq!(references.len(), 1, "{stdout}");
+
+    references[0].to_owned()
+}
+
+#[test]
+fn shows_exact_api_bytes_after_checkout_changes() {
+    let workspace = TestWorkspace::new("show");
+    let capture = capture_show(&workspace, "release");
+    let reference = find_reference(&workspace, &capture, "show_fixture::source_items::ordinary");
+    let mut expected = Command::new(std::env::current_exe().unwrap());
+    workspace.apply(&mut expected);
+    expected
+        .args(["--exact", "write_api_evidence_in_child", "--nocapture"])
+        .env("OPTIC_TEST_INSTANCE", &reference)
+        .env("OPTIC_TEST_EVIDENCE", workspace.observations());
+    let output = run_command(&mut expected);
+    assert_success(&expected, &output);
+    let source_bytes = fs::read(workspace.observations().join("source")).unwrap();
+    let llvm_bytes = fs::read(workspace.observations().join("llvm")).unwrap();
+    assert!(!llvm_bytes.is_empty());
+    let whole_function =
+        fs::read_to_string(workspace.workspace().join("expected/ordinary.txt")).unwrap();
+    assert_eq!(
+        source_bytes,
+        whole_function.strip_suffix('\n').unwrap().as_bytes()
+    );
+    fs::write(
+        workspace.workspace().join("src/source_items.rs"),
+        "pub fn broken( {\n",
+    )
+    .unwrap();
+    let drivers = workspace.cargo_home().join("optic/drivers");
+    assert!(drivers.is_dir());
+    fs::rename(&drivers, workspace.observations().join("retained-drivers")).unwrap();
+
+    for (format, bytes, diagnostic) in [
+        ("source", source_bytes, "Source "), // Exact captured function bytes.
+        ("llvm", llvm_bytes, "LLVM "),       // Exact API body bytes and separators.
+    ] {
+        let output = run(
+            &workspace,
+            ["show", "--instance", &reference, "--output", format],
+        );
+        assert_eq!(output.stdout, bytes, "{format}");
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .starts_with(diagnostic)
+        );
+    }
+
+    assert!(!drivers.exists());
+    let output = run(&workspace, ["list-captures"]);
+    assert_eq!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .filter(|line| line.starts_with("Capture "))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn show_exits_successfully_when_stdout_closes() {
+    let workspace = TestWorkspace::new("show");
+    let capture = capture_show(&workspace, "release");
+    let reference = find_reference(&workspace, &capture, "show_fixture::source_items::ordinary");
+
+    for format in ["source", "llvm"] {
+        let mut command = command(&workspace);
+        command
+            .args(["show", "--instance", &reference, "--output", format])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        drop(child.stdout.take());
+        let output = child.wait_with_output().unwrap();
+
+        assert_success(&command, &output);
+        assert!(
+            !String::from_utf8(output.stderr)
+                .unwrap()
+                .contains("panicked")
+        );
+    }
+}
+
+#[test]
+fn unavailable_show_has_empty_stdout_and_a_failing_status() {
+    let workspace = TestWorkspace::new("show");
+    let capture = capture_show(&workspace, "incremental");
+
+    for (query, format, reason) in [
+        ("show_dependency::external_generic", "source", "nonlocal"), // Unsupported source provenance.
+        (
+            "show_fixture::source_items::generated",
+            "source",
+            "expansion",
+        ), // Generated function source.
+        (
+            "show_fixture::source_items::ordinary",
+            "llvm",
+            "incremental",
+        ), // Unsupported LLVM configuration.
+    ] {
+        let reference = find_reference(&workspace, &capture, query);
+        let mut command = command(&workspace);
+        command.args(["show", "--instance", &reference, "--output", format]);
+        let output = run_command(&mut command);
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains(&reference), "{stderr}");
+        assert!(stderr.contains(reason), "{stderr}");
+    }
+}
+
+#[test]
+fn write_api_evidence_in_child() {
+    let Ok(reference) = std::env::var("OPTIC_TEST_INSTANCE") else {
+        return;
+    };
+    let reference = reference.parse::<optic::InstanceRef>().unwrap();
+    let optic = optic::Optic::open(&std::env::current_dir().unwrap()).unwrap();
+    let directory = std::path::PathBuf::from(std::env::var_os("OPTIC_TEST_EVIDENCE").unwrap());
+    let optic::SourceEvidence::Available { evidence, .. } = optic.source(&reference).unwrap()
+    else {
+        panic!("expected stored function source");
+    };
+    let mut source = Vec::new();
+    optic.copy_evidence(&evidence, &mut source).unwrap();
+    fs::write(directory.join("source"), source).unwrap();
+    let optic::LlvmEvidence::Available(bodies) = optic.llvm(&reference).unwrap() else {
+        panic!("expected stored optimized LLVM");
+    };
+    assert!(!bodies.is_empty());
+    let mut llvm = Vec::new();
+
+    for (index, body) in bodies.iter().enumerate() {
+        if index != 0 {
+            llvm.push(b'\n');
+        }
+
+        optic.copy_evidence(body.evidence(), &mut llvm).unwrap();
+    }
+
+    fs::write(directory.join("llvm"), llvm).unwrap();
 }
 
 #[test]
