@@ -43,30 +43,33 @@ impl CollectedBuild {
 
 /// Runs one explicit Cargo target and collects its concrete compiler instances.
 ///
-/// Cargo inherits the current process's standard input, output, and error streams. Existing
-/// transparent global and workspace compiler wrappers retain their order. Probes, dependencies,
-/// and unrelated targets pass through without instrumentation. Driver-style wrappers that parse
-/// rustc's command line are not supported, and a caching wrapper must run the selected compiler
-/// instead of returning a cache hit.
+/// Cargo inherits the current process's standard input, output, and error streams. Collection uses
+/// the default `rustc` from `PATH` on Unix hosts. It rejects custom compiler selection and disables
+/// configured compiler wrappers with a warning. Probes, dependencies, and unrelated targets pass
+/// through without instrumentation.
 ///
-/// The compiler command must be its reported sysroot's `rustc` or a standard rustup proxy. Other
-/// front-ends are rejected because driver replacement would bypass them. This checks replacement
-/// fidelity, not executable authenticity. Cargo Optic removes ambient `RUSTC_BOOTSTRAP` from the
-/// Cargo child; its own unstable access remains scoped to the temporary driver build. Every capture
-/// deliberately changes Cargo's selected-target fingerprint so a warm capture still runs rustc.
-/// Cargo therefore retains one additional fingerprint and artifact set for each capture in the
-/// selected target directory.
+/// Every capture changes Cargo's selected-target fingerprint so a warm capture still runs rustc.
+/// Cargo retains one additional fingerprint and artifact set for each capture in the selected
+/// target directory.
 ///
 /// # Errors
 ///
-/// Returns an error if the request does not resolve to one workspace target, the selected compiler
-/// command is an unsupported front-end, the selected compiler lacks its matching `rustc-dev`
-/// component, Cargo or rustc fails, the selected compiler does not run, or the compiler manifest is
-/// invalid.
+/// Returns an error on a non-Unix host, for custom compiler selection, if the request does not
+/// resolve to one workspace target, if Cargo or rustc fails, if the selected compiler does not run,
+/// or if the compiler manifest is invalid.
 pub fn collect_build(
     workspace: &Workspace,
     request: &BuildRequest,
 ) -> Result<CollectedBuild, Error> {
+    #[cfg(not(unix))]
+    {
+        let _ = (workspace, request);
+
+        return Err(Error::CompilerEnvironment {
+            message: "compiler collection supports Unix hosts only".to_owned(),
+        });
+    }
+
     let metadata = workspace.read_metadata(request)?;
     let package = resolve_package(&metadata, request.package())?;
     let target = resolve_target(package, request.target())?;
@@ -80,8 +83,15 @@ pub fn collect_build(
             source,
         })?;
     let manifest_path = temporary.path().join("compiler-manifest.bin");
-    let driver = RustcDriver::build(workspace, &compiler, temporary.path())?;
+    let driver = RustcDriver::build(workspace, temporary.path())?;
     let selected_target_marker = selected_target_marker(temporary.path())?;
+
+    if compiler.wrappers_configured() {
+        eprintln!(
+            "warning: Cargo Optic does not support configured rustc wrappers; disabling them for this capture"
+        );
+        eprintln!("warning: the captured compiler output can differ from a normal wrapped build");
+    }
 
     let cargo_arguments = cargo_arguments(request);
     let mut instrumented_arguments = cargo_arguments.clone();
@@ -90,9 +100,6 @@ pub fn collect_build(
 
     let mut command = Command::new(workspace.cargo());
 
-    // TODO(connor)[Capture output]: Replace the inherited streams with bounded event supervision
-    // when capture reads Cargo JSON. The supervisor must drain both output pipes and stop Cargo
-    // when its consumer stops.
     command
         .current_dir(workspace.invocation_directory())
         .args(&instrumented_arguments)
@@ -100,12 +107,7 @@ pub fn collect_build(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .env_remove("RUSTC_BOOTSTRAP");
-    driver.configure(
-        &mut command,
-        &compiler,
-        &selected_target_marker,
-        &manifest_path,
-    )?;
+    driver.configure(&mut command, &selected_target_marker, &manifest_path);
 
     let status = command.status().with_context(|_| StartProcessSnafu {
         program: workspace.cargo().to_owned(),
@@ -128,7 +130,7 @@ pub fn collect_build(
         });
     }
 
-    let output = read_manifest(&manifest_path, compiler.identity())?;
+    let instances = read_manifest(&manifest_path)?;
     let target = TargetRecord::new(target.name.clone(), request.target().kind())?;
     let build = BuildRecord::new(
         package.name.to_string(),
@@ -142,8 +144,8 @@ pub fn collect_build(
 
     Ok(CollectedBuild {
         build,
-        compiler: output.compiler,
-        instances: output.instances,
+        compiler: compiler.identity().clone(),
+        instances,
     })
 }
 
@@ -159,8 +161,8 @@ fn selected_target_marker(directory: &Path) -> Result<String, Error> {
 
     // Cargo passes arguments after `--` only to the final selected-target invocation. The unique
     // value makes Cargo consider every capture stale, which ensures that rustc runs instead of
-    // reusing a fresh unit. The outer wrapper removes it before existing wrappers or rustc observe
-    // it, but Cargo still retains the resulting fingerprint and build artifact.
+    // reusing a fresh unit. The wrapper removes it before rustc observes it, but Cargo still
+    // retains the resulting fingerprint and build artifact.
     // See <https://doc.rust-lang.org/cargo/commands/cargo-rustc.html#description>.
     Ok(format!("--cfg=cargo_optic_selected_target={directory:?}"))
 }

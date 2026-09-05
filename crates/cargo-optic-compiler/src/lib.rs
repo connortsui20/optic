@@ -2,8 +2,8 @@
 //!
 //! The capture pipeline enters this crate through [`discover_workspace`] and [`collect_build`].
 //! Discovery asks Cargo for authoritative workspace metadata and retains the Cargo executable that
-//! answered. Collection resolves a validated [`BuildRequest`] against metadata, installs an
-//! exact-version driver for the selected target, and invokes `cargo rustc` with the requested
+//! answered. Collection resolves a validated [`BuildRequest`] against metadata, compiles an
+//! exact-version driver with the default `rustc`, and invokes `cargo rustc` with the requested
 //! feature selection.
 //!
 //! Cargo's public metadata does not expose concrete function instances or codegen-unit placement.
@@ -11,17 +11,13 @@
 //! exact rustc selected by Cargo. `rustc_private` means rustc's internal implementation crates, not
 //! a different compiler executable.
 //!
-//! The driver preserves Cargo's existing wrapper chain and observes only the selected-target
-//! compiler invocation. A successful [`CollectedBuild`] therefore proves that this compiler ran
-//! successfully and returned a complete bounded instance manifest. Publication and durable storage
+//! Collection disables configured compiler wrappers with a warning. The driver observes only the
+//! selected-target compiler invocation. A successful [`CollectedBuild`] proves that this compiler
+//! ran successfully and returned a complete instance manifest. Publication and durable storage
 //! belong to the capture and store crates.
 
 mod build;
 pub use build::run_build;
-
-#[cfg(test)]
-#[path = "../rustc-driver/arguments.rs"]
-mod arguments;
 
 mod collection;
 pub use collection::CollectedBuild;

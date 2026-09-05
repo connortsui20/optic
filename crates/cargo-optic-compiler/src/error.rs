@@ -25,31 +25,11 @@ pub enum Error {
         source: cargo_metadata::Error,
     },
 
-    /// Cargo's compiler configuration could not be interpreted safely.
+    /// The compiler environment is not supported for collection.
     #[snafu(display("invalid compiler environment: {message}"))]
     CompilerEnvironment {
         /// The invalid configuration or missing compiler fact.
         message: String,
-    },
-
-    /// The selected compiler does not contain its matching rustc-private libraries.
-    #[snafu(display(
-        "rustc {release} ({commit_hash}) requires its matching rustc-dev component at {}{}",
-        path.display(),
-        install_command
-            .as_deref()
-            .map(|command| format!("; install it with `{command}`"))
-            .unwrap_or_default()
-    ))]
-    MissingRustcDev {
-        /// The selected rustc release.
-        release: String,
-        /// The full selected rustc commit hash.
-        commit_hash: String,
-        /// The expected rustc-private library directory.
-        path: PathBuf,
-        /// The exact rustup command when the sysroot proves a rustup toolchain.
-        install_command: Option<String>,
     },
 
     /// A local compiler file or manifest operation failed.
@@ -88,16 +68,16 @@ pub enum Error {
         target: String,
     },
 
-    /// Cargo could not start.
+    /// Cargo or rustc could not start.
     #[snafu(display("failed to start {}", program.display()))]
     StartProcess {
-        /// The selected Cargo executable.
+        /// The process executable.
         program: PathBuf,
         /// The process-start error.
         source: std::io::Error,
     },
 
-    /// Cargo exited without completing the selected target successfully.
+    /// Cargo or rustc exited unsuccessfully.
     #[snafu(display(
         "{} must complete successfully, got {status}{}",
         program.display(),
@@ -108,7 +88,7 @@ pub enum Error {
             .unwrap_or_default()
     ))]
     ProcessFailed {
-        /// The selected Cargo executable.
+        /// The process executable.
         program: PathBuf,
         /// The unsuccessful process status.
         status: String,
