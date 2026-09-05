@@ -121,7 +121,7 @@ impl Configuration {
 
     /// Selects the proven post-optimization write point, not a pre-LTO or no-opt snapshot.
     ///
-    /// The `stage-proof.rs` reproducer validates these suffixes against rustc's output naming API.
+    /// The `tests/fixtures/stage-proof.rs` reproducer checks these suffixes against rustc's naming API.
     /// [No LTO] writes `bc` after optimization. [Local ThinLTO] saves `thin-lto-after-pm` after its
     /// pass manager.
     ///
