@@ -102,6 +102,7 @@ dependencies = [
  "cargo-optic-records",
  "cargo_metadata",
  "snafu",
+ "tempfile",
 ]
 
 [[package]]

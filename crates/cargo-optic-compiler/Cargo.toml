@@ -12,3 +12,4 @@ name = "optic_compiler"
 cargo-optic-records.workspace = true
 cargo_metadata.workspace = true
 snafu.workspace = true
+tempfile.workspace = true
