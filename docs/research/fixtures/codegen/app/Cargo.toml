@@ -1,0 +1,13 @@
+[package]
+name = "optic-research-app"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+optic-research-kernel = { path = "../kernel" }
+optic-research-passthrough-macro = { path = "../passthrough-macro" }
+
+[[bench]]
+name = "compile_mode"
+harness = false
