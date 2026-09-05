@@ -93,15 +93,15 @@ reader semantics. Do not add convenience query selection or another compiler out
 
 ## Checkpoint C: installable release candidate
 
-- [ ] Package the complete embedded driver source and required assets.
-- [ ] Verify an installed CLI outside the repository and its build directories.
-- [ ] Verify the `optic` API from a separate Cargo consumer.
-- [ ] Verify cold capture, reuse, find, and both show outputs through that installed build.
-- [ ] Run the installed CLI on `cargo-optic-records` itself and verify capture, find, show, and reuse.
-- [ ] Verify actionable errors for missing required toolchain components.
-- [ ] Document installation, the full workflow, supported environments, and known limits.
-- [ ] Reconcile public APIs, record constants, help text, tests, and the architecture guide.
-- [ ] Complete independent correctness and Rust-style reviews of the whole implementation.
+- [x] Package the complete embedded driver source and required assets.
+- [x] Verify an installed CLI outside the repository and its build directories.
+- [x] Verify the `optic` API from a separate Cargo consumer.
+- [x] Verify cold capture, reuse, find, and both show outputs through that installed build.
+- [x] Run the installed CLI on `cargo-optic-records` itself and verify capture, find, show, and reuse.
+- [x] Verify actionable errors for missing required toolchain components.
+- [x] Document installation, the full workflow, supported environments, and known limits.
+- [x] Reconcile public APIs, record constants, help text, tests, and the architecture guide.
+- [x] Complete independent correctness and Rust-style reviews of the whole implementation.
 - [ ] Run the final CI suite on the exact revision to merge.
 - [ ] Squash-merge the complete MVP and update `planning` with its evidence and status.
 

@@ -65,8 +65,8 @@ messages. Keep the existing private driver protocol and extend its documented re
 - [x] Establish reproducible checks and the shared test harness.
 - [x] Implement and verify Checkpoint A on Linux and macOS.
 - [x] Implement and verify narrow show with the final cache format.
-- [ ] Verify packaged installation and external library use.
-- [ ] Resolve independent correctness and Rust-style reviews.
+- [x] Verify packaged installation and external library use.
+- [x] Resolve independent correctness and Rust-style reviews.
 - [ ] Merge the final verified MVP and reconcile planning status.
 
 Update this ledger with implementation findings before dependent work starts. The detailed cache,
@@ -213,6 +213,15 @@ Self-hosting captures `optic_records::capture_id::CaptureId::generate`, reads it
 LLVM, and reuses capture `ssrzmzwvtokxvoqxoquksspnutzopmur` with the original completion time.
 The final candidate has only a rustdoc-link correction after this run. Repeat its installed gate and
 wait for [CI run 33999328890](https://github.com/connortsui20/optic/actions/runs/33999328890).
+
+Both independent reviewers approve `514b8a03c2981a1df45ef963bc75002932a9f883` with no remaining
+findings. Harvey verified the graph invariant and corruption regression. Hooke verified all four
+style corrections. Neither reviewer authored the implementation or its corrections.
+
+The exact-candidate installed repeat passes, with evidence in `/tmp/optic-install.I30jpiuX`.
+All seven archives, 54 unpacked compiler tests, installed CLI/API checks, and self-hosting pass.
+Self-hosting returns `vqrqtnlnsoupvyovqpkprontwkrurwvx:691` for `CaptureId::generate` and preserves
+completion time `2026-09-05T23:42:55.794Z` on reuse. Final macOS CI remains the last merge gate.
 
 ## Additional acceptance
 

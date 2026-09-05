@@ -66,12 +66,12 @@ The stage proof runs both supported modes with the pinned compiler and matching 
 | Missing placement modules are corruption, not unavailable evidence or a reusable capture. | Records `tests/evidence.rs` and store `tests/artifacts.rs`. | Passes locally. |
 | Parser boundary tests force actual short reads. | Compiler `src/llvm_index/tests.rs` and its consumers. | All 21 indexer tests pass locally. |
 | Named protocol codes preserve their wire values and meanings. | Compiler `src/manifest/tests.rs`. | Passes locally. |
-| Both independent reviews resolve their findings. | Execution ledger. | Final re-review pending. |
+| Both independent reviews resolve their findings. | Execution ledger. | Both approve `514b8a0`. |
 | The exact merge candidate passes both-host workspace and installed-product CI. | CI run linked in the execution ledger. | Final run pending. |
 
 The final candidate `514b8a0` passes all 236 workspace tests, formatting, Clippy with warnings denied,
-and public/private rustdoc with warnings denied. Its only change after the installed run at `d2ebd20`
-corrects a redundant rustdoc link. The exact-candidate installation repeat and both-host CI are running.
+and public/private rustdoc with warnings denied. Its complete installation repeat passes with evidence
+at `/tmp/optic-install.I30jpiuX`, including every installed-product row above. Final both-host CI is running.
 
 The first complete installed run retained its evidence at `/tmp/optic-install.0Tnsjkqs` locally.
 It used Rust 1.98.1, compiler commit `48a229ceaefd4985c50990b14116b6d856af0985`, and LLVM 22.1.8.
