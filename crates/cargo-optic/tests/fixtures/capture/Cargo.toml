@@ -9,6 +9,10 @@ edition = "2024"
 gated = []
 
 [[bin]]
+name = "generic"
+path = "src/generic.rs"
+
+[[bin]]
 name = "feature-gated"
 path = "src/feature_gated.rs"
 required-features = ["gated"]

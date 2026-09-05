@@ -1,17 +1,14 @@
 [package]
-name = "cargo-optic-api"
+name = "cargo-optic-evidence"
 version = "0.0.1"
 publish = false
 edition.workspace = true
 license.workspace = true
 
 [lib]
-name = "optic"
+name = "optic_evidence"
 
 [dependencies]
-cargo-optic-capture.workspace = true
-cargo-optic-compiler.workspace = true
-cargo-optic-evidence.workspace = true
 cargo-optic-records.workspace = true
 cargo-optic-store.workspace = true
 snafu.workspace = true
