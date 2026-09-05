@@ -202,6 +202,18 @@ comparison from the nested stage-proof test, and document `InstanceRef`'s text/S
 The integration owner handles durable validation and reference docs. Separate workers handle indexer
 test input, driver protocol names, and stage-proof structure. Both reviewers recheck their findings.
 
+All corrections are integrated as `0affc0d`, `69da43e`, `6d84ad1`, and `d2ebd20`. Snapshot isolation is
+`3922e35`. The final candidate `514b8a0` also corrects one link found by private rustdoc checks.
+All 236 workspace tests, formatting, Clippy, and public/private rustdoc pass locally. The two reviewers
+are checking the complete correction diff against their original findings.
+
+The full installed workflow passes at `d2ebd20`, with evidence in `/tmp/optic-install.0Tnsjkqs`.
+All seven archives verify, all 54 unpacked compiler tests pass, and installed CLI/API journeys pass.
+Self-hosting captures `optic_records::capture_id::CaptureId::generate`, reads its source and optimized
+LLVM, and reuses capture `ssrzmzwvtokxvoqxoquksspnutzopmur` with the original completion time.
+The final candidate has only a rustdoc-link correction after this run. Repeat its installed gate and
+wait for [CI run 33999328890](https://github.com/connortsui20/optic/actions/runs/33999328890).
+
 ## Additional acceptance
 
 The user suggested exercising Optic on its own source during implementation. Add the single Linux

@@ -8,7 +8,7 @@ An existing test name is not proof that the integrated checkpoint has passed.
 
 | Claim | Owning test or file | Integrated status |
 | --- | --- | --- |
-| Canonical IDs and validated Cargo analysis records. | `cargo-optic-records/src/tests.rs` and identifier tests. | 31 tests pass locally. |
+| Canonical IDs and validated Cargo analysis records. | `cargo-optic-records/src/tests/` and identifier tests. | Passes in accepted A. |
 | Bounded durable reads and writes. | `cargo-optic-store/src/tests/bounds.rs`. | Passes locally. |
 | Missing candidates differ from corruption. | `cargo-optic-store/src/tests/candidates.rs`. | Passes locally. |
 | Publication has one final commit boundary. | `cargo-optic-store/src/tests/publication.rs`. | Passes locally. |
@@ -24,7 +24,7 @@ An existing test name is not proof that the integrated checkpoint has passed.
 | Compiler overrides fail and wrappers produce warnings. | `cargo-optic-compiler/tests/compiler_selection.rs`. | Passes in accepted A. |
 | Failed compilation never publishes. | `failed_cargo_process_does_not_publish_a_capture`. | Passes in accepted A. |
 | Failed publication cannot revive old freshness. | `rejects_old_evidence_after_collection_succeeds_but_publication_fails`. | Passes in accepted A. |
-| Exact search, ordering, limits, and capture scope remain stable. | `cargo-optic-evidence/src/tests.rs` and API find tests. | Passes in accepted A. |
+| Exact search, ordering, limits, and capture scope remain stable. | `cargo-optic-evidence/src/tests/` and API find tests. | Passes in accepted A. |
 | Real Cargo discovers the CLI and distinguishes capture from reuse. | `cargo-optic/tests/e2e.rs`. | Passes in accepted A. |
 
 The accepted A revision is `0813fba`. All 149 workspace tests and quality checks pass locally.
@@ -56,5 +56,22 @@ The stage proof runs both supported modes with the pinned compiler and matching 
 
 ## Checkpoint C
 
-Checkpoint C starts from accepted B. Its evidence will cover verified package archives, both installed CLI
-hosts, the external library consumer, independent reviews, and the exact final CI revision.
+| Claim | Owning test or file | Integrated status |
+| --- | --- | --- |
+| Seven product archives pass Cargo verification with no unpublished helper dependency. | `scripts/check-install.sh`. | Passes locally at `d2ebd20`. |
+| Unpacked compiler unit tests need only extracted product dependencies. | Installation script and compiler unit tests. | All 54 pass at `d2ebd20`. |
+| Installed Cargo discovery, capture/list/find, source/LLVM, changed source, and forced analysis work. | Installation script's CLI journey. | Passes locally at `d2ebd20`. |
+| A separate consumer needs only the public `optic` API. | `scripts/install-fixtures/consumer/`. | Build, journey, Clippy, and rustdoc pass at `d2ebd20`. |
+| The installed tool captures its own committed source and reuses that evidence. | Installation script's Linux self-hosting journey. | `CaptureId::generate` source, LLVM, and warm reuse pass at `d2ebd20`. |
+| Missing placement modules are corruption, not unavailable evidence or a reusable capture. | Records `tests/evidence.rs` and store `tests/artifacts.rs`. | Passes locally. |
+| Parser boundary tests force actual short reads. | Compiler `src/llvm_index/tests.rs` and its consumers. | All 21 indexer tests pass locally. |
+| Named protocol codes preserve their wire values and meanings. | Compiler `src/manifest/tests.rs`. | Passes locally. |
+| Both independent reviews resolve their findings. | Execution ledger. | Final re-review pending. |
+| The exact merge candidate passes both-host workspace and installed-product CI. | CI run linked in the execution ledger. | Final run pending. |
+
+The final candidate `514b8a0` passes all 236 workspace tests, formatting, Clippy with warnings denied,
+and public/private rustdoc with warnings denied. Its only change after the installed run at `d2ebd20`
+corrects a redundant rustdoc link. The exact-candidate installation repeat and both-host CI are running.
+
+The first complete installed run retained its evidence at `/tmp/optic-install.0Tnsjkqs` locally.
+It used Rust 1.98.1, compiler commit `48a229ceaefd4985c50990b14116b6d856af0985`, and LLVM 22.1.8.
