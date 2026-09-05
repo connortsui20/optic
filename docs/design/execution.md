@@ -128,3 +128,9 @@ the worker. They are ready for integration and full process acceptance.
 
 These partial commits are not a validated B implementation and have not replaced the accepted A
 revision on the PR.
+
+## Additional acceptance
+
+The user suggested exercising Optic on its own source during implementation. Add the single Linux
+self-hosting smoke test specified in [installation](installation.md#ci-and-completion) to C.
+Focused fixtures still own exact behavior, and archive-only journeys still own package isolation.

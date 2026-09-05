@@ -97,6 +97,7 @@ reader semantics. Do not add convenience query selection or another compiler out
 - [ ] Verify an installed CLI outside the repository and its build directories.
 - [ ] Verify the `optic` API from a separate Cargo consumer.
 - [ ] Verify cold capture, reuse, find, and both show outputs through that installed build.
+- [ ] Run the installed CLI on `cargo-optic-records` itself and verify capture, find, show, and reuse.
 - [ ] Verify actionable errors for missing required toolchain components.
 - [ ] Document installation, the full workflow, supported environments, and known limits.
 - [ ] Reconcile public APIs, record constants, help text, tests, and the architecture guide.

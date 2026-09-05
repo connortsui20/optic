@@ -90,6 +90,13 @@ repeat an unpatched `cargo install cargo-optic --locked` smoke test.
 Run the release-candidate package and installed workflow check in the final CI gate. Execute the
 installed CLI journey on both supported hosts. The external-library compilation can run on Linux.
 
+Add one Linux self-hosting smoke test using the installed CLI against this repository's
+`cargo-optic-records` library in release mode. Capture, find a known concrete function, show its
+source and exact LLVM, then verify warm reuse. Use a separate Cargo target directory. This checks
+real product source and its dependency graph; it does not replace the focused fixture or archive
+isolation tests. The self-hosting test can use the checkout explicitly, unlike the installed fixture
+and external-consumer tests.
+
 Keep the script small and direct. Do not add a release orchestrator or automated registry
 publishing.
 
