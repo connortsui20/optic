@@ -150,6 +150,20 @@ The moved protocol test does not assert the private unit-test-only provisioning 
 dedicated cache unit test still proves actual driver builds. The integration owner verifies
 `cargo test --lib` against unpacked compiler sources with only extracted-sibling patches.
 
+Product metadata and documentation are committed as `a95bdd9`. The seven packages use `0.1.0`;
+the unpublished helper stays at `0.0.1`. Versionless helper dev-dependencies and integration tests
+are absent from normalized product manifests and archive test targets. Retained compiler unit-test
+cleanup is still in progress.
+
+The required command `cargo package --workspace --exclude cargo-optic-test-support --locked`
+passes verification for all seven archives locally. An earlier attempt with `--offline` hit Cargo
+1.98.1's internal temporary-registry checksum error. The required command works with registry access;
+there is no custom registry or disabled-verification workaround. Installed runtime, external consumer,
+self-hosting, and final both-host CI remain pending.
+
+The installation worker is Arendt, using `/tmp/optic-mvp-install` from accepted B. The integration
+owner also adds a concise checked-in testing guide and connects installation checks to both CI hosts.
+
 ## Additional acceptance
 
 The user suggested exercising Optic on its own source during implementation. Add the single Linux
