@@ -1,33 +1,14 @@
-# Stabilization plan
+# MVP foundation
 
-This phase starts after PRs #14, #9, and #6 merge. Product feature work stops until this phase is
-complete.
+This foundation is part of the integrated MVP, not a separate five-PR stabilization stack. It
+supplies the checks needed before capture reuse and narrow show can be trusted.
 
-The phase makes the walking MVP safe for autonomous changes. It uses small additions and does not
-create a general development platform.
+## F1: Reproducible CI
 
-## Entry state
+Incorporate the existing CI proposal, PR #16, into the MVP branch. Pin the development toolchain to
+the first tested release, Rust 1.98.1, with rustfmt, Clippy, rustc-dev, and llvm-tools.
 
-The walking MVP provides these commands:
-
-```console
-cargo optic capture -p my-crate --lib --release
-cargo optic list-captures
-cargo optic find --capture CAPTURE_REF kernel
-```
-
-The workspace already has unit and integration tests. It does not have hosted CI, shared fixture
-support, current architecture documentation on `main`, or one complete behavior matrix.
-
-## Pull request 1: establish CI
-
-Review question:
-
-> Does every proposed change run the existing quality checks on Linux and macOS?
-
-Add one GitHub Actions workflow. Use the toolchain and components from `rust-toolchain.toml`.
-
-Run these checks:
+Run these commands from a clean checkout:
 
 ```console
 cargo fmt --all -- --check
@@ -36,154 +17,68 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 cargo test --workspace
 ```
 
-Run the workspace tests on Linux and macOS. The formatting, Clippy, and rustdoc jobs can run on
-Linux.
+Also run rustfmt checking on standalone driver sources that Cargo's module discovery does not
+include. Keep that file selection in one checked-in verification script.
 
-Do not add a Cargo cache, third-party test runner, coverage service, release workflow, or scheduled
-platform matrix. Add those tools only when a measured problem requires them.
+Run tests on Linux and macOS. Formatting, Clippy, and rustdoc can run on Linux. Checkpoint C adds
+the packaged-installation journey to CI. Do not add CI caching, coverage quotas, flaky-test retries,
+or a second test runner before a measured need.
 
-Completion criterion:
+A development toolchain pin is not a promise to support all compiler versions. Publish the actual
+tested compiler and host combinations.
 
-> A pull request cannot auto-merge until the repository quality checks pass.
+## F2: Shared test support
 
-## Pull request 2: publish current contracts
+Create one `publish = false` test-support crate with compiler, API, and CLI test consumers. Use
+path-only, versionless dev-dependencies. The [installation plan](installation.md) defines how to
+keep this helper out of distributable packages.
 
-Review question:
+The helper owns fixture copying, temporary directories, command environment application, and shared
+failure diagnostics. It does not own product command construction or semantic expectations.
 
-> Can a contributor understand the implemented system and its limits from `main`?
+Start with a small offline Cargo workspace that covers ordinary functions, two generic instances, a
+local dependency, features, and a build-script tracked input. If another behavior requires a
+different shape, add a separate fixture.
 
-Add a concise architecture guide to `main`. It must describe:
+All environment-sensitive API calls run in isolated children. The parent test runner must not mutate
+process-global environment variables. The [test strategy](test-strategy.md) defines the directory
+layout, toolchain resolution, observations, and acceptance matrix.
 
-- The CLI and library entry points.
-- The responsibility of each existing crate.
-- The Cargo, wrapper, driver, store, API, and CLI data flow.
-- The exact-version driver process boundary and protocol.
-- Capture validation and atomic publication.
-- Durable record ownership and validation.
-- The supported compiler and host environment.
-- Explicit unsupported cases.
-- The current absence of compatibility guarantees.
+Completion requires migrating existing process tests without losing their current assertions. A
+helper with no real consumers does not satisfy this work.
 
-Add short decision records for choices that agents can otherwise reopen. The initial records cover:
+## F3: Storage correctness
 
-- Cargo remains the authority for freshness.
-- The driver compiles against the selected rustc version.
-- The store publishes one complete capture with an atomic rename.
-- Unexpected environments return errors instead of compatibility behavior.
-- Current crate boundaries remain even when a crate has one present caller.
+Implement the [architecture's durable bounds](mvp-architecture.md#durable-input-boundary) before
+cache reuse starts reading candidate captures.
 
-Add root agent instructions. The instructions must require simple code, approved contracts, tests,
-the Rust style rules, and an independent review.
+Cover each meaningful pre-commit failure boundary with deterministic tests. Use real temporary
+files, malformed fixtures, and obstructed paths where practical. For an otherwise inaccessible
+failure, a narrow private test seam is acceptable. Do not add a filesystem trait or production
+fault-injection configuration.
 
-Completion criterion:
+A test verifies the completed-capture namespace, not only the returned error. It also verifies that
+previous captures remain readable. Cache publication later extends this suite at the pointer
+installation and final-rename boundaries.
 
-> An agent can identify the current contract without reading the future roadmap or Git history.
+## Readability and simplification
 
-## Pull request 3: share hermetic test fixtures
+Apply `$rust-style` during every implementation checkpoint and again to the complete diff.
 
-Review question:
+If a split adds only navigation, keep the straight-line function. Each module owns a named concept.
+If that concept has children, use a directory with `mod.rs`. Keep constants documented beside their
+definitions.
 
-> Do integration tests start from the same isolated Cargo environment without duplicated setup?
+If compatibility or fallback code serves no approved contract, remove it. Keep ordinary input
+validation and resource bounds required for durable storage. They protect the main workflow.
 
-Add one unpublished test-support crate. Existing API, compiler, and CLI tests are separate callers,
-so the shared boundary has current use.
+Write current architecture and limitations on main as behavior becomes implemented. Keep future
+plans on `planning`. Contributor instructions must explain this distinction.
 
-The crate owns only these test facilities:
+## Foundation acceptance
 
-- Creation of a temporary Cargo workspace.
-- Copying of checked-in fixture source.
-- Creation of an isolated Cargo home and target directory.
-- Removal of ambient compiler and wrapper environment variables.
-- Formatting of child-process diagnostics.
-- Shared custom assertions that have more than one caller.
+The foundation requires passing CI on both hosts and isolated process fixtures. Oversized durable
+input must fail before deserialization. Publication tests must verify that incomplete captures
+remain outside the completed namespace.
 
-Keep binary discovery and product-specific assertions in the tests that own them. Do not create a
-command builder, scenario language, snapshot layer, or generic filesystem library.
-
-Migrate the existing API, compiler, and CLI integration tests. Preserve their behavior during the
-migration.
-
-Completion criterion:
-
-> Integration tests cannot read user Cargo configuration or share build state by accident.
-
-## Pull request 4: complete the walking-MVP contract suite
-
-Review question:
-
-> Do black-box tests protect every current user-visible claim and publication invariant?
-
-Add one fixture package that contains:
-
-- A non-generic function.
-- A generic function with at least two concrete instances.
-- A feature-selected target.
-- A source file with a space in its name when the current implementation uses that path.
-
-The public API and CLI tests cover:
-
-- An empty capture history.
-- One successful capture and list operation.
-- Concrete-instance lookup by exact name and literal substring.
-- Deterministic lookup order and the documented result limit.
-- Package, target, profile, and feature selection.
-- Two repeated captures before reuse exists.
-- A missing target.
-- Invalid Rust source.
-- A driver collection error.
-- No visible capture after each pre-publication error.
-- Wrapper disabling with its user warning.
-- Rejection of a configured or environment-selected compiler.
-- Rejection of malformed current-format durable data.
-- Bounded rejection of an oversized durable instance manifest.
-
-The driver integration test crosses the real process boundary. It proves that the writer and reader
-agree on the current protocol. It does not freeze private protocol bytes or promise compatibility.
-
-Do not add tests for Windows, response files, non-executable temporary filesystems, network
-filesystems, recovery, concurrency, or migration. These cases are outside the support contract.
-
-Completion criterion:
-
-> A simple regression in the walking MVP fails one focused test before it reaches `main`.
-
-## Pull request 5: simplify the walking MVP
-
-Review question:
-
-> Is every remaining layer and edge-case branch necessary for a tested current contract?
-
-Review the complete implementation after the contract suite lands. Apply these rules:
-
-- Remove code for unsupported edge cases.
-- Remove compatibility code for older prototype data.
-- Remove one-caller wrappers that do not name a real concept.
-- Keep a straight-line function when splitting it adds navigation without clarity.
-- Keep an existing crate boundary because future application and subsystem callers are known.
-- Replace recovery for unexpected input with one clear error.
-- Replace comments that narrate code with names or structure.
-- Add module or item documentation when the entry point, invariant, or rationale is not clear.
-- Keep protocol constants and durable format constants documented beside their definitions.
-
-This pull request does not change approved behavior. If deletion changes a contract, update the
-planning branch before the implementation continues.
-
-Completion criterion:
-
-> The walking MVP contains the minimum code that satisfies its current contracts and quality gates.
-
-## Exit review
-
-After all five pull requests merge, run one accumulated review against `main`. The review must use
-the architecture guide, behavior matrix, and Rust style rules.
-
-The phase is complete when:
-
-- Linux and macOS CI pass on `main`.
-- All current contracts have an owning test.
-- The integration tests are isolated from the developer machine.
-- The architecture guide matches the code.
-- The simplification review has no unresolved findings.
-- The `planning` status reflects the merged state.
-
-Only then can the captured-source slice start.
+This does not complete the MVP. Proceed to Checkpoint A in the [work ledger](mvp-plan.md).

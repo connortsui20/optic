@@ -1,5 +1,8 @@
 # Query and comparison
 
+> Historical research or broader design, not the current implementation contract. The
+> [active MVP plan](PLAN.md) defines scope, implementation order, and required tests.
+
 This document explains how Cargo Optic finds instances and shows captured evidence. It also
 explains the meaning of common result states.
 

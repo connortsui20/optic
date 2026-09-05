@@ -1,188 +1,136 @@
-# Cargo Optic plan
+# Cargo Optic MVP
 
-This document defines the implementation order for Cargo Optic. The `planning` branch is the source
-of truth for planned work. The `main` branch is the source of truth for implemented behavior.
+The MVP supports one complete investigation: capture a Cargo target, find a concrete Rust instance,
+and inspect its captured source or optimized LLVM output. Identical requests reuse evidence only
+after Cargo validates freshness. The exact-version driver is cached too.
 
-Cargo Optic is a prototype until the first public release. The prototype can change commands,
-library APIs, records, protocols, and stored data without compatibility support.
+The user confirmed this scope on 2026-09-05. Capture, listing, search, and both caches must work
+well before development starts on narrow `show`. The implementation lands as one coherent MVP
+change.
 
-## Product goal
+## Definition of done
 
-Cargo Optic records compiler evidence for one real Cargo target. A user can find a concrete Rust
-instance and inspect the source and LLVM IR from that build.
-
-The first complete workflow is:
+The following workflow must work through both the CLI and the `optic` library:
 
 ```console
 cargo optic capture -p my-crate --lib --release
 cargo optic list-captures
 cargo optic find --capture CAPTURE_REF kernel
+cargo optic capture -p my-crate --lib --release
+cargo optic capture -p my-crate --lib --release --fresh
 cargo optic show --instance INSTANCE_REF --output source
 cargo optic show --instance INSTANCE_REF --output llvm
 ```
 
-An unchanged second capture will reuse complete evidence after Cargo reports that the selected
-analysis is fresh.
+The identical second capture returns the existing capture ID and completion time. It does not
+rebuild the selected target or driver, copy evidence, or add another history entry.
 
-## Development goal
+A changed tracked input produces a new capture with new evidence. `--fresh` forces a new analysis of
+the selected target. It still reuses the compatible driver and ordinary dependency artifacts.
 
-The prototype ships small features at high quality. Simple code makes this quality practical.
+Every completed capture is self-contained. A compilation or storage error must never make old
+evidence eligible for a newer successful Cargo build.
 
-The implementation obeys these rules:
+The installed CLI and an external library consumer must pass the same workflow outside the source
+checkout. Linux and macOS CI, independent correctness review, and `$rust-style` review must pass.
 
-- Implement one user-visible claim at a time.
-- Use a direct implementation before an abstraction.
-- Add an abstraction after a second real caller or implementation appears.
-- Keep the current crate boundaries because each crate has known future consumers.
-- Return a clear error for an unsupported environment or unexpected input.
-- Do not add speculative recovery, compatibility, portability, or optimization code.
-- Add support for an unusual case with a fixture that reproduces the case.
-- Measure a performance problem before the implementation adds performance complexity.
-- Prefer deletion when code does not protect a current contract.
+## Current baseline
 
-## Sources of truth
+The baseline is `main` at `684991a`. Earlier PRs #14, #9, and #6 are merged.
 
-The planning documents have this order:
+| Capability | Baseline status | MVP requirement |
+| --- | --- | --- |
+| Capture, list, and find. | Implemented. | Preserve behavior and complete failure coverage. |
+| Concrete rustc instances. | Implemented through an exact-version driver. | Preserve exact compiler identity and symbols. |
+| Capture reuse. | Absent. Every request forces selected-target work. | Reuse only after Cargo freshness confirmation. |
+| Driver reuse. | Absent. Every request rebuilds the driver. | Cache by compiler identity and complete driver input. |
+| Durable read bounds. | Absent from JSON readers. | Enforce documented limits before deserialization. |
+| Source and LLVM evidence. | Absent. | Add after the cache checkpoint. |
+| Instance reference and show. | Absent. | Add only with narrow show. |
+| CI. | PR #16 is open and its Linux/macOS checks pass. | Incorporate it into the integrated MVP. |
+| Installation. | All packages are unpublished. | Verify packaged CLI and library consumption. |
 
-1. This document defines the goals, order, and completion rules.
-2. [MVP architecture](mvp-architecture.md) defines the intended product boundaries.
-3. [MVP plan](mvp-plan.md) defines each product slice.
-4. [Stabilization plan](stabilization.md) defines the pause after the walking MVP.
-5. [Test strategy](test-strategy.md) defines the executable contracts.
-6. [Agent workflow](agent-workflow.md) defines autonomous implementation and review.
+A passing baseline test suite does not establish the missing requirements. Status changes require
+the acceptance evidence defined in the test strategy.
 
-The other design documents describe the earlier prototype or possible future work. They provide
-evidence, but they do not authorize implementation. The [future-work document](future-work.md)
-contains ideas that need a new plan before implementation.
+## Reading order and authority
 
-## Program phases
+1. This document defines product scope and the completion gate.
+2. [MVP plan](mvp-plan.md) assigns work and orders the integration checkpoints.
+3. [MVP architecture](mvp-architecture.md) fixes subsystem boundaries and shared contracts.
+4. [Foundation](stabilization.md) defines the preparation and simplification work.
+5. [Capture reuse](capture-reuse.md) defines the cache state machine.
+6. [Narrow show](show.md) defines source and LLVM evidence.
+7. [Test strategy](test-strategy.md) defines fixtures, observations, and acceptance scenarios.
+8. [Installation](installation.md) defines the packaged deliverable.
+9. [Agent workflow](agent-workflow.md) defines parallel work and independent review.
 
-### Phase 1: Walking MVP
+These documents own different decisions. Link to the owner instead of repeating a contract.
 
-The walking MVP supports `capture`, `list-captures`, and `find`. It proves the Cargo connection,
-exact-version driver, durable publication, and concrete-instance search.
+Other documents in this directory and `docs/research/` retain earlier prototype research or future
+designs. Their capabilities are not additional MVP requirements. The active documents take
+precedence when old research differs.
 
-Current stack:
+## Simplicity and quality
 
-- [x] Capture one selected Cargo target and list completed captures in PR #5.
-- [x] Add durable records for concrete compiler instances in PR #7.
-- [x] Collect concrete instances with an exact-version driver in PR #8.
-- [x] Remove unsupported compiler-wrapper compatibility in PR #11.
-- [x] Merge the driver workflow clarification in PR #14.
-- [x] Merge complete compiler-capture publication in PR #9.
-- [x] Merge user-visible concrete-instance search in PR #6.
+`main` is a prototype integration branch until release. Commands, records, protocols, and Rust APIs
+can change together. No migration or backward-compatibility code is required.
 
-PRs #14, #9, and #6 merge in that order. This stack uses one exception to the future CI rule
-because the repository does not have CI yet.
+Keep the existing seven product crates. Known future callers justify those subsystem boundaries.
+Inside each subsystem, apply the full `$rust-style` rules, including structural restraint.
 
-The [stabilization plan](stabilization.md) starts immediately after this stack merges.
+Simple code must still enforce the claims that the user relies on. Cache invalidation, exact
+compiler evidence, bounded durable reads, and atomic publication are required correctness work. They
+are not optional edge-case support.
 
-### Phase 2: Stabilization
+Do not implement Windows support, response-file compatibility, noexec mount handling, custom
+compiler composition, concurrent capture, or crash recovery. Unexpected unsupported cases return
+errors. Ignoring such a case is valid only when it cannot change the result's meaning.
 
-Stabilization pauses product features. It adds the minimum structure that lets agents change the
-prototype without inventing behavior.
+Cache reuse is a required product behavior. It does not need a performance benchmark to justify its
+existence. Further optimization needs a measured bottleneck. No timing threshold defines
+correctness.
 
-The phase has five outcomes:
+## Delivery order
 
-1. Linux and macOS CI protect the repository.
-2. Current architecture and support limits exist on `main`.
-3. Integration tests use one small, hermetic fixture harness.
-4. The walking-MVP contract has complete black-box coverage.
-5. A test-backed cleanup removes unnecessary complexity from the implementation.
+The implementation has three internal checkpoints:
 
-The phase does not add a test DSL, snapshot framework, compatibility layer, platform abstraction,
-or generalized orchestration system.
+1. **A: Reliable and efficient capture/list/find.** Establish the test harness and finish both
+   caches.
+2. **B: Narrow show.** Add references, captured source, optimized LLVM, and final-format cache
+   tests.
+3. **C: Release candidate.** Verify installation, finish documentation, and review the complete
+   code.
 
-### Phase 3: Captured source
+These checkpoints are not separate PR requirements. The integration owner can restructure code
+across crates during this effort. The final review covers the assembled implementation.
 
-The source slice stores source that belongs to a recorded definition. It reads the stored snapshot
-instead of the current checkout.
+## Deferred features
 
-The slice accepts source only from approved local package roots. Missing source remains a valid
-availability result.
+The following features are outside this MVP:
 
-Completion criterion:
+- Build-and-query `show QUERY` and automatic capture from a query.
+- MIR, assembly, objects, pre-optimization LLVM output, and optimization remarks.
+- Cross-capture identity, comparison, or transformation attribution.
+- Automatic dependency capture.
+- Store federation, compression, deduplication, retention, and garbage collection.
+- Recovery of interrupted work or concurrent capture.
+- JSON Lines, cancellation APIs, a TUI, a server, or an editor integration.
+- Compatibility with old stored data or old API versions.
 
-> A user can show the captured source for one selected compiler instance.
+A dependency instance present in the selected compilation remains legitimate selected-target
+evidence. Narrow source capture initially supports only local definitions with approved
+compiler-loaded spans.
 
-### Phase 4: Exact LLVM IR
+## Persistence and execution boundary
 
-The LLVM slice emits optimized LLVM IR and records byte ranges for function bodies. An exact raw
-symbol connects an instance to an LLVM body.
+Persist the complete plan on `planning` before implementation starts. The planning branch remains
+docs-only on top of `main`. Its history can be rebased using leased force updates.
 
-The slice distinguishes an available body from an optimized-away body. Similar display text does
-not create an evidence relationship.
+Current behavior belongs in documentation on `main`. Planned behavior belongs here until the
+implementation passes its checkpoint. The status in this plan must distinguish implemented, tested,
+and merged work.
 
-Completion criterion:
-
-> A user can show exact LLVM evidence or learn that the instance has no standalone body.
-
-### Phase 5: Capture reuse
-
-The reuse slice uses Cargo as the authority for freshness. It does not reconstruct Cargo's private
-fingerprint rules.
-
-A request key selects a completed capture and its saved analysis fingerprint. Cargo Optic returns
-the selected capture only when Cargo reports that analysis as fresh.
-
-The same slice caches the exact-version driver by compiler identity, driver source digest, and
-protocol version.
-
-Completion criterion:
-
-> An identical capture reuses complete evidence without rebuilding the selected target or driver.
-
-### Phase 6: First release
-
-The release slice completes package metadata, installation documentation, public errors, and an
-outside-workspace installation test. It does not add another product feature.
-
-Completion criterion:
-
-> A crates.io installation completes the documented workflow outside the source workspace.
-
-## Work that follows the MVP
-
-Later product work starts only after the first release meets its completion criterion. Each new
-feature needs a decision-complete plan on the `planning` branch.
-
-Potential later work includes:
-
-- Optimization remarks.
-- MIR, assembly, objects, and linked-product evidence.
-- Cross-capture identity and comparison.
-- Attribution for compiler transformations.
-- Capture labels, retention, removal, and garbage collection.
-- Dependency capture.
-- Foreign stores and portable evidence bundles.
-- A TUI, server, or editor integration.
-
-This list does not define an order. Prototype evidence in [future work](future-work.md) can inform a
-later plan.
-
-## Completion policy
-
-Each implementation slice needs all of these results before merge:
-
-- The change matches an approved implementation packet on `planning`.
-- The public API and durable data changes match the packet.
-- Required unit, integration, and CLI tests pass.
-- Linux and macOS CI pass after the CI phase lands.
-- Clippy and rustdoc report no warnings.
-- Rust formatting is clean.
-- An independent review reports no unresolved correctness or design findings.
-- The complete diff contains no speculative support or unnecessary abstraction.
-
-An agent can merge a conforming pull request without maintainer review. An agent must stop when the
-implementation needs a contract change that the planning documents do not authorize.
-
-## Planning branch maintenance
-
-The `planning` branch contains documentation commits on top of `main`. It does not contain a second
-implementation.
-
-Before implementation starts, the applicable goals and subgoals must exist on `planning`. After an
-integration milestone, rebase `planning` onto the new `main` and update the status lists.
-
-The branch can use rewritten history. Force updates must use a lease. The document content is the
-durable record, not the commit identifier.
+Planning changes do not authorize execution in the same turn. The current task is to make the plan
+complete and reviewable. Automatic merging remains authorized for the subsequent implementation task
+after the final quality gate. Registry publication needs a separate release instruction.

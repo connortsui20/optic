@@ -1,166 +1,206 @@
-# Test strategy
+# MVP test strategy
 
-The tests protect product claims and architecture boundaries. The test infrastructure stays smaller
-than the code that it protects.
+Tests establish the product claims in [PLAN.md](PLAN.md). The harness provides isolated fixtures and
+useful diagnostics, not a language for describing scenarios.
 
-## Principles
+Each invariant has one owning test layer. End-to-end journeys verify composition without repeating
+every parser case through a real compiler.
 
-- Test behavior through the narrowest public boundary that proves the claim.
-- Use a real Cargo process for Cargo and rustc integration.
-- Isolate each process test from user configuration and shared target state.
-- Keep fixtures small enough that a reader can understand the expected compiler output.
-- Use semantic assertions for text output. Do not use broad snapshots.
-- Test a documented error when unsupported input is part of the public boundary.
-- Do not create tests for unsupported environments only to make internal fallback code permanent.
-- Add a regression test with each defect correction when the failure is practical to reproduce.
+## Test ownership
 
-## Test levels
+| Layer | Owns |
+| --- | --- |
+| Records unit tests. | Identifier parsing, constructors, versions, reference agreement, and round trips. |
+| Store tests with real files. | Bounded durable input/output, atomic publication, pointers, and artifact reads. |
+| Compiler unit tests. | Request/key normalization, private protocol, artifact classification, and LLVM scanner. |
+| Compiler process tests. | Real Cargo freshness, driver execution, source spans, and optimized artifact stage. |
+| API child-process tests. | Typed capture outcomes and the complete stored-evidence workflow. |
+| CLI process tests. | Cargo subcommand discovery, arguments, references, stdout/stderr, and exit status. |
+| Packaged installation test. | Archive completeness, installed CLI, and an external library consumer. |
 
-### Unit tests
+Use semantic output assertions instead of whole-output snapshots. Byte equality is appropriate for a
+specific source range or LLVM excerpt. Do not snapshot unstable compiler diagnostics or full IR.
 
-Unit tests own pure invariants in one crate. They cover record construction, validation, identifier
-parsing, request validation, and store-path rules.
+Keep tests focused. When cases share a body, use a table-driven test. Follow `$rust-style` for
+fixture placement, meaningful dimensions, module layout, and `#[track_caller]` assertions.
 
-A unit test does not invoke Cargo when a direct value can prove the same invariant.
+## Small shared helper
 
-### Subsystem integration tests
+Create `cargo-optic-test-support` as an unpublished dev-only crate. Its consumers are existing
+compiler, API, and CLI tests. A small concrete helper supplies:
 
-Compiler integration tests invoke real Cargo and rustc processes. Store integration tests use a
-real temporary filesystem.
+- `TestWorkspace::new(fixture)` to copy one fixture into a private root.
+- Accessors for the workspace, Cargo home, target, and temporary paths.
+- `apply(&mut Command)` to set the child environment and working directory.
+- Shared command failure diagnostics and assertions where multiple callers need them.
 
-These tests own process selection, wrapper behavior, driver protocol exchange, publication, and
-bounded durable reads.
+Keep command construction, binary discovery, and product expectations with their owning tests. Do
+not build a command-builder facade, filesystem backend, public observer API, or scenario DSL.
 
-### Product API tests
+Use path-only, versionless dev-dependencies. Packaging removes this unpublished dependency, as
+specified in [installation](installation.md).
 
-The `optic` tests cross the application API boundary. They own workflow composition and typed error
-mapping across compiler, records, and store crates.
+## Process isolation
 
-### CLI tests
-
-The CLI tests invoke the built `cargo-optic` binary as an external Cargo subcommand. They own exit
-status, standard output, standard error, argument behavior, and follow-up references.
-
-### Package test
-
-The release phase installs Cargo Optic outside the source workspace. It then runs the documented
-workflow against the fixture package.
-
-This test enters the suite only when package metadata and external installation become release
-contracts.
-
-## Hermetic environment
-
-Each process test owns one temporary root with these paths:
+Each fixture owns this layout:
 
 ```text
 test-root/
 |-- cargo-home/
-|-- store/
 |-- target/
+|-- build/
+|-- temp/
+|-- observations/
 +-- workspace/
+    +-- .optic/store/
 ```
 
-The harness sets the current directory to `workspace/`. It points Cargo and Cargo Optic state at
-the temporary paths.
+The store uses its ordinary workspace location. Do not add a product store-directory override only
+for tests. Offline fixtures contain local dependencies and committed lockfiles, with no registry
+downloads during the behavioral journey.
 
-The default command removes these environment variables:
+Resolve the installed Cargo/rustc toolchain before creating the isolated child. Clear the child's
+environment. Supply the real toolchain binaries, necessary linker paths, and isolated fixture paths.
+Include ordinary host variables required for process startup.
 
-- `RUSTC`.
-- `CARGO_BUILD_RUSTC`.
-- `RUSTC_WRAPPER`.
-- `RUSTC_WORKSPACE_WRAPPER`.
-- `CARGO_BUILD_RUSTC_WRAPPER`.
-- `CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER`.
-- `RUSTC_BOOTSTRAP`.
+Preserve the existing rustup installation with an absolute `RUSTUP_HOME` and selected toolchain
+path. Disable automatic toolchain installation. The fixture's configuration must not read the
+developer's Cargo configuration or choose another toolchain. See
+[rustup environment variables](https://rust-lang.github.io/rustup/environment-variables.html).
 
-A test can set one removed value when that value is the test input. The harness must not change the
-selected rustup toolchain or hide the matching `rustc-dev` and LLVM components.
+Apply test-specific variables only after the base environment. This makes compiler/wrapper
+rejection, tracked environment inputs, and configuration changes explicit test inputs.
 
-## Fixture policy
+API tests need the same isolation even though they call Rust functions. Run their
+environment-sensitive scenario in a fresh test-executable child, selected with an exact test name.
+Set its environment through `Command` before startup. Never call `set_var` or `remove_var` in the
+multithreaded parent. A mutex around such calls does not isolate other process threads. See
+[Rust 2024 environment safety](https://doc.rust-lang.org/edition-guide/rust-2024/newly-unsafe-functions.html).
 
-Use one default fixture until a behavior needs an incompatible project shape. The fixture includes
-only source that supports a named test dimension.
+Failures print the command, cwd, selected toolchain, status, stdout, stderr, and relevant
+observation counts. Do not print arbitrary inherited environment values. CI timeouts bound stuck
+compiler tests.
 
-Keep checked-in fixture files when Cargo must observe real paths or manifests. Generate a file in
-the test when its exact contents are the test input.
+## Observing work
 
-Do not add a fixture for an unsupported platform case. First approve the platform behavior in the
-planning documents.
+Cache correctness requires separate observations of actual driver compilation and selected-target
+collection. The rustc driver invokes rustc in-process, so a rustc forwarding shim alone misses that
+selected-target work.
 
-## Contract matrix
+Use one test-only Cargo forwarding shim in compiler integration tests. It invokes real Cargo and
+interposes an observer around the installed wrapper. The observer records selected invocation mode
+and forwards unchanged arguments and environment. Its path remains stable within the fixture.
 
-The current matrix records these dimensions:
+Count selected collection separately from stopped probe interception. Count dependency compilation
+separately so `--fresh` cannot pass by rebuilding the entire fixture.
 
-| Area | Required cases | Owning level |
-| --- | --- | --- |
-| Request selection | Package, target, profile, and features. | Unit and API. |
-| Compiler selection | Default rustc, configured rustc, and environment rustc. | Compiler integration. |
-| Wrapper policy | No wrapper and one disabled wrapper with warnings. | Compiler integration. |
-| Capture publication | Success and each pre-publication error. | API and store integration. |
-| Capture listing | Empty and populated stores. | API and CLI. |
-| Instance collection | Non-generic and multiply instantiated generic functions. | Compiler integration. |
-| Instance lookup | Exact name, substring, deterministic order, and limit. | API and CLI. |
-| Durable input | Valid, malformed, unsupported-version, and oversized records. | Records and store. |
-| Process protocol | Matching writer and reader, wrong magic, and wrong version. | Compiler integration. |
-| Output | Exit status, stdout result, stderr warnings, and closed stdout. | CLI. |
+Driver provisioning uses the resolved absolute rustc path. Test it with a compiler-unit-test-only
+counter immediately beside that subprocess invocation. Exercise provisioning in separate
+test-executable children sharing one fixture cache, then verify one cold build and no warm builds.
+The counter is compiled out of product builds, with no public tracing setting or outcome type.
 
-Update this matrix before or with a product contract. A test name must state the behavior, not the
-internal function that it calls.
+Every observation test starts with a positive cold count. Zero-only assertions can pass with broken
+instrumentation. IDs, timestamps, executable mtimes, and directory contents supplement these counts
+but do not replace them.
 
-## CI matrix
+The CLI journey uses real `cargo optic` discovery without the observer shim. This verifies
+installation and user behavior independently of the compiler integration instrumentation.
 
-The initial workflow contains these jobs:
+## Checkpoint A journey
 
-| Job | Host | Command |
-| --- | --- | --- |
-| Format | Linux | `cargo fmt --all -- --check` |
-| Clippy | Linux | `cargo clippy --workspace --all-targets -- -D warnings` |
-| Documentation | Linux | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` |
-| Test | Linux and macOS | `cargo test --workspace` |
+Run successive requests in separate processes sharing one fixture:
 
-The workflow uses the repository toolchain file. It does not select a second compiler version.
+| Step | Expected capture | Selected collections added | Driver builds added |
+| --- | --- | --- | --- |
+| Cold request A. | New ID and one history entry. | 1. | 1. |
+| Unchanged A. | Same ID and completion time. | 0. | 0. |
+| Edit a tracked source input. | New ID and new evidence. | 1. | 0. |
+| Repeat edited A. | Same new ID. | 0. | 0. |
+| Force `--fresh`. | Another new ID. | 1. | 0. |
+| Repeat matching request. | Same forced-capture ID. | 0. | 0. |
 
-Do not add retries for a deterministic test. Diagnose the error or remove accidental external
-state. Do not add CI caching until job duration is a demonstrated development problem.
+Prove warm reuse creates no new analysis artifacts or completed-capture directory. Prove forced
+analysis preserves eligible dependency artifacts. Do not assert elapsed milliseconds.
 
-## Future feature tests
+The driver and selected-target observations can live in separate focused tests that exercise the
+same sequence. Do not add production plumbing merely to combine their counters into one test.
 
-### Captured source
+## Checkpoint A matrix
 
-The source slice covers an available snapshot, missing source, a changed checkout after capture,
-an invalid range, and a path outside approved roots.
+| Contract | Required cases |
+| --- | --- |
+| Requests. | Explicit package, supported target kinds, profile, features, invocation subdirectory, and missing target. |
+| Profiles. | Warm reuse of a custom profile using stored Cargo artifact settings, not a name-to-settings map. |
+| Existing core flow. | Empty history, ordinary/generic instances, list order, exact/substring search, zero results, and limits. |
+| Cargo tracking. | Source edit, local dependency edit, build-script tracked file/environment, feature change, profile/config change, and RUSTFLAGS. |
+| Cache identity. | Compiler/driver-source/recipe changes change keys, irrelevant attempt paths do not, and reordered equivalent features normalize. |
+| Variant safety. | A/B/A under the same coarse key, including Cargo-tracked config or flags that Optic does not fingerprint. |
+| Cargo observations. | Affirmative fresh artifact, stale receipt, unrelated failure, missing receipt, conflicting identity, and success without a matching artifact. |
+| Compiler policy. | Default compiler, rejected compiler overrides, wrapper disabling and warning, and missing required components. |
+| Store input. | Valid, malformed, incompatible, oversized, mismatched IDs, truncated files, and writer output over the same limit. |
+| Publication. | Collection failure, staging write failure, pointer replacement failure, and final capture rename failure. |
+| Output. | Captured/reused distinction, unchanged completion time, useful references, stderr warnings, and failed writes. |
 
-### Exact LLVM IR
+For source edits, use deterministic file content changes and establish a distinguishable mtime when
+the filesystem requires it. Do not add sleeps to hide a failing freshness test.
 
-The LLVM slice covers an exact body, an optimized-away body, equal display text with different raw
-symbols, an invalid range, and a module larger than one requested body.
+The critical failure sequence starts with a completed A, makes Cargo inputs stale, completes a new
+compilation, then fails publication. A following request must never return A merely because the
+failed attempt made Cargo fresh. Cover failures before and after pointer replacement.
 
-### Capture reuse
+Add a Git-backed root-package fixture with a build script that emits no `rerun-if-*` instructions.
+Start without an Optic ignore rule. Verify that store initialization excludes its output before
+compilation and that the next request reuses the capture. Also cover the non-Git default scan.
+These cases must not rely on this repository's existing `/.optic` ignore rule.
 
-The reuse slice does this sequence:
+Also test absent pointer, dangling pointer, and present corrupt capture separately. Corruption must
+not become a miss. Verify old captures remain explicitly searchable, even when no longer candidates.
 
-1. Capture one target and record a selected-target rustc invocation.
-2. Repeat the same request and receive the same capture ID without another rustc invocation.
-3. Change tracked source and receive a new capture ID from a new rustc invocation.
-4. Use `--fresh` and receive a new capture ID when prior analysis is fresh.
-5. Repeat a matching request and make sure that the cached driver file does not change.
+Use ordinary obstructed paths and malformed files for fault tests. If those cannot reach a specific
+commit boundary deterministically, add a private test seam. Do not add general recovery, random
+fault injection, or a virtual filesystem.
 
-The test asks Cargo to decide freshness. It does not assert an Optic reconstruction of Cargo's
-fingerprint inputs.
+## Checkpoint B matrix
 
-## Deferred test systems
+Repeat the entire cache journey after adding source and LLVM artifacts. The evidence recipe change
+must prevent reuse of instance-only evidence.
 
-The MVP does not need these systems:
+Source tests cover whole functions/methods, generic sharing, unavailable external or generated
+definitions, approved roots, Unicode, BOM/CRLF, and stored reads after checkout changes.
 
-- A declarative scenario language.
-- Snapshot approval tooling.
-- Property-based generation.
-- Continuous fuzzing.
-- Mutation tests.
-- Performance benchmarks.
-- Distributed fixtures.
-- Windows or cross-target CI.
+LLVM tests cover both supported optimization modes, expected CGU completeness, exact raw symbols,
+quoted escapes, aliases, multiple placements, declarations, and absent standalone definitions. Known
+unsupported incremental configuration must still capture/list/find/reuse successfully with its
+stored warning.
 
-A later plan can add one of these systems after a concrete defect or workload demonstrates the
-need.
+Add table-driven classification cases for every unsupported mode listed in the show contract. Add
+one ordinary cross-crate ThinLTO or fat-LTO process case that preserves capture/list/find/reuse and
+supported source, with typed LLVM unavailability. Verify that unsupported classification skips LLVM
+artifact requests and disassembly. Do not install another backend merely to test classification.
+
+If the streaming scanner is subtle, keep a straightforward reference scanner in parser tests. Use
+small hand-written LLVM samples for syntax cases and real compiler output for stage fidelity. Do not
+rely on rustc producing every rare grammar shape in every release.
+
+Store tests cover invalid references, missing/truncated artifacts, path escape and symlink
+rejection, ranges past EOF, zero-length copying, and writer failures. A sparse artifact with a range
+above 4 GiB proves offsets are not narrowed without allocating a huge buffer.
+
+Test a very long unrelated LLVM line and a header beyond the documented parser limit. Check buffer
+growth through the scanner's narrow test seam, not an operating-system-specific RSS threshold.
+
+The CLI verifies that stdout contains only requested evidence. Unavailability produces no stdout, a
+reason on stderr, and a failing status. Reads perform no compilation or current-source reread.
+
+## Final gate
+
+The [foundation](stabilization.md) owns formatting, Clippy, rustdoc, and Linux/macOS checks. The
+[installation plan](installation.md) adds package verification and installed CLI/API journeys. All
+run on the final integrated revision, followed by independent correctness and Rust-style review.
+
+The final handoff maps each required contract to a test and records any unsupported behavior. A
+green collection of unit tests without the real Cargo and installed journeys is insufficient.
+
+Do not add coverage quotas, property-testing dependencies, continuous fuzzing, mutation testing,
+benchmark infrastructure, or unsupported-platform fixtures in this MVP. A later concrete workload or
+defect can justify them.

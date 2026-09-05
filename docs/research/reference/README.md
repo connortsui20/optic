@@ -1,5 +1,8 @@
 # Design reference
 
+> Historical research or broader design, not the current implementation contract. The
+> [active MVP plan](../../design/PLAN.md) defines scope, implementation order, and required tests.
+
 These documents preserve the broad research model that preceded the current prototype. They are not
 the current product contract.
 

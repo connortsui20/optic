@@ -1,5 +1,8 @@
 # Cargo Optic product overview
 
+> Historical research or broader design, not the current implementation contract. The
+> [active MVP plan](PLAN.md) defines scope, implementation order, and required tests.
+
 Cargo Optic connects one concrete Rust compiler instance to evidence from one real Cargo build.
 This document explains the goals and feature boundaries of the current prototype.
 

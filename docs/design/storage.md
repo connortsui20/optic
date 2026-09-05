@@ -1,5 +1,8 @@
 # Persistent storage
 
+> Historical research or broader design, not the current implementation contract. The
+> [active MVP plan](PLAN.md) defines scope, implementation order, and required tests.
+
 This document explains how Cargo Optic stores, reuses, validates, and removes compiler evidence.
 Read the [product overview](overview.md) first for the goals and core terms.
 

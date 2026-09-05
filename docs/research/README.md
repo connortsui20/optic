@@ -1,5 +1,8 @@
 # Optic research
 
+> Historical research or broader design, not the current implementation contract. The
+> [active MVP plan](../design/PLAN.md) defines scope, implementation order, and required tests.
+
 Optic records compiler evidence from real Cargo builds. It lets users and tools inspect and compare
 concrete Rust instances across compiler stages.
 

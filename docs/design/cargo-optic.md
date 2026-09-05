@@ -1,5 +1,8 @@
 # `cargo-optic`
 
+> Historical research or broader design, not the current implementation contract. The
+> [active MVP plan](PLAN.md) defines scope, implementation order, and required tests.
+
 This document describes the current user product. Read the [product overview](overview.md) for the
 goals and feature model. The complete internal architecture is in [`PLAN.md`](PLAN.md).
 

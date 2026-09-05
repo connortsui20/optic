@@ -1,123 +1,127 @@
-# Agent workflow
+# MVP implementation and review
 
-This workflow lets agents implement approved Cargo Optic work without routine maintainer review.
-The planning documents constrain each agent's decisions.
+One integration owner delivers the complete MVP in one implementation pull request. Internal
+checkpoints establish correctness before dependent work starts. They do not require separate merges
+or repeated maintainer review.
 
-## Planning gate
+The [MVP plan](mvp-plan.md) defines the checkpoints. Implementation starts only after this plan and
+its linked contracts are committed and pushed to `planning`.
 
-Do not start an implementation branch until the `planning` branch contains an implementation
-packet for the change.
+## Roles and ownership
 
-Each packet must define:
+Workers use the same base revision and separate Git worktrees. High reasoning is appropriate for
+compiler and cache correctness, storage publication, and final review.
 
-- One user-visible claim or one repository-quality claim.
-- The current problem.
-- The public API changes.
-- The durable record or protocol changes.
-- The data and control flow.
-- Supported inputs.
-- Explicit unsupported inputs.
-- Error and publication behavior.
-- Required tests.
-- Excluded work.
-- One completion criterion.
+| Role | Write ownership | Required result |
+| --- | --- | --- |
+| Integration owner | Capture orchestration, API, CLI, workspace manifests, CI, documentation, and final integration. | One complete workflow with consistent public contracts. |
+| Compiler worker | Compiler crate and standalone driver, including compiler tests. | Cargo freshness, driver cache, and later source/LLVM collection. |
+| Storage worker | Records and store crates, including their unit tests. | Validated evidence, cache eligibility, and atomic publication. |
+| Test worker | Unpublished test-support crate and cross-crate integration test files. | Isolated fixtures and independent acceptance scenarios. |
 
-The packet must contain enough detail that an implementation agent does not select product
-behavior.
+Evidence-query work starts after the cache checkpoint. The integration owner can assign the evidence
+crate to another worker once its record and store interfaces are fixed.
 
-## Implementation role
+Workers do not share a writable worktree. The integration owner edits root manifests and the lock
+file because all workers can otherwise conflict there. Workers report the dependencies they need.
 
-One agent owns one pull-request layer. The agent reads the complete packet, current architecture,
-root instructions, and applicable style guidance before editing code.
+## Preparation
 
-The implementation agent must:
+1. Record the integration base and planning commit in the implementation pull request.
+2. Read the applicable contracts and all affected consumers.
+3. Read the complete `$rust-style` skill before designing Rust types or editing Rust files.
+4. Establish shared signatures and record ownership before parallel edits begin.
+5. Give each worker its allowed files, required tests, dependencies, and excluded work.
 
-1. Inspect the complete base and up-stack consumers.
-2. Add or update tests for the approved claim.
-3. Implement the smallest design that passes the tests.
-4. Document public contracts and non-obvious private invariants.
-5. Run the required local checks.
-6. Inspect the complete diff against the pull-request base.
-7. Remove code that does not support the packet.
+The initial implementation branch is `ct/complete-mvp`. PR #16 remains the existing CI proposal.
+Include its CI commit in the MVP branch. Close #16 as superseded after the MVP lands. A separate CI
+merge is not a prerequisite for the integrated implementation.
 
-The implementation agent must not:
+## Execution checkpoints
 
-- Add behavior for an input that the packet excludes.
-- Add compatibility for an earlier prototype format.
-- Add a trait for one implementation.
-- Add a wrapper for one caller unless it names a current invariant.
-- Weaken a test to accept behavior outside the packet.
-- Change another stack layer to avoid a proper rebase.
-- Treat a future caller as proof of a current abstraction.
+The integration owner and compiler/storage workers agree on the cache state machine before
+implementation. The test worker can prepare independent fixtures while those interfaces settle.
 
-## Supporting agents
+At each checkpoint, the integration owner incorporates worker commits and runs the affected suite.
+Workers then update their bases to that integrated revision. Dependent development uses that base.
 
-Supporting agents can inspect one bounded concern. Useful concerns include Cargo behavior, a store
-invariant, a test fixture, a public API, or a complete style pass.
+Checkpoint A completes capture, listing, search, both caches, and their failure tests. Checkpoint B
+adds narrow `show` and repeats cache acceptance with the final evidence format. Checkpoint C proves
+installation and reviews the complete codebase.
 
-A supporting agent reports evidence and does not change the product contract. The implementation
-agent remains responsible for the complete diff.
+A worker handoff records:
 
-Do not assign several agents to edit the same module in parallel. Parallel work is useful only when
-the boundaries and outputs do not overlap.
+- The base and result commit identifiers.
+- Changed files and public contracts.
+- Tests run and their outcomes.
+- Remaining failures or unsupported inputs.
+- Any difference from the planning documents.
 
-## Independent review role
+The integration owner reads each diff before incorporation. A worker report does not replace that
+inspection. Do not duplicate a worker's implementation in the integration worktree.
 
-The review agent reads the packet and the complete diff from the pull-request base. It does not
-start with the implementation agent's summary.
+## Rust style and simplicity
 
-The review covers:
+The explicit decision to retain current crate boundaries takes precedence over the skill's rule
+against predicting future callers. That exception does not authorize new internal abstractions.
 
-- Correctness against the packet.
-- Unsupported behavior that entered the implementation.
-- Missing errors or publication guarantees.
-- Public API and durable data changes.
-- Cross-process and filesystem boundaries.
-- Test quality and missing contract cases.
-- Rust readability, documentation, and structural restraint.
-- Changes to downstream stack layers.
+Apply the skill's restraint rules throughout:
 
-The review agent reports only actionable findings. The implementation agent resolves each finding
-or records why the packet makes it invalid.
+- Keep one concept per module and a direct path from its entry point to the implementation.
+- Use `foo.rs` for a leaf and `foo/mod.rs` for a module with children.
+- When extraction adds no useful boundary, keep straight-line functions intact.
+- Introduce a type distinction for plausible, harmful confusion.
+- Validate values at construction and deserialization, then trust those invariants internally.
+- Use concrete types and standard library interfaces before adding traits or wrappers.
+- Document public fields, variants, entry points, and non-obvious private contracts.
+- Explain compiler-sensitive choices and their failure modes beside the relevant code.
+- Document format markers, versions, and durable input limits beside their constants.
+- Remove stale TODOs, unnecessary layers, and unsupported compatibility code deliberately.
 
-## Merge gate
+All worker and review prompts require the complete skill. Main will contain project instructions and
+a checked-in style reference so future agents do not depend on an unrecorded personal path. Project
+instructions link to that reference instead of maintaining duplicate rules.
 
-The existing walking-MVP stack has one exception because it predates repository CI. It can merge
-after all local checks and one independent accumulated review pass.
+## Independent review
 
-After the CI workflow lands, an agent can auto-merge a pull request when:
+Use two independent reviewers once the full MVP is assembled. Neither reviewer implements the
+changes it reviews.
 
-- The pull request matches its planning packet.
-- Required Linux and macOS jobs pass.
-- Formatting, Clippy, and rustdoc jobs pass.
-- An independent review has no unresolved findings.
-- The branch includes the current base.
-- The pull-request description states the claim and main limit.
+The correctness reviewer examines the full integration diff and final contracts. Its main questions
+concern stale cache eligibility, record agreement, and evidence claims. It also examines
+installation and failure tests.
 
-Use squash merges for implementation pull requests. Rebase the remaining stack after each lower
-layer merges.
+The Rust reviewer reads the full final implementation of affected concepts under `$rust-style`. It
+examines module navigation, types, error boundaries, comments, tests, and unnecessary layers.
 
-## Stop conditions
+Give reviewers the source and plan before the author's summary. Findings must name a concrete
+contract violation, defect, readability problem, or unnecessary mechanism.
 
-Stop implementation and request a decision when:
+Resolve all actionable findings. Re-run affected tests after a correction. Re-review affected
+contracts when a correction changes them. Run the complete quality gate on the final revision.
 
-- The public behavior needs to differ from the packet.
-- A durable format needs a new compatibility promise.
-- A new supported platform or compiler environment enters scope.
-- A crate boundary or dependency direction must change.
-- Correctness requires a new recovery or concurrency policy.
-- A test exposes two valid product behaviors and the packet does not choose one.
+## Landing
 
-A difficult implementation is not a stop condition. Reduce the implementation to the approved
-claim before adding machinery.
+The user authorizes automatic merging of a conforming MVP. The integration owner can squash-merge
+after the final checks and independent reviews pass. Agent workers never merge their own portions.
 
-## Planning maintenance
+The check result must correspond to the revision being merged. Results from an earlier revision or
+another worktree do not establish that the final revision passes.
 
-After each merge, update the status on `planning`. Record a newly discovered limit in the applicable
-packet or future-work document.
+The merge record includes the planning revision, test results, review results, known limits, and
+final implementation revision. Rebase `planning` onto the resulting `main` and update its status.
 
-Rebase the docs-only `planning` branch onto `main` after an integration milestone. Use a leased
-force update because rebasing changes commit identifiers.
+Rewriting prototype history remains allowed, but normal implementation does not require rewriting
+`main`. Preserve other contributors' work and use leases for authorized branch rewrites.
 
-Current behavior belongs in documentation on `main`. Future behavior remains on `planning` until
-its implementation merges.
+## Decision boundaries
+
+The integration owner resolves routine names, file placement, and local implementation details.
+Record refinements on `planning` before dependent work starts. Use the existing contract to resolve
+decisions that do not change product behavior.
+
+Request a product decision only for a new feature, support promise, compatibility guarantee, or
+contradictory user-visible behavior. Continue independent work while that decision is pending.
+
+Do not publish to a package registry as part of automatic PR merging. Registry publication needs an
+explicit release instruction. The MVP deliverable includes the verified release candidate.

@@ -1,369 +1,173 @@
 # MVP architecture
 
-This document describes the first complete Cargo Optic architecture. Each subsystem starts with one
-small implementation that proves its public contract.
+Cargo Optic records evidence from one selected Cargo target. It reuses a completed capture when
+Cargo verifies freshness, then finds concrete instances and reads stored source or optimized LLVM.
 
-The complete architecture is larger than the first implementation milestone. The
-[MVP plan](mvp-plan.md) introduces it through user-visible behavior.
+This document defines the shared boundaries. [Capture reuse](capture-reuse.md) and
+[narrow show](show.md) own their detailed algorithms. The [MVP plan](mvp-plan.md) orders the work.
 
-The [future architecture](future-architecture.md) describes later interfaces, evidence types,
-storage adapters, and deployment models.
+## Ownership
 
-## Product claim
+Keep the seven existing product crates. The unpublished test-support crate is development-only.
 
-Cargo Optic records compiler evidence from one real Cargo target. It finds concrete Rust instances
-and shows their captured source or optimized LLVM body.
-
-The exact-version rustc driver is part of the correctness boundary. The prototype proved that
-display names cannot provide an exact instance-to-body relationship.
-
-The first implementation favors clear code over speed. It can use linear scans, repeated
-compilation, and one local directory.
-
-## Architecture rules
-
-- Each subsystem owns one public vocabulary and one set of invariants.
-- Each subsystem maps to one published package.
-- Each package contains useful behavior when it enters the workspace.
-- Concrete types and functions come before traits.
-- A package does not contain a trait for one implementation.
-- Durable cross-process records stay in `cargo-optic-records`.
-- The `optic` crate is the supported application API.
-- Slow linear scans are acceptable.
-- Repeated compilation is acceptable.
-- Missing compiler evidence is a valid result.
-- An optimization requires evidence from real use.
-- An independent agent reviews every implementation line before merge.
-- Unsupported input returns a clear error instead of speculative compatibility behavior.
-
-## Package names
-
-Cargo Optic uses the `cargo-optic-*` package prefix. The Rust crate names remain short.
-
-| Package | Rust crate | Responsibility |
+| Package | Rust crate | Owns |
 | --- | --- | --- |
-| `cargo-optic-records` | `optic_records` | Durable records, scoped identifiers, and validation. |
-| `cargo-optic-compiler` | `optic_compiler` | Cargo, rustc, source, and LLVM integration. |
-| `cargo-optic-store` | `optic_store` | Durable storage and bounded artifact reads. |
-| `cargo-optic-capture` | `optic_capture` | Capture planning, collection, and publication. |
-| `cargo-optic-evidence` | `optic_evidence` | Evidence search, availability, and readers. |
-| `cargo-optic-identity` | `optic_identity` | Cross-capture candidates and confirmed links. |
-| `cargo-optic-attribution` | `optic_attribution` | Explain exact relationships. |
-| `cargo-optic-comparison` | `optic_comparison` | Compatibility reports and evidence comparison. |
-| `cargo-optic-lifecycle` | `optic_lifecycle` | Stored-data lifecycle. |
-| `cargo-optic-operation` | `optic_operation` | Progress events and cancellation. |
-| `cargo-optic-api` | `optic` | High-level library for application interfaces. |
-| `cargo-optic` | Binary only | The `cargo optic` external subcommand. |
+| `cargo-optic-records` | `optic_records` | Durable records, identifiers, and value validation. |
+| `cargo-optic-compiler` | `optic_compiler` | Request resolution, Cargo, driver provisioning, and compiler collection. |
+| `cargo-optic-store` | `optic_store` | Local persistence, publication, cache pointers, and checked artifact access. |
+| `cargo-optic-capture` | `optic_capture` | Probe/collect/publish orchestration and capture outcome. |
+| `cargo-optic-evidence` | `optic_evidence` | Search, evidence availability, and reader composition. |
+| `cargo-optic-api` | `optic` | Supported application API and subsystem composition. |
+| `cargo-optic` | Binary only. | Argument parsing, plain-text output, and diagnostics. |
 
-Future applications can use names such as `cargo-optic-tui` and `cargo-optic-server`. These packages
-appear only when they contain useful applications.
+The dependency direction stays explicit:
 
-Names such as `core`, `common`, `utils`, and `services` do not identify one product concept. The
-workspace does not use them as package names.
-
-## Package graph
-
-Each arrow points from a caller to a dependency.
-
-```mermaid
-flowchart TB
-    cli["cargo-optic<br/>CLI"]
-    future["Future applications<br/>TUI or server"]
-    api["cargo-optic-api<br/>crate: optic"]
-
-    capture["cargo-optic-capture"]
-    evidence["cargo-optic-evidence"]
-    analysis["Analysis packages"]
-    lifecycle["cargo-optic-lifecycle"]
-
-    compiler["cargo-optic-compiler"]
-    store["cargo-optic-store"]
-    operation["cargo-optic-operation"]
-    records["cargo-optic-records"]
-
-    cli --> api
-    future --> api
-    api --> capture
-    api --> evidence
-    api --> analysis
-    api --> lifecycle
-
-    capture --> compiler
-    capture --> store
-    capture --> operation
-    evidence --> store
-    analysis --> evidence
-    analysis --> store
-    lifecycle --> store
-    lifecycle --> operation
-
-    compiler --> records
-    store --> records
+```text
+CLI -> API -> capture  -> compiler -> records
+           |          -> store    -> records
+           -> evidence -> store
 ```
 
-Application packages do not depend on each other. Subsystem packages do not depend on the API or an
-application package.
+Records contain no filesystem or process work. The store does not invoke Cargo. The compiler does
+not publish captures. The CLI does not decide freshness or evidence availability.
 
-## Public API levels
+Do not introduce the previously proposed identity, attribution, comparison, lifecycle, or operation
+crates in this MVP. Those belong to [future work](future-architecture.md).
 
-The workspace has three public API levels.
-
-| API level | Audience | Stability goal |
-| --- | --- | --- |
-| `optic` | Applications and most library users. | Primary product contract. |
-| Subsystem crates | Advanced consumers and other subsystems. | Narrow subsystem contract. |
-| Durable records | Processes, stores, and exported data. | Versioned data contract. |
-
-The `optic` crate owns defaults and composes subsystem operations. It does not duplicate subsystem
-rules.
-
-```rust
-let optic = Optic::open(workspace)?;
-let capture = optic.capture(intent)?;
-let instances = optic.find(capture, "kernel", 20)?;
-let source = optic.source(instances[0].definition())?;
-let llvm = optic.llvm(instances[0].reference())?;
-```
+## Public workflow
 
-The CLI and future applications depend on `optic`. Advanced consumers can depend on a subsystem
-crate directly.
+Keep `Optic::open`, request selection, listing, and literal search. Add these contracts together
+with their consumers:
 
-## Capture path
+- `CapturePolicy::{Reuse, Fresh}` selects normal capture or forced analysis.
+- `Optic::capture(request, policy)` returns `CaptureOutcome`.
+- `CaptureOutcome::{Captured(CaptureRecord), Reused(CaptureRecord)}` reports the actual result.
+- `find` returns `FoundInstance` values containing a capture-scoped reference and instance record.
+- `source` and `llvm` accept an `InstanceRef` and return typed availability and artifact ranges.
+- `copy_evidence` copies one validated range to an `impl Write` without loading the whole artifact.
 
-The compiler subsystem collects evidence. The application API coordinates the small pull request 1
-workflow directly. The capture subsystem enters in pull request 2 and turns compiler evidence into
-one published capture.
+The capture crate owns transient capture policy and outcome. The records crate owns durable
+identifiers and evidence metadata. The evidence crate owns query result views. The API re-exports
+the public vocabulary instead of defining parallel wrappers.
 
-```mermaid
-flowchart LR
-    intent["Capture intent"]
-    plan["Capture plan"]
-    compiler["Compiler collection"]
-    records["Record validation"]
-    store["Store publication"]
-    result["Capture reference"]
+API names can receive local refinements before worker assignments. Changes to these semantics need a
+planning update before dependent implementation.
 
-    intent --> plan
-    plan --> compiler
-    compiler --> records
-    records --> store
-    store --> result
-```
+`Optic::open` can still run Cargo metadata to locate the workspace. Listing, finding, and showing
+stored evidence must not build, provision the driver, probe freshness, or recapture. Do not create a
+second store-opening API solely to eliminate this existing metadata call.
 
-### Compiler integration
+## Compiler boundary
 
-The first compiler package supports one explicit package and target. Pull request 1 performs these
-operations:
+Resolve one explicit package and target from the original invocation directory. Preserve the
+existing package, target-kind, profile, and feature options. Preserve Cargo configuration lookup and
+ordinary dependency reuse. Unsupported compiler or wrapper configuration has one explicit policy,
+not a fallback chain.
 
-- Read Cargo metadata from the original invocation directory.
-- Resolve the selected package and target.
-- Run `cargo rustc` from the original invocation directory.
-- Use the default `rustc` from `PATH` on a Unix host.
-- Disable an existing compiler wrapper and print a warning.
-- Record the package, target, profile, Cargo executable, arguments, and invocation directory.
+Resolve the default compiler to its actual executable and sysroot. Build the embedded driver against
+that exact compiler. Record the compiler release, commit, host, and sysroot. The initial supported
+and CI-tested compiler is Rust 1.98.1. Do not promise compatibility with arbitrary rustc versions
+merely because the driver is compiled at runtime.
 
-Cargo can reuse a fresh target without invoking rustc. Pull request 1 records the successful Cargo
-invocation and does not claim compiler execution or identity.
+The standalone driver entry point must explain these routes: Cargo discovery calls, nonselected
+compiler forwarding, selected-target freshness probing, and selected-target evidence collection.
+Compiler callbacks document the phase at which evidence becomes available.
 
-Pull requests 2 through 4 add these operations:
+Keep the private driver protocol distinct from durable JSON. Use the existing small protocol unless
+the additional artifact metadata justifies replacing it. Do not add a serialization dependency
+merely to move an unchanged fixed header. Document every marker, revision, field order, and
+writer/reader agreement. Test the real process exchange rather than maintaining a second test-only
+implementation.
 
-- Inspect the compiler and LLVM tools through the selected-target compilation.
-- Compile the exact-version driver.
-- Record definitions, instances, raw symbols, source spans, and placements.
-- Emit optimized LLVM IR with v0 symbol names.
-- Scan LLVM one line at a time and record 64-bit body ranges.
-- Copy approved source files that contain recorded definitions.
+The collected result owns its temporary artifacts until the store has copied them. Do not return
+paths into a temporary directory that has already been dropped.
 
-Exact raw-symbol equality creates an instance-to-body relationship. Display names never create this
-relationship.
+## Publication and storage
 
-Pull requests 2 through 4 compile the driver for every capture and do not reuse captures. Pull
-request 5 caches compatible drivers and reuses completed captures after Cargo validates freshness.
+Keep the local `.optic/store` and its staging/completed-capture separation. Add mutable cache
+pointers beside immutable captures, as specified in [capture reuse](capture-reuse.md).
 
-### Capture
+Before the first Cargo build/probe, initialize `.optic/.gitignore` with `*` and a trailing newline.
+This prevents Optic's own output from invalidating default build-script file tracking in Git-backed
+packages. An existing identical file needs no write. Preserve different existing contents and return
+an actionable initialization error. Do not edit the user's root ignore file or package manifest.
 
-In pull request 1, the application API coordinates one explicit target and profile. Each request
-creates one record for a successful Cargo invocation. Cargo can reuse a fresh target.
+Without Git, Cargo's default package scan already excludes dot-prefixed paths. Explicit package
+inclusion or build-script tracking of `.optic` can still make capture invalidate itself.
+Document that limitation instead of overriding Cargo's tracking or parsing arbitrary ignore rules.
+See [Cargo's package-file tracking](https://doc.rust-lang.org/cargo/reference/manifest.html#the-exclude-and-include-fields).
 
-Pull request 2 introduces the capture package when evidence collection requires a distinct planner.
-It requires an actual selected-target compiler invocation before it publishes compiler identity or
-evidence.
+A completed capture contains its header, instance/evidence manifest, and every declared artifact.
+Explicit evidence unavailability is valid. An artifact claimed as available but absent is invalid.
 
-The capture subsystem validates all records before publication. A reader sees one complete capture
-or no capture.
+Prepare and validate everything before the final directory rename. That rename is the only capture
+commit point. No required fallible cache update follows it. Errors before commit publish no new
+capture. Old completed captures remain readable.
 
-The first implementation does not schedule work, capture dependencies, or operate build units in
-parallel.
+This is atomic visibility, not crash durability. Do not add fsync choreography, journal recovery,
+cleanup scanning, or rollback after commit. Interrupted staging and superseded driver entries can
+remain until the user removes them. Document this disk-growth limitation.
 
-## Store and evidence
+The caller must serialize captures within a workspace and driver-cache provisioning within one Cargo
+home, including separate workspaces sharing that home. Concurrent writers and external store
+mutation during an operation are unsupported. Do not add locks or claim concurrent mutation safety.
 
-The store owns persistence. The evidence subsystem owns searches and typed readers.
+## Durable input boundary
 
-```mermaid
-flowchart LR
-    capture["Published capture"]
-    store["Local store"]
-    find["Evidence search"]
-    state["Availability"]
-    source["Source reader"]
-    llvm["LLVM reader"]
+Use the existing serde/serde_json validation model. Establish value invariants through constructors
+and deserialization once. Filesystem validation belongs to the store.
 
-    capture --> store
-    store --> find
-    find --> state
-    state --> source
-    state --> llvm
-```
+Adopt explicit initial product limits:
 
-### Durable records
+| Durable input | Maximum encoded length |
+| --- | --- |
+| Capture header or cache pointer. | 1 MiB per file. |
+| Instance/evidence manifest. | 128 MiB per file. |
 
-The records package owns data that crosses a process or disk boundary. It includes scoped
-identifiers, manifests, artifact descriptions, and evidence relationships.
+These are MVP resource budgets, not compiler limits or a bound on total process memory. Name and
+document the constants at their owner. Change them only with a fixture or real workload that
+demonstrates the need.
 
-Each top-level record has a format version. The first reader rejects an unsupported version.
+Check file length before allocating. Also bound the actual read to the limit plus one byte, then
+reject excessive input before JSON deserialization. The second bound covers growth during the read.
+Apply the same encoded-size limits when writing, before publication. Do not publish data that the
+reader will reject.
 
-The records package validates relative paths and byte ranges. It does not read files, search data,
-or apply lifecycle policy.
+Validate capture IDs against their directory/header/manifest, artifact IDs against the artifact
+table, and finite byte ranges against actual file lengths. Use checked `u64` arithmetic for offsets.
+Artifacts use generated file names, not arbitrary paths from source or compiler output. Reject
+symlinks and nonregular artifact files at the storage boundary. Do not add race-resistant
+platform-specific traversal for unsupported concurrent mutation.
 
-### Store
+Copy artifacts and requested ranges through a fixed-size buffer. LLVM files need not fit in memory.
+Warm reuse validates metadata and declared file lengths without hashing or reparsing entire LLVM
+files. Equal-length malicious artifact edits are not detected by a content-integrity guarantee.
 
-The store API does not require SQLite or a specific file layout. The first adapter can use a local
-directory with versioned records and ordinary artifact files.
+Malformed, unsupported-version, oversized, or internally inconsistent present data returns a store
+error. Do not reinterpret corruption as evidence unavailability. Only the explicit absent-pointer
+and absent-capture cases in the cache contract are misses.
 
-The first store can scan every record and permit one writer. It does not need indexes, compression,
-deduplication, federation, or migrations.
+## Search and errors
 
-Publication uses private staging data and one atomic rename. Incomplete work does not enter the
-completed-capture namespace.
+Preserve exact matches before case-sensitive substring matches. Preserve deterministic ordering, the
+pre-limit match count, empty results, and the existing result-limit behavior.
 
-A store error before the final rename leaves no visible capture. The rename makes the capture
-visible atomically. The first store does not guarantee persistence after a system crash or power
-loss. It does not add platform-specific directory synchronization or a post-commit durability
-warning.
+Display names are search text, not identity. Raw symbols establish only the exact LLVM relationships
+described in [narrow show](show.md). Capture IDs retain their documented reverse-hex representation.
 
-### Evidence
+Use the existing crate error conventions. Add context at subsystem boundaries without flattening
+typed availability into strings. Return errors for invalid input and failed operations. Reserve
+panics for violated internal invariants.
 
-Search uses exact paths, display names, and raw symbols first. Fallback search uses a case-sensitive
-literal substring.
+Unsupported prototype formats need no migrations. Update version constants and all consumers in the
+integrated change. Explain what each revision identifies, rather than renumbering it for appearance.
 
-Each query has an explicit scope, deterministic order, and result limit. Source and LLVM readers
-read one stored byte range.
+## Contributor documentation
 
-Availability distinguishes missing, not captured, available, and invalid evidence.
+Main must contain a concise architecture guide matching the implementation, a limitations section,
+and contributor instructions with a checked-in Rust style reference. Explain entry points and
+non-obvious correctness arguments. Do not duplicate this entire roadmap into source comments.
 
-## Analysis subsystems
-
-Identity, attribution, and comparison remain separate. Each subsystem starts with one small
-operation.
-
-```mermaid
-flowchart LR
-    evidence["Stored observations"]
-    identity["Identity<br/>manual links"]
-    attribution["Attribution<br/>exact explanations"]
-    comparison["Comparison<br/>compatible counts"]
-
-    evidence --> identity
-    evidence --> attribution
-    evidence --> comparison
-    identity --> comparison
-```
-
-### Identity
-
-Identity scans captures for equal definition paths and concrete display names. Each candidate
-records its matching fields without claiming exact identity.
-
-Only a user action creates a durable link. The first implementation uses a simple graph walk to
-return linked observations.
-
-### Attribution
-
-Attribution reports exact relationships that capture already stored. Each relationship names its
-producer and method.
-
-The first implementation does not infer inline, clone, merge, or outline relationships.
-
-### Comparison
-
-Comparison accepts two explicit instance references. It reports compatibility before evidence
-differences.
-
-Compatibility includes the compiler commit, target, profile, and capture arguments. The first
-result can report simple structural counts.
-
-The result states that structural counts do not predict runtime performance.
-
-## Lifecycle and operations
-
-Lifecycle owns mutable metadata around immutable captures. Operation owns the common contract for
-long work.
-
-```mermaid
-flowchart LR
-    metadata["Labels and pins"]
-    policy["Retention policy"]
-    plan["Removal plan"]
-    apply["Plan application"]
-    verify["Store verification"]
-    operation["Progress and cancellation"]
-
-    metadata --> plan
-    policy --> plan
-    plan --> apply
-    apply --> operation
-    verify --> operation
-```
-
-The first lifecycle package can label, pin, plan removal, apply a plan, and verify a store. It does
-not need a background worker.
-
-Operations run on the caller thread. A callback receives progress events, and one shared flag
-provides cancellation.
-
-The first operation package does not need an asynchronous runtime, task queue, or durable operation
-identifier.
-
-## CLI application
-
-The `cargo-optic` package contains argument parsing and plain-text formatting. Command handlers call
-the `optic` crate and do not contain product policy.
-
-The complete MVP can provide these command groups:
-
-- Capture and list builds.
-- Find instances and show evidence.
-- Explain exact relationships.
-- Link identities and compare instances.
-- Label, pin, remove, and verify stored data.
-
-The [MVP plan](mvp-plan.md) starts with capture, listing, search, source, and LLVM output.
-
-## Deferred complexity
-
-The complete MVP does not require these features:
-
-- Automatic dependency capture.
-- Concurrent capture.
-- Full-text search.
-- Compression or content deduplication.
-- MIR, assembly, objects, or linked products.
-- Inline attribution.
-- Automatic logical identity.
-- Semantic LLVM comparison.
-- A remote store.
-- A TUI, server, daemon, web interface, or IDE extension.
-
-These features extend existing contracts. They do not require another top-level architecture.
-
-## Publication
-
-All packages use one lockstep `0.1.x` version for the first release. Workspace dependencies use a
-path and a registry version.
-
-Packages publish in dependency order. The `cargo-optic` application publishes last.
-
-Each package contains useful behavior, public documentation, license metadata, and package tests. An
-empty package never publishes to reserve a name.
-
-The first release must install and operate outside the source workspace.
+Review the complete affected concepts under `$rust-style`, including the standalone driver. The
+existing crate boundaries are the user's explicit exception to the skill's future-caller rule. They
+do not justify speculative abstractions inside those crates.

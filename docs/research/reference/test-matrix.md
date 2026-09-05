@@ -1,5 +1,8 @@
 # Contract-test matrix
 
+> Historical research or broader design, not the current implementation contract. The
+> [active MVP plan](../../design/PLAN.md) defines scope, implementation order, and required tests.
+
 This matrix contains the cases that can change correctness, fidelity, or a product claim. It is an
 implementation reference, not required product reading.
 
