@@ -68,9 +68,9 @@ Current stack:
 - [x] Add durable records for concrete compiler instances in PR #7.
 - [x] Collect concrete instances with an exact-version driver in PR #8.
 - [x] Remove unsupported compiler-wrapper compatibility in PR #11.
-- [ ] Merge the driver workflow clarification in PR #14.
-- [ ] Merge complete compiler-capture publication in PR #9.
-- [ ] Merge user-visible concrete-instance search in PR #6.
+- [x] Merge the driver workflow clarification in PR #14.
+- [x] Merge complete compiler-capture publication in PR #9.
+- [x] Merge user-visible concrete-instance search in PR #6.
 
 PRs #14, #9, and #6 merge in that order. This stack uses one exception to the future CI rule
 because the repository does not have CI yet.
