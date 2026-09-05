@@ -4,9 +4,13 @@
 
 use std::path::PathBuf;
 
+use crate::AnalysisToken;
 use crate::BuildRecord;
+use crate::CaptureAnalysis;
 use crate::CaptureId;
+use crate::CaptureKey;
 use crate::CaptureRecord;
+use crate::CargoArtifactRecord;
 use crate::CargoTargetKind;
 use crate::CompilerIdentity;
 use crate::DefinitionRecord;
@@ -48,7 +52,44 @@ fn record() -> CaptureRecord {
     )
     .expect("the fixture build is valid");
 
-    CaptureRecord::new(capture_id(), 1_000, build, compiler_identity())
+    CaptureRecord::new(capture_id(), 1_000, build, compiler_identity(), analysis())
+}
+
+fn cargo_artifact() -> cargo_metadata::Artifact {
+    serde_json::from_value(serde_json::json!({
+        "package_id": "path+file:///workspace#example@0.1.0",
+        "manifest_path": "/workspace/Cargo.toml",
+        "target": {
+            "name": "example",
+            "kind": ["lib", "rlib"],
+            "crate_types": ["lib", "rlib"],
+            "required-features": ["alpha", "beta"],
+            "src_path": "/workspace/src/lib.rs",
+            "edition": "2024",
+            "doc": true, "doctest": true, "test": true
+        },
+        "profile": {
+            "opt_level": "s", "debuginfo": 1,
+            "debug_assertions": false, "overflow_checks": true, "test": false
+        },
+        "features": ["alpha", "beta"],
+        "filenames": ["/workspace/target/libexample.rlib", "/workspace/target/libexample.rmeta"],
+        "executable": null,
+        "fresh": false
+    }))
+    .expect("the Cargo artifact fixture is valid")
+}
+
+fn analysis() -> CaptureAnalysis {
+    CaptureAnalysis::new(
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            .parse()
+            .expect("the fixture key is valid"),
+        "0123456789ab4def8123456789abcdef"
+            .parse()
+            .expect("the fixture token is valid"),
+        CargoArtifactRecord::new(cargo_artifact()).expect("the fixture artifact is valid"),
+    )
 }
 
 fn instance() -> InstanceRecord {
@@ -106,11 +147,11 @@ fn round_trips_a_valid_record() {
 #[test]
 fn rejects_an_unknown_capture_format() {
     let encoded = serde_json::to_string(&record()).expect("the fixture record can be encoded");
-    let unsupported_version = encoded.replace(r#""format_version":2"#, r#""format_version":3"#);
+    let unsupported_version = encoded.replace(r#""format_version":3"#, r#""format_version":4"#);
 
     assert_record_error(
         &unsupported_version,
-        "capture format version must be 2, got 3",
+        "capture format version must be 3, got 4",
     );
 }
 
@@ -122,12 +163,13 @@ fn reports_the_previous_capture_format_before_its_missing_fields() {
         .expect("the capture fixture is an object");
     previous.insert("format_version".to_owned(), serde_json::Value::from(1));
     previous.remove("compiler");
+    previous.remove("analysis");
 
     let error =
         serde_json::from_value::<CaptureRecord>(serde_json::Value::Object(previous.clone()))
             .expect_err("the previous capture format must be rejected");
 
-    assert_eq!(error.to_string(), "capture format version must be 2, got 1");
+    assert_eq!(error.to_string(), "capture format version must be 3, got 1");
 }
 
 #[test]
@@ -138,7 +180,7 @@ fn round_trips_a_current_instance_manifest_without_body_metadata() {
         .expect("the encoded fixture manifest can be read");
 
     assert_eq!(actual, expected);
-    assert_eq!(actual.format_version(), 2);
+    assert_eq!(actual.format_version(), 3);
     assert_eq!(actual.capture_id(), record().id());
     assert!(!encoded.contains("body"));
 }
@@ -146,11 +188,11 @@ fn round_trips_a_current_instance_manifest_without_body_metadata() {
 #[test]
 fn rejects_an_unknown_instance_manifest_format() {
     let encoded = serde_json::to_string(&manifest()).expect("the fixture manifest can be encoded");
-    let unsupported_version = encoded.replace(r#""format_version":2"#, r#""format_version":3"#);
+    let unsupported_version = encoded.replace(r#""format_version":3"#, r#""format_version":4"#);
     let error = serde_json::from_str::<InstanceManifest>(&unsupported_version)
         .expect_err("the unsupported manifest must be rejected");
 
-    assert_eq!(error.to_string(), "capture format version must be 2, got 3");
+    assert_eq!(error.to_string(), "capture format version must be 3, got 4");
 }
 
 #[test]
@@ -399,4 +441,130 @@ fn rejects_unknown_record_fields() {
     let unknown_field = encoded.replacen('{', r#"{"unknown":true,"#, 1);
 
     assert_record_error(&unknown_field, "unknown field `unknown`");
+}
+
+#[test]
+fn validates_request_keys_at_parse_and_deserialization() {
+    let valid = analysis().request_key().to_string();
+    assert_eq!(valid.parse::<CaptureKey>().unwrap().as_str(), valid);
+
+    for invalid in [
+        String::new(),  // Empty digest.
+        "a".repeat(63), // Short digest.
+        "a".repeat(65), // Long digest.
+        "A".repeat(64), // Uppercase digest.
+        "g".repeat(64), // Non-hexadecimal digest.
+        "é".repeat(32), // Non-ASCII digest.
+    ] {
+        assert!(invalid.parse::<CaptureKey>().is_err(), "{invalid:?}");
+        assert!(serde_json::from_value::<CaptureKey>(invalid.into()).is_err());
+    }
+}
+
+#[test]
+fn generates_and_validates_analysis_tokens() {
+    let first = AnalysisToken::generate();
+    let second = AnalysisToken::generate();
+    assert_ne!(first, second);
+    assert_eq!(first.as_str().len(), 32);
+    assert_eq!(first.as_str().parse::<AnalysisToken>().unwrap(), first);
+    assert_eq!(
+        serde_json::from_value::<AnalysisToken>(serde_json::to_value(&first).unwrap()).unwrap(),
+        first
+    );
+
+    for invalid in [
+        "",                                     // Empty token.
+        "0123456789ab4def8123456789abcde",      // Short token.
+        "01234567-89ab-4def-8123-456789abcdef", // Hyphenated UUID.
+        "0123456789AB4DEF8123456789ABCDEF",     // Uppercase UUID.
+        "0123456789ab1def8123456789abcdef",     // Wrong UUID version.
+        "0123456789ab4def7123456789abcdef",     // Wrong UUID variant.
+        "0123456789ab4def8123456789abcdeg",     // Non-hexadecimal digit.
+    ] {
+        assert!(invalid.parse::<AnalysisToken>().is_err(), "{invalid:?}");
+        assert!(serde_json::from_value::<AnalysisToken>(invalid.into()).is_err());
+    }
+}
+
+#[test]
+fn normalizes_cargo_observations_without_changing_profile_settings() {
+    let artifact = cargo_artifact();
+    let expected = CargoArtifactRecord::new(artifact.clone()).unwrap();
+    let mut reordered = artifact;
+    reordered.fresh = true;
+    reordered.features.reverse();
+    reordered.filenames.reverse();
+    reordered.target.kind.reverse();
+    reordered.target.crate_types.reverse();
+    reordered.target.required_features.reverse();
+
+    assert_eq!(
+        CargoArtifactRecord::new(reordered.clone()).unwrap(),
+        expected
+    );
+    assert_eq!(
+        serde_json::from_value::<CargoArtifactRecord>(serde_json::to_value(reordered).unwrap())
+            .unwrap(),
+        expected
+    );
+    assert!(!expected.artifact().fresh);
+    assert_eq!(expected.artifact().profile.opt_level, "s");
+    assert!(expected.artifact().profile.overflow_checks);
+}
+
+#[test]
+fn validates_cargo_artifact_identity_and_paths() {
+    let encoded = serde_json::to_value(cargo_artifact()).unwrap();
+    let cases = [
+        ("/package_id", serde_json::json!("")), // Missing package identity.
+        ("/target/name", serde_json::json!("")), // Missing target name.
+        ("/target/kind", serde_json::json!([])), // Missing target kinds.
+        ("/target/crate_types", serde_json::json!([])), // Missing crate types.
+        ("/target/kind", serde_json::json!([""])), // Empty target kind.
+        ("/target/crate_types", serde_json::json!([""])), // Empty crate type.
+        ("/profile/opt_level", serde_json::json!("")), // Missing optimization level.
+        ("/manifest_path", serde_json::json!("Cargo.toml")), // Relative manifest path.
+        ("/target/src_path", serde_json::json!("src/lib.rs")), // Relative source path.
+        (
+            "/target/src_path",
+            serde_json::json!("/workspace/../lib.rs"),
+        ), // Parent traversal.
+        ("/filenames", serde_json::json!(["target/lib.rlib"])), // Relative output path.
+        ("/executable", serde_json::json!("target/example")), // Relative executable path.
+        ("/features", serde_json::json!([""])), // Empty feature.
+        ("/target/required-features", serde_json::json!([""])), // Empty required feature.
+    ];
+
+    for (pointer, value) in cases {
+        let mut invalid = encoded.clone();
+        *invalid.pointer_mut(pointer).unwrap() = value;
+        let artifact = serde_json::from_value(invalid.clone()).unwrap();
+        assert!(CargoArtifactRecord::new(artifact).is_err(), "{pointer}");
+        assert!(
+            serde_json::from_value::<CargoArtifactRecord>(invalid).is_err(),
+            "{pointer}"
+        );
+    }
+}
+
+#[test]
+fn accepts_empty_cargo_features_and_outputs() {
+    let mut artifact = cargo_artifact();
+    artifact.features.clear();
+    artifact.target.required_features.clear();
+    artifact.filenames.clear();
+
+    assert!(CargoArtifactRecord::new(artifact).is_ok());
+}
+
+#[test]
+fn requires_analysis_in_current_capture_records() {
+    let mut encoded = serde_json::to_value(record()).unwrap();
+    encoded.as_object_mut().unwrap().remove("analysis");
+
+    assert_record_error(
+        &encoded.to_string(),
+        "analysis must contain a valid value, got no value",
+    );
 }

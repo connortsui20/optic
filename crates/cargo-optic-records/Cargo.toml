@@ -9,6 +9,7 @@ license.workspace = true
 name = "optic_records"
 
 [dependencies]
+cargo_metadata.workspace = true
 serde.workspace = true
 snafu.workspace = true
 uuid.workspace = true

@@ -10,7 +10,20 @@
 //! do not prove that recorded provenance is true. Readers accept only the format version written by
 //! this release.
 
-const CAPTURE_FORMAT_VERSION: u32 = 2;
+// Revision 3 requires the analysis identity and normalized Cargo artifact observation.
+const CAPTURE_FORMAT_VERSION: u32 = 3;
+
+mod analysis_token;
+pub use analysis_token::AnalysisToken;
+
+mod capture_key;
+pub use capture_key::CaptureKey;
+
+mod cargo_artifact_record;
+pub use cargo_artifact_record::CargoArtifactRecord;
+
+mod capture_analysis;
+pub use capture_analysis::CaptureAnalysis;
 
 mod build_record;
 pub use build_record::BuildRecord;
