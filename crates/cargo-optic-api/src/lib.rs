@@ -2,7 +2,7 @@
 //!
 //! Consumers begin with [`Optic::open`], which discovers the enclosing Cargo workspace and binds a
 //! store handle to its root. The resulting [`Optic`] value exposes three product operations:
-//! [`Optic::capture`] executes and publishes a [`BuildRequest`], [`Optic::find`] searches one
+//! [`Optic::capture`] reuses or publishes a [`BuildRequest`], [`Optic::find`] searches one
 //! completed capture, and [`Optic::list_captures`] reads the validated completed history.
 //!
 //! This crate is the primary application API. The subsystem crates remain available as narrow APIs
@@ -12,6 +12,8 @@
 
 use std::path::Path;
 
+pub use optic_capture::CaptureOutcome;
+pub use optic_capture::CapturePolicy;
 pub use optic_capture::Error as CaptureError;
 pub use optic_compiler::BuildRequest;
 pub use optic_compiler::CargoTarget;
@@ -61,17 +63,26 @@ impl Optic {
         Ok(Self { workspace, store })
     }
 
-    /// Runs and publishes one new immutable selected-target capture.
+    /// Reuses a Cargo-fresh capture or publishes new selected-target evidence.
+    ///
+    /// [`CapturePolicy::Fresh`] forces selected-target analysis without discarding compatible
+    /// driver or dependency artifacts. [`CaptureOutcome::Reused`] preserves the original record's
+    /// ID and completion time. The caller must obey [`optic_capture::capture`]'s writer constraints.
     ///
     /// # Errors
     ///
-    /// Returns an error if compiler collection fails, the system clock cannot produce the record
-    /// timestamp, record validation fails, or the complete capture cannot be published.
-    pub fn capture(&self, request: &BuildRequest) -> Result<CaptureRecord, Error> {
+    /// Returns an error if request preparation, freshness verification, compiler collection,
+    /// durable validation, or publication fails.
+    pub fn capture(
+        &self,
+        request: &BuildRequest,
+        policy: CapturePolicy,
+    ) -> Result<CaptureOutcome, Error> {
         Ok(optic_capture::capture(
             &self.workspace,
             &self.store,
             request,
+            policy,
         )?)
     }
 

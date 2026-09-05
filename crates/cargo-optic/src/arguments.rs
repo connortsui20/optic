@@ -18,6 +18,7 @@ use clap::Parser;
 use clap::Subcommand;
 use optic::BuildRequest;
 use optic::CaptureId;
+use optic::CapturePolicy;
 use optic::CargoTarget;
 use optic::InvalidBuildRequest;
 
@@ -102,6 +103,10 @@ struct CaptureOptions {
     /// Disables default Cargo features.
     #[arg(long)]
     no_default_features: bool,
+
+    /// Forces selected-target analysis while retaining compatible driver and dependency caches.
+    #[arg(long)]
+    fresh: bool,
 }
 
 /// Selects one capture and bounds its concrete-instance search.
@@ -121,7 +126,12 @@ struct FindOptions {
 /// A validated operation ready for application dispatch.
 pub(crate) enum Command {
     /// Captures one explicit Cargo build request.
-    Capture(BuildRequest),
+    Capture {
+        /// The selected package, target, profile, and features.
+        request: BuildRequest,
+        /// Whether the request can reuse Cargo-fresh evidence.
+        policy: CapturePolicy,
+    },
     /// Lists the completed capture history.
     ListCaptures,
     /// Finds concrete compiler instances in one completed capture.
@@ -139,7 +149,18 @@ pub(crate) fn parse() -> Result<Command, InvalidBuildRequest> {
     let Cargo::Optic { command } = Cargo::parse();
 
     match command {
-        ParsedCommand::Capture(options) => Ok(Command::Capture(options.into_request()?)),
+        ParsedCommand::Capture(options) => {
+            let policy = if options.fresh {
+                CapturePolicy::Fresh
+            } else {
+                CapturePolicy::Reuse
+            };
+
+            Ok(Command::Capture {
+                request: options.into_request()?,
+                policy,
+            })
+        }
         ParsedCommand::ListCaptures => Ok(Command::ListCaptures),
         ParsedCommand::Find(options) => Ok(Command::Find {
             capture: options.capture,
@@ -325,6 +346,26 @@ mod tests {
             .expect("the fixture request is valid");
 
         assert_eq!(request.profile(), "custom");
+    }
+
+    #[test]
+    fn capture_reuses_by_default_and_accepts_forced_analysis() {
+        for fresh in [false, true] {
+            let mut arguments = vec![
+                "cargo",
+                "optic",
+                "capture",
+                "--package",
+                "example",
+                "--lib",
+                "--release",
+            ];
+            if fresh {
+                arguments.push("--fresh");
+            }
+
+            assert_eq!(capture_options(arguments).fresh, fresh);
+        }
     }
 
     #[test]

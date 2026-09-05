@@ -17,4 +17,5 @@ cargo-optic-store.workspace = true
 snafu.workspace = true
 
 [dev-dependencies]
+cargo-optic-test-support = { path = "../cargo-optic-test-support" }
 tempfile.workspace = true

@@ -13,3 +13,6 @@ cargo-optic-records.workspace = true
 cargo_metadata.workspace = true
 snafu.workspace = true
 tempfile.workspace = true
+
+[dev-dependencies]
+cargo-optic-test-support = { path = "../cargo-optic-test-support" }

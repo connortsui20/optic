@@ -78,6 +78,7 @@ name = "cargo-optic"
 version = "0.0.1"
 dependencies = [
  "cargo-optic-api",
+ "cargo-optic-test-support",
  "clap",
  "snafu",
  "tempfile",
@@ -93,6 +94,7 @@ dependencies = [
  "cargo-optic-evidence",
  "cargo-optic-records",
  "cargo-optic-store",
+ "cargo-optic-test-support",
  "snafu",
  "tempfile",
 ]
@@ -112,6 +114,7 @@ name = "cargo-optic-compiler"
 version = "0.0.1"
 dependencies = [
  "cargo-optic-records",
+ "cargo-optic-test-support",
  "cargo_metadata",
  "snafu",
  "tempfile",
@@ -123,6 +126,7 @@ version = "0.0.1"
 dependencies = [
  "cargo-optic-records",
  "cargo-optic-store",
+ "serde_json",
  "snafu",
  "tempfile",
 ]
@@ -131,6 +135,7 @@ dependencies = [
 name = "cargo-optic-records"
 version = "0.0.1"
 dependencies = [
+ "cargo_metadata",
  "serde",
  "serde_json",
  "snafu",
@@ -145,6 +150,13 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu",
+ "tempfile",
+]
+
+[[package]]
+name = "cargo-optic-test-support"
+version = "0.0.1"
+dependencies = [
  "tempfile",
 ]
 

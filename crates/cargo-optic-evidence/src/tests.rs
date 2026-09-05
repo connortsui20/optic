@@ -4,9 +4,12 @@
 
 use std::path::PathBuf;
 
+use optic_records::AnalysisToken;
 use optic_records::BuildRecord;
+use optic_records::CaptureAnalysis;
 use optic_records::CaptureId;
 use optic_records::CaptureRecord;
+use optic_records::CargoArtifactRecord;
 use optic_records::CargoTargetKind;
 use optic_records::CompilerIdentity;
 use optic_records::DefinitionRecord;
@@ -64,7 +67,40 @@ impl TestStore {
         .expect("the fixture compiler identity is valid");
         let manifest = InstanceManifest::new(id.clone(), instances)
             .expect("the fixture instance manifest is valid");
-        let capture = CaptureRecord::new(id.clone(), 1_000, build, compiler);
+        let artifact = serde_json::from_value(serde_json::json!({
+            "package_id": "fixture@0.1.0",
+            "manifest_path": self.temporary.path().join("Cargo.toml"),
+            "target": {
+                "kind": ["lib"],
+                "crate_types": ["lib"],
+                "name": "fixture",
+                "src_path": self.temporary.path().join("src/lib.rs"),
+                "edition": "2024",
+                "doc": true,
+                "doctest": true,
+                "test": true,
+            },
+            "profile": {
+                "opt_level": "3",
+                "debuginfo": 0,
+                "debug_assertions": false,
+                "overflow_checks": false,
+                "test": false,
+            },
+            "features": [],
+            "filenames": [self.temporary.path().join("target/libfixture.rlib")],
+            "executable": null,
+            "fresh": false,
+        }))
+        .expect("the fixture describes a Cargo library artifact");
+        let analysis = CaptureAnalysis::new(
+            "a".repeat(64)
+                .parse()
+                .expect("64 hexadecimal digits form a capture key"),
+            AnalysisToken::generate(),
+            CargoArtifactRecord::new(artifact).expect("the fixture artifact has valid paths"),
+        );
+        let capture = CaptureRecord::new(id.clone(), 1_000, build, compiler, analysis);
 
         self.store
             .publish(&capture, &manifest)

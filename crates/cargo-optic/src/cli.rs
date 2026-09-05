@@ -8,6 +8,7 @@ use std::env;
 use std::io;
 use std::io::Write;
 
+use optic::CaptureOutcome;
 use optic::Optic;
 use snafu::ResultExt;
 use snafu::Snafu;
@@ -32,9 +33,13 @@ fn run_with_output(mut stdout: impl Write) -> Result<(), Error> {
     let optic = Optic::open(&directory)?;
 
     match command {
-        arguments::Command::Capture(request) => {
-            let capture = optic.capture(&request)?;
-            let output = CaptureOutput::new("Captured", &capture)?;
+        arguments::Command::Capture { request, policy } => {
+            let outcome = optic.capture(&request, policy)?;
+            let title = match &outcome {
+                CaptureOutcome::Captured(_) => "Captured",
+                CaptureOutcome::Reused(_) => "Reused",
+            };
+            let output = CaptureOutput::new(title, outcome.record())?;
 
             write!(stdout, "{output}").context(WriteSnafu)?;
         }
