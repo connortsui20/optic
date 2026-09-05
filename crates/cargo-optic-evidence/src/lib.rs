@@ -10,13 +10,6 @@ use snafu::ResultExt;
 mod error;
 pub use error::Error;
 
-/// The largest result count accepted by [`find_instances`].
-///
-/// The 1,000-result value is an MVP response policy, not a capture-size limit. Raising it increases
-/// the maximum cloned result set; lowering it can reject callers that currently succeed. Search
-/// always examines the complete manifest before it applies this output bound.
-pub const MAX_RESULTS: usize = 1_000;
-
 /// How a query matched its returned concrete compiler instances.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MatchKind {
@@ -74,8 +67,8 @@ impl FindResults {
 ///
 /// # Errors
 ///
-/// Returns an error if `query` is empty, `limit` is zero or greater than [`MAX_RESULTS`], or the
-/// selected capture's instance manifest cannot be read.
+/// Returns an error if `query` is empty, `limit` is zero, or the selected capture's instance
+/// manifest cannot be read.
 pub fn find_instances(
     store: &Store,
     capture_id: &CaptureId,
@@ -89,12 +82,8 @@ pub fn find_instances(
         .fail();
     }
 
-    if !(1..=MAX_RESULTS).contains(&limit) {
-        return error::InvalidLimitSnafu {
-            actual: limit,
-            maximum: MAX_RESULTS,
-        }
-        .fail();
+    if limit == 0 {
+        return error::InvalidLimitSnafu { actual: limit }.fail();
     }
 
     let manifest = store

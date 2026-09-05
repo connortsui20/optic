@@ -121,16 +121,6 @@ fn instance_names(output: &str) -> Vec<&str> {
         .collect()
 }
 
-fn capture_count(output: &str, field: &str) -> u64 {
-    output
-        .lines()
-        .find_map(|line| line.trim().strip_prefix(field))
-        .map(str::trim)
-        .expect("capture output contains the requested count")
-        .parse()
-        .expect("the capture count is an unsigned integer")
-}
-
 #[test]
 fn exposes_the_cargo_subcommand_entry_point() {
     let temporary = tempfile::tempdir().expect("the test directory can be created");
@@ -175,10 +165,6 @@ fn captures_and_lists_a_generic_fixture_target() {
     );
     assert!(fixture.capture_output.contains("Target     bin generic"));
     assert!(fixture.capture_output.contains("Profile    release"));
-    let instance_count = capture_count(&fixture.capture_output, "Instances");
-    let placement_count = capture_count(&fixture.capture_output, "Placements");
-    assert!(instance_count > 0);
-    assert!(placement_count >= instance_count);
     assert!(
         fixture
             .workspace
@@ -198,8 +184,6 @@ fn captures_and_lists_a_generic_fixture_target() {
     assert!(listed_text.contains(&format!("Capture {}", fixture.capture_id)));
     assert!(listed_text.contains("Package    capture_fixture 0.1.0"));
     assert!(listed_text.contains("Target     bin generic"));
-    assert_eq!(capture_count(&listed_text, "Instances"), instance_count);
-    assert_eq!(capture_count(&listed_text, "Placements"), placement_count);
 }
 
 #[test]
@@ -262,29 +246,6 @@ fn reports_when_no_instances_match() {
     assert_success(&missing);
 
     assert_eq!(missing.stdout, b"No instances found.\n");
-}
-
-#[test]
-fn rejects_an_excessive_find_result_limit() {
-    let temporary = tempfile::tempdir().expect("the test workspace can be created");
-    copy_fixture(temporary.path());
-    let excessive_limit = run(
-        temporary.path(),
-        [
-            "find",
-            "--capture",
-            "zyxwvutsrqponmlkzyxwvutsrqponmlk",
-            "--limit",
-            "1001",
-            "kernel",
-        ],
-    );
-
-    assert!(!excessive_limit.status.success());
-    assert!(
-        String::from_utf8_lossy(&excessive_limit.stderr)
-            .contains("instance result limit must be between 1 and 1000, got 1001")
-    );
 }
 
 #[test]

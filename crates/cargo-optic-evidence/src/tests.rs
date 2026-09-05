@@ -17,7 +17,6 @@ use optic_records::TargetRecord;
 use optic_store::Store;
 
 use crate::Error;
-use crate::MAX_RESULTS;
 use crate::MatchKind;
 use crate::find_instances;
 
@@ -65,15 +64,7 @@ impl TestStore {
         .expect("the fixture compiler identity is valid");
         let manifest = InstanceManifest::new(id.clone(), instances)
             .expect("the fixture instance manifest is valid");
-        let capture = CaptureRecord::new(
-            id.clone(),
-            1_000,
-            build,
-            compiler,
-            manifest.instance_count(),
-            manifest.placement_count(),
-        )
-        .expect("the fixture capture is valid");
+        let capture = CaptureRecord::new(id.clone(), 1_000, build, compiler);
 
         self.store
             .publish(&capture, &manifest)
@@ -253,25 +244,11 @@ fn rejects_an_empty_query() {
 }
 
 #[test]
-fn validates_result_limit_bounds() {
+fn rejects_a_zero_result_limit() {
     let fixture = TestStore::new();
     let capture_id = fixture.publish("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzy", Vec::new());
 
     let zero_limit = find_instances(&fixture.store, &capture_id, "kernel", 0)
         .expect_err("a zero limit must be rejected before reading the store");
-    let excessive_limit = find_instances(&fixture.store, &capture_id, "kernel", MAX_RESULTS + 1)
-        .expect_err("an excessive limit must be rejected before reading the store");
-
-    assert!(matches!(zero_limit, Error::InvalidLimit { actual: 0, .. }));
-    assert!(matches!(
-        excessive_limit,
-        Error::InvalidLimit { actual, maximum }
-            if actual == MAX_RESULTS + 1 && maximum == MAX_RESULTS
-    ));
-    assert!(
-        find_instances(&fixture.store, &capture_id, "kernel", MAX_RESULTS)
-            .expect("the maximum result limit is valid")
-            .instances()
-            .is_empty()
-    );
+    assert!(matches!(zero_limit, Error::InvalidLimit { actual: 0 }));
 }

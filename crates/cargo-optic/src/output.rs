@@ -61,9 +61,7 @@ impl fmt::Display for CaptureOutput<'_> {
             target.kind(),
             target.name(),
         )?;
-        writeln!(formatter, "  Profile    {}", build.profile())?;
-        writeln!(formatter, "  Instances  {}", self.capture.instance_count())?;
-        writeln!(formatter, "  Placements {}", self.capture.placement_count())
+        writeln!(formatter, "  Profile    {}", build.profile())
     }
 }
 

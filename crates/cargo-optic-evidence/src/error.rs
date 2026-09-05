@@ -16,13 +16,11 @@ pub enum Error {
         /// The rejected query.
         query: String,
     },
-    /// The result limit was outside the supported range.
-    #[snafu(display("instance result limit must be between 1 and {maximum}, got {actual}"))]
+    /// The result limit was zero.
+    #[snafu(display("instance result limit must be at least 1, got {actual}"))]
     InvalidLimit {
         /// The rejected limit.
         actual: usize,
-        /// The largest accepted limit.
-        maximum: usize,
     },
     /// The selected capture's evidence could not be read.
     #[snafu(display("failed to read instance evidence"))]
