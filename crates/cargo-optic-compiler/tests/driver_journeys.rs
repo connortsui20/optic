@@ -7,6 +7,7 @@
 
 use std::env;
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -35,6 +36,62 @@ fn child(fixture: &TestWorkspace, test: &str) -> std::process::Output {
     cargo_optic_test_support::assert_success(&command, &output);
 
     output
+}
+
+/// Counts fixture definitions folded only in this module's selected optimized output.
+#[track_caller]
+fn assert_module_folding(llvm_dis: &Path, module: &str) -> usize {
+    let (_, paths) = module.split_once('\t').unwrap();
+    let (path, before) = paths.split_once('\t').unwrap();
+    assert!(fs::metadata(path).unwrap().len() > 0, "{path}");
+    let text = disassemble(llvm_dis, path);
+    let mut folded = 0;
+
+    for (symbol, expected) in [
+        ("folded_first", "ret i64 42"),  // First fixture definition.
+        ("folded_second", "ret i64 17"), // Second fixture definition.
+    ] {
+        let Some(body) = function_body(&text, symbol) else {
+            continue;
+        };
+        assert!(body.contains(expected), "{path}: {body}");
+
+        let before = disassemble(llvm_dis, before);
+        let body = function_body(&before, symbol).unwrap();
+        assert!(
+            !body.contains(expected),
+            "the no-opt module must precede constant folding: {body}"
+        );
+        folded += 1;
+    }
+
+    folded
+}
+
+#[track_caller]
+fn disassemble(llvm_dis: &Path, bitcode: &str) -> String {
+    let output = Command::new(llvm_dis)
+        .args([bitcode, "-o", "-"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{bitcode}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// Finds an unquoted fixture definition in llvm-dis output.
+#[track_caller]
+fn function_body<'a>(text: &'a str, symbol: &str) -> Option<&'a str> {
+    let header = text
+        .lines()
+        .find(|line| line.starts_with("define ") && line.contains(&format!("@{symbol}(")))?;
+    let start = text.find(header).unwrap();
+
+    Some(text[start..].split_once("\n}").unwrap().0)
 }
 
 #[test]
@@ -263,53 +320,7 @@ fn main() { assert_eq!(first::folded_first(10) + second::folded_second(20), 59);
             let mut folded = 0;
 
             for module in modules.lines() {
-                let (_, paths) = module.split_once('\t').unwrap();
-                let (path, before) = paths.split_once('\t').unwrap();
-                assert!(fs::metadata(path).unwrap().len() > 0, "{path}");
-                let output = Command::new(&llvm_dis)
-                    .args([path, "-o", "-"])
-                    .output()
-                    .unwrap();
-                assert!(
-                    output.status.success(),
-                    "{}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                let text = String::from_utf8(output.stdout).unwrap();
-
-                for (symbol, expected) in [
-                    ("folded_first", "ret i64 42"),
-                    ("folded_second", "ret i64 17"),
-                ] {
-                    if let Some(header) = text.lines().find(|line| {
-                        line.starts_with("define ") && line.contains(&format!("@{symbol}("))
-                    }) {
-                        let start = text.find(header).unwrap();
-                        let body = text[start..].split_once("\n}").unwrap().0;
-                        assert!(body.contains(expected), "{path}: {body}");
-                        let output = Command::new(&llvm_dis)
-                            .args([before, "-o", "-"])
-                            .output()
-                            .unwrap();
-                        assert!(output.status.success());
-                        let before = String::from_utf8(output.stdout).unwrap();
-                        let header = before
-                            .lines()
-                            .find(|line| {
-                                line.starts_with("define ") && line.contains(&format!("@{symbol}("))
-                            })
-                            .unwrap();
-                        let body = before[before.find(header).unwrap()..]
-                            .split_once("\n}")
-                            .unwrap()
-                            .0;
-                        assert!(
-                            !body.contains(expected),
-                            "the no-opt module must precede constant folding: {body}"
-                        );
-                        folded += 1;
-                    }
-                }
+                folded += assert_module_folding(&llvm_dis, module);
             }
 
             assert_eq!(folded, 2);
