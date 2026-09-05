@@ -16,10 +16,12 @@ use clap::ArgGroup;
 use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
+use clap::ValueEnum;
 use optic::BuildRequest;
 use optic::CaptureId;
 use optic::CapturePolicy;
 use optic::CargoTarget;
+use optic::InstanceRef;
 use optic::InvalidBuildRequest;
 
 /// Keeps ordinary search output short while reporting the complete match count separately.
@@ -29,7 +31,7 @@ const DEFAULT_FIND_LIMIT: usize = 20;
 #[derive(Debug, Parser)]
 #[command(bin_name = "cargo")]
 enum Cargo {
-    /// Captures compiler evidence and finds concrete instances.
+    /// Captures Rust instances and reads their stored source or optimized LLVM.
     #[command(name = "optic", version)]
     Optic {
         /// The Cargo Optic operation that the user selected.
@@ -48,6 +50,8 @@ enum ParsedCommand {
     ListCaptures,
     /// Finds concrete compiler instances in one completed capture.
     Find(FindOptions),
+    /// Shows captured source or optimized LLVM for one explicit instance reference.
+    Show(ShowOptions),
 }
 
 /// Cargo-style selectors for one explicit build request.
@@ -124,6 +128,26 @@ struct FindOptions {
     query: String,
 }
 
+/// Selects captured evidence without allowing implicit capture or query resolution.
+#[derive(Debug, Args)]
+struct ShowOptions {
+    /// Selects one immutable instance from find output.
+    #[arg(long, value_name = "INSTANCE_REF")]
+    instance: InstanceRef,
+    /// Selects the evidence written as plain bytes to stdout.
+    #[arg(long, value_enum)]
+    output: EvidenceOutput,
+}
+
+/// The two stored evidence forms supported by narrow show.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum EvidenceOutput {
+    /// The compiler-loaded source span, independent of the current checkout.
+    Source,
+    /// Every exact standalone body in the captured optimized LLVM modules.
+    Llvm,
+}
+
 /// A validated operation ready for application dispatch.
 pub(crate) enum Command {
     /// Captures one explicit Cargo build request.
@@ -143,6 +167,13 @@ pub(crate) enum Command {
         query: String,
         /// The maximum number of results to return.
         limit: usize,
+    },
+    /// Reads stored evidence for one exact instance.
+    Show {
+        /// The capture-scoped identity printed by find.
+        instance: InstanceRef,
+        /// The stored evidence form to write.
+        output: EvidenceOutput,
     },
 }
 
@@ -167,6 +198,10 @@ pub(crate) fn parse() -> Result<Command, InvalidBuildRequest> {
             capture: options.capture,
             query: options.query,
             limit: options.limit,
+        }),
+        ParsedCommand::Show(options) => Ok(Command::Show {
+            instance: options.instance,
+            output: options.output,
         }),
     }
 }
@@ -213,6 +248,7 @@ mod tests {
 
     use super::CaptureOptions;
     use super::Cargo;
+    use super::EvidenceOutput;
     use super::FindOptions;
     use super::ParsedCommand;
 
@@ -427,5 +463,69 @@ mod tests {
             &["cargo", "optic", "find", "--capture", "capture-1", "kernel"],
             ErrorKind::ValueValidation,
         );
+    }
+
+    #[test]
+    fn accepts_only_explicit_instance_evidence_selection() {
+        let reference = "zyxwvutsrqponmlkzyxwvutsrqponmlk:3";
+
+        for (name, expected) in [
+            ("source", EvidenceOutput::Source), // Captured source.
+            ("llvm", EvidenceOutput::Llvm),     // Exact optimized LLVM.
+        ] {
+            let Cargo::Optic { command } = Cargo::try_parse_from([
+                "cargo",
+                "optic",
+                "show",
+                "--instance",
+                reference,
+                "--output",
+                name,
+            ])
+            .unwrap();
+            let ParsedCommand::Show(options) = command else {
+                panic!("the explicit show command must parse as show");
+            };
+
+            assert_eq!(options.instance.to_string(), reference);
+            assert_eq!(options.output, expected);
+        }
+
+        for (arguments, expected) in [
+            (
+                vec!["cargo", "optic", "show", "--output", "source"],
+                ErrorKind::MissingRequiredArgument,
+            ), // A query cannot replace the instance reference.
+            (
+                vec!["cargo", "optic", "show", "--instance", reference],
+                ErrorKind::MissingRequiredArgument,
+            ), // There is no implicit output form.
+            (
+                vec![
+                    "cargo",
+                    "optic",
+                    "show",
+                    "--instance",
+                    reference,
+                    "--output",
+                    "mir",
+                ],
+                ErrorKind::InvalidValue,
+            ), // Additional compiler output is outside narrow show.
+            (
+                vec![
+                    "cargo",
+                    "optic",
+                    "show",
+                    "--instance",
+                    "capture:3",
+                    "--output",
+                    "source",
+                ],
+                ErrorKind::ValueValidation,
+            ), // The complete canonical capture identity is required.
+        ] {
+            assert_parse_error(&arguments, expected);
+        }
     }
 }

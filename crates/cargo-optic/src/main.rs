@@ -10,6 +10,7 @@
 mod arguments;
 mod cli;
 mod output;
+mod show;
 
 fn main() -> snafu::Report<cli::Error> {
     cli::run().into()

@@ -14,6 +14,7 @@ use optic_compiler::Workspace;
 use optic_records::CaptureId;
 use optic_records::CaptureRecord;
 use optic_records::InstanceManifest;
+use optic_records::LlvmCollection;
 use optic_store::Store;
 
 mod error;
@@ -74,17 +75,18 @@ pub fn capture(
     store.initialize()?;
 
     if policy == CapturePolicy::Reuse
-        && let Some(candidate) = store.read_candidate(prepared.request_key())?
+        && let Some((candidate, manifest)) = store.read_candidate(prepared.request_key())?
         && prepared.probe(candidate.analysis())? == Freshness::Fresh
     {
+        warn_unavailable_llvm(&manifest);
+
         return Ok(CaptureOutcome::Reused(candidate));
     }
 
     let collected = prepared.collect()?;
-    let (build, compiler, instances, analysis) = collected.into_parts();
-
     let capture_id = CaptureId::generate();
-    let instances = InstanceManifest::new(capture_id.clone(), instances)?;
+    let (build, compiler, analysis, manifest, artifacts) =
+        collected.into_parts(capture_id.clone())?;
 
     let completed_at_unix_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -94,7 +96,15 @@ pub fn capture(
         .expect("the current Unix timestamp must fit in u64 milliseconds");
     let capture = CaptureRecord::new(capture_id, completed_at_unix_ms, build, compiler, analysis);
 
-    store.publish(&capture, &instances)?;
+    store.publish(&capture, &manifest, artifacts.path())?;
+    warn_unavailable_llvm(&manifest);
 
     Ok(CaptureOutcome::Captured(capture))
+}
+
+/// Reports the stored support boundary for both newly published and reused evidence.
+fn warn_unavailable_llvm(manifest: &InstanceManifest) {
+    if let LlvmCollection::NotCaptured(reason) = manifest.llvm() {
+        eprintln!("warning: optimized LLVM was not captured: {reason}");
+    }
 }
