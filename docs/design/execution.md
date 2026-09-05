@@ -181,6 +181,13 @@ checkout manifest path. Cargo's configuration search then starts outside the use
 Fixture copies also use explicit checkout paths. This refines test isolation, not product wrapper
 policy. Repeat the complete installed workflow after the correction.
 
+The corrected run passes archive verification, 48 unpacked compiler tests, and installed CLI/API
+journeys. Self-hosting in the live checkout still inherits an ancestor custom linker configuration,
+whose executable is intentionally absent from the isolated PATH. Refine self-hosting to use a
+`git archive` snapshot of the exact committed product source under the private root. This preserves
+the user's proposed real-source test without configuration overrides or changes to their store.
+Repeat the full script after this final isolation correction.
+
 ## Additional acceptance
 
 The user suggested exercising Optic on its own source during implementation. Add the single Linux
