@@ -115,10 +115,10 @@ Evidence queries are integrated as `0e3fe1f`, with search allocation simplified 
 All 109 combined records, store, and evidence tests pass locally on the integration branch.
 
 The bounded LLVM indexer is integrated as `0cb5f8f`. Its worker passed 20 focused tests, an LLVM
-22.1.8 assembly round trip, and a Rust-generated module check. Compiler wiring is still pending.
+22.1.8 assembly round trip, and a Rust-generated module check. Compiler wiring passed in accepted B.
 API/CLI process acceptance adds whole functions and methods, shared generic source, Unicode/BOM/CRLF,
 unsupported provenance, both optimized stages, stored bytes after edits, and closed stdout.
-These tests must still pass against the integrated compiler.
+These tests pass against the integrated compiler in accepted B.
 
 The compiler worker verified both optimized stages on the pinned compiler. The proof found four
 regular modules per mode and preserved effective codegen configuration. The
@@ -153,7 +153,7 @@ dedicated cache unit test still proves actual driver builds. The integration own
 Product metadata and documentation are committed as `a95bdd9`. The seven packages use `0.1.0`;
 the unpublished helper stays at `0.0.1`. Versionless helper dev-dependencies and integration tests
 are absent from normalized product manifests and archive test targets. Retained compiler unit-test
-cleanup is still in progress.
+cleanup is integrated as `324ef2f` and `303a3b2`, with 67 compiler tests passing locally.
 
 The required command `cargo package --workspace --exclude cargo-optic-test-support --locked`
 passes verification for all seven archives locally. An earlier attempt with `--offline` hit Cargo
@@ -163,6 +163,23 @@ self-hosting, and final both-host CI remain pending.
 
 The installation worker is Arendt, using `/tmp/optic-mvp-install` from accepted B. The integration
 owner also adds a concise checked-in testing guide and connects installation checks to both CI hosts.
+
+The complete assembled revision is `373e6c8`. The installation worker passed all seven archive
+verifications, 48 unpacked compiler tests, the installed CLI journey, independent API consumer, and
+Linux self-hosting through `CaptureId::generate`. The integration owner is repeating the installation
+workflow from this exact assembled revision. The repository suite now has 228 passing tests after
+extracting the private bitcode-failure case into its own parent/child test.
+
+Fresh independent reviewers Harvey and Hooke inspect correctness and Rust style in separate detached
+worktrees at `373e6c8`. Neither implemented this code. The exact-revision CI gate now includes
+installation checks on Linux and macOS. Review results and final CI remain required before merge.
+
+The integration owner's installation run exposed an ancestor-config leak in test setup. Packaging
+from the checkout found an ancestor Cargo `rustc-wrapper = "kache"` setting, although the cleared
+environment omitted that executable. Run packaging from the private temporary root with an explicit
+checkout manifest path. Cargo's configuration search then starts outside the user's checkout tree.
+Fixture copies also use explicit checkout paths. This refines test isolation, not product wrapper
+policy. Repeat the complete installed workflow after the correction.
 
 ## Additional acceptance
 

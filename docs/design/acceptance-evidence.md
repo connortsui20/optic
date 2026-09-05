@@ -45,9 +45,9 @@ uses an isolated failing compiler shim, without changing installed components.
 | Exact symbols, module-local aliases, cycles, and multiple bodies have deterministic results. | Evidence `tests/llvm.rs`. | Passes locally. |
 | Artifact publication preserves the final commit boundary. | Store `tests/artifacts.rs` and `tests/publication.rs`. | Passes locally. |
 | Finite ranges support sparse offsets above 4 GiB and report caller-writer errors. | Store `tests/artifacts.rs`. | Passes locally. |
-| LLVM indexing bounds retained headers and streams unrelated input. | Compiler `src/llvm_index/` tests. | 20 worker tests pass; compiler integration pending. |
-| Normalized whole source, exact LLVM, old snapshots, and unsupported configurations reach callers. | API `tests/show.rs` and CLI `tests/e2e.rs`. | Added; runtime verification pending. |
-| Full-format evidence survives the complete cache journey. | API `tests/cache_journey.rs`. | Added; runtime verification pending. |
+| LLVM indexing bounds retained headers and streams unrelated input. | Compiler `src/llvm_index/` tests. | Passes in accepted B. |
+| Normalized whole source, exact LLVM, old snapshots, and unsupported configurations reach callers. | API `tests/show.rs` and CLI `tests/e2e.rs`. | Passes in accepted B. |
+| Full-format evidence survives the complete cache journey. | API `tests/cache_journey.rs`. | Passes in accepted B. |
 
 The accepted B revision is `ed164a3`. All 226 workspace tests and quality checks pass locally.
 [CI run 33997850037](https://github.com/connortsui20/optic/actions/runs/33997850037) passes quality,

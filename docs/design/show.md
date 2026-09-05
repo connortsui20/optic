@@ -114,7 +114,7 @@ that this mapping works in the product. Promote a focused reproduction into comp
 the matching compiler source and record a stable source/reproducer link beside the implementation.
 Resolve this artifact-stage check before exposing LLVM as available.
 
-The promoted `rustc-driver/stage-proof.rs` and compiler unit test passed on the pinned commit
+The promoted `tests/fixtures/stage-proof.rs` and compiler integration test passed on the pinned commit
 `48a229ceaefd4985c50990b14116b6d856af0985`, using LLVM 22.1.8. Both modes produced four regular
 modules. Paired invocations preserved effective optimization, LTO, CGU count, and output types.
 Both linked programs ran successfully. The retained modules contained constant folding that their
