@@ -13,6 +13,44 @@ use snafu::Snafu;
 #[non_exhaustive]
 #[snafu(visibility(pub(crate)))]
 pub enum Error {
+    /// The Optic ignore file contained user configuration that initialization cannot replace.
+    #[snafu(display("Optic initialization requires `*` and a newline in {}, got different contents. Preserve or move this file before capture", path.display()))]
+    ConflictingIgnoreFile {
+        /// The existing ignore file that needs user attention.
+        path: PathBuf,
+    },
+
+    /// A store path was a symlink or had the wrong filesystem type.
+    #[snafu(display("store path must be a regular {expected}, got another file type at {}", path.display()))]
+    UnexpectedFileType {
+        /// The expected filesystem type.
+        expected: &'static str,
+        /// The rejected store path.
+        path: PathBuf,
+    },
+
+    /// Encoded durable data exceeded the shared reader and writer budget.
+    #[snafu(display("record at {} must contain at most {limit} encoded bytes, got {actual}", path.display()))]
+    RecordTooLarge {
+        /// The rejected record path.
+        path: PathBuf,
+        /// The maximum encoded length in bytes.
+        limit: u64,
+        /// The observed length or the first length known to exceed the limit.
+        actual: u64,
+    },
+
+    /// A candidate pointer used an unsupported revision or disagreed with its capture.
+    #[snafu(display("candidate at {} must match {expected}, got {actual}", path.display()))]
+    InvalidCandidate {
+        /// The rejected candidate pointer path.
+        path: PathBuf,
+        /// The required identity or format.
+        expected: String,
+        /// The rejected identity or format.
+        actual: String,
+    },
+
     /// The workspace root was not absolute.
     #[snafu(display("workspace root must be absolute, got {}", path.display()))]
     WorkspaceRootNotAbsolute {

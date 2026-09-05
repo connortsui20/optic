@@ -1,14 +1,9 @@
-//! Publishes complete captures through one atomic namespace change.
+//! Installs the new candidate immediately before the atomic capture commit.
 //!
-//! [`Store::publish`] writes and flushes the capture record and instance manifest before renaming
-//! their staging directory into the completed namespace. The rename is the atomic visibility
-//! boundary.
+//! A failure before pointer replacement preserves the old candidate. A failure after replacement
+//! leaves a dangling pointer, which is a miss. No required fallible operation follows capture commit.
 
 use std::fs;
-use std::fs::OpenOptions;
-use std::io::BufWriter;
-use std::io::Write;
-use std::path::Path;
 
 use optic_records::CaptureRecord;
 use optic_records::InstanceManifest;
@@ -17,19 +12,27 @@ use snafu::ResultExt;
 use crate::CAPTURE_FILE_NAME;
 use crate::Error;
 use crate::INSTANCES_FILE_NAME;
+use crate::MAX_HEADER_BYTES;
+use crate::MAX_INSTANCES_BYTES;
 use crate::Store;
+use crate::candidate::CandidatePointer;
 use crate::error::CaptureExistsSnafu;
 use crate::error::FilesystemSnafu;
-use crate::error::JsonSnafu;
 use crate::error::MismatchedPublishedCaptureIdSnafu;
+use crate::record_io::write_record;
 
 impl Store {
-    /// Atomically publishes one complete immutable capture and its instance evidence.
+    /// Atomically publishes one immutable capture and its instance evidence.
+    ///
+    /// The new candidate pointer names the future capture immediately before its final rename.
+    /// No fallible cache update follows that rename. The caller must serialize publication and
+    /// prevent external store mutation throughout this operation.
     ///
     /// # Errors
     ///
-    /// Returns an error if the records disagree or publication fails before the final rename. A
-    /// failed publication is not visible through [`Self::list_captures`].
+    /// Returns an error for conflicting identities, oversized records, or failed publication.
+    /// A failure publishes no new capture. A failure after pointer replacement invalidates reuse
+    /// of the previous candidate. Old completed captures remain explicitly readable.
     pub fn publish(
         &self,
         capture: &CaptureRecord,
@@ -42,25 +45,25 @@ impl Store {
             }
             .fail();
         }
-        let staging_root = self.root.join("staging");
-        let captures_root = self.root.join("captures");
 
-        fs::create_dir_all(&staging_root).with_context(|_| FilesystemSnafu {
-            operation: "create",
-            path: staging_root.clone(),
-        })?;
-        fs::create_dir_all(&captures_root).with_context(|_| FilesystemSnafu {
-            operation: "create",
-            path: captures_root.clone(),
-        })?;
-
-        let staging = staging_root.join(capture.id().as_str());
-        let completed = captures_root.join(capture.id().as_str());
-        if completed.exists() {
-            return CaptureExistsSnafu {
-                id: capture.id().clone(),
+        self.initialize()?;
+        let staging = self.root.join("staging").join(capture.id().as_str());
+        let completed = self.root.join("captures").join(capture.id().as_str());
+        match fs::symlink_metadata(&completed) {
+            Ok(_) => {
+                return CaptureExistsSnafu {
+                    id: capture.id().clone(),
+                }
+                .fail();
             }
-            .fail();
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(Error::Filesystem {
+                    operation: "read metadata for",
+                    path: completed,
+                    source,
+                });
+            }
         }
 
         fs::create_dir(&staging).with_context(|_| FilesystemSnafu {
@@ -68,68 +71,73 @@ impl Store {
             path: staging.clone(),
         })?;
 
-        if let Err(error) = write_capture(&staging.join(CAPTURE_FILE_NAME), capture) {
-            let _ = fs::remove_dir_all(&staging);
+        #[cfg(test)]
+        self.interrupt_publication(PublicationBoundary::CaptureWrite)?;
+        write_record(&staging.join(CAPTURE_FILE_NAME), capture, MAX_HEADER_BYTES)?;
+        #[cfg(test)]
+        self.interrupt_publication(PublicationBoundary::InstancesWrite)?;
+        write_record(
+            &staging.join(INSTANCES_FILE_NAME),
+            instances,
+            MAX_INSTANCES_BYTES,
+        )?;
 
-            return Err(error);
-        }
+        let staged_pointer = staging.join("candidate.json");
+        #[cfg(test)]
+        self.interrupt_publication(PublicationBoundary::PointerWrite)?;
+        write_record(
+            &staged_pointer,
+            &CandidatePointer::new(capture),
+            MAX_HEADER_BYTES,
+        )?;
+        let pointer = self.candidate_path(capture.analysis().request_key());
 
-        if let Err(error) = write_instances(&staging.join(INSTANCES_FILE_NAME), instances) {
-            let _ = fs::remove_dir_all(&staging);
-
-            return Err(error);
-        }
-
-        // TODO(connor)[Crash durability]: Synchronize both record files, the staged capture
-        // directory, and both namespace directories around the rename if Cargo Optic guarantees
-        // persistence after a system crash. This version guarantees atomic visibility only, so it
-        // does not add platform-specific synchronization or a post-commit durability warning.
-        if let Err(error) = fs::rename(&staging, &completed).with_context(|_| FilesystemSnafu {
+        // Installing the pointer after commit adds a fallible cache update after visible capture.
+        // Installing it first makes any failed commit leave a dangling candidate, which is a miss.
+        #[cfg(test)]
+        self.interrupt_publication(PublicationBoundary::PointerReplace)?;
+        fs::rename(&staged_pointer, &pointer).with_context(|_| FilesystemSnafu {
+            operation: "replace candidate",
+            path: pointer,
+        })?;
+        #[cfg(test)]
+        self.interrupt_publication(PublicationBoundary::CaptureRename)?;
+        fs::rename(&staging, &completed).with_context(|_| FilesystemSnafu {
             operation: "publish",
             path: completed,
-        }) {
-            let _ = fs::remove_dir_all(&staging);
-
-            return Err(error);
-        }
+        })?;
 
         Ok(())
     }
 }
 
-fn write_capture(path: &Path, capture: &CaptureRecord) -> Result<(), Error> {
-    write_record(path, |writer| serde_json::to_writer_pretty(writer, capture))
+/// Deterministic failures at boundaries that ordinary path obstruction cannot reach after setup.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PublicationBoundary {
+    /// Before the staged capture header is written.
+    CaptureWrite,
+    /// After the header is flushed and before the instance manifest is written.
+    InstancesWrite,
+    /// After both records are flushed and before the candidate pointer is written.
+    PointerWrite,
+    /// After the staged pointer is flushed and before it replaces the old pointer.
+    PointerReplace,
+    /// After pointer replacement and before the capture becomes visible.
+    CaptureRename,
 }
 
-fn write_instances(path: &Path, instances: &InstanceManifest) -> Result<(), Error> {
-    write_record(path, |writer| serde_json::to_writer(writer, instances))
-}
+#[cfg(test)]
+impl Store {
+    fn interrupt_publication(&self, boundary: PublicationBoundary) -> Result<(), Error> {
+        if self.publication_failure == Some(boundary) {
+            return Err(Error::Filesystem {
+                operation: "publish (test interruption)",
+                path: self.root.clone(),
+                source: std::io::Error::other(format!("injected {boundary:?} failure")),
+            });
+        }
 
-fn write_record(
-    path: &Path,
-    encode: impl FnOnce(&mut BufWriter<fs::File>) -> serde_json::Result<()>,
-) -> Result<(), Error> {
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .with_context(|_| FilesystemSnafu {
-            operation: "create",
-            path: path.to_owned(),
-        })?;
-
-    let mut writer = BufWriter::new(file);
-
-    encode(&mut writer).with_context(|_| JsonSnafu {
-        path: path.to_owned(),
-    })?;
-    writer.write_all(b"\n").with_context(|_| FilesystemSnafu {
-        operation: "write",
-        path: path.to_owned(),
-    })?;
-
-    writer.flush().with_context(|_| FilesystemSnafu {
-        operation: "write",
-        path: path.to_owned(),
-    })
+        Ok(())
+    }
 }

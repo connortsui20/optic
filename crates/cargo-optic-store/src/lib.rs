@@ -12,6 +12,10 @@
 //! [`Store::list_captures`], [`Store::read_capture`], and [`Store::read_instances`] ignore staging
 //! and treat every completed directory and file as untrusted. Record deserialization enforces
 //! structural invariants before a value reaches the caller.
+//!
+//! The caller must serialize captures and prevent external store mutation during each operation.
+//! [`Store::initialize`] excludes store output from ordinary Cargo package tracking before builds.
+//! Interrupted staging directories and historical captures remain until the user removes them.
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -19,7 +23,25 @@ use std::path::PathBuf;
 const CAPTURE_FILE_NAME: &str = "capture.json";
 const INSTANCES_FILE_NAME: &str = "instances.json";
 
+/// Maximum encoded capture header or candidate pointer length: 1 MiB, including trailing whitespace.
+///
+/// This MVP resource budget applies to both readers and writers. It is not a compiler limit or a
+/// bound on total process memory. Changes require a fixture or workload that demonstrates the need.
+pub const MAX_HEADER_BYTES: u64 = 1024 * 1024;
+
+/// Maximum encoded instance manifest length: 128 MiB, including trailing whitespace.
+///
+/// This MVP resource budget applies to both readers and writers under the same policy as
+/// [`MAX_HEADER_BYTES`].
+pub const MAX_INSTANCES_BYTES: u64 = 128 * 1024 * 1024;
+
 mod captures;
+
+mod candidate;
+
+mod initialize;
+
+mod record_io;
 
 mod error;
 pub use error::Error;
@@ -33,6 +55,8 @@ mod publish;
 pub struct Store {
     /// The derived `.optic/store` root used by every operation on this handle.
     root: PathBuf,
+    #[cfg(test)]
+    publication_failure: Option<publish::PublicationBoundary>,
 }
 
 impl Store {
@@ -51,6 +75,8 @@ impl Store {
 
         Ok(Self {
             root: workspace_root.join(".optic").join("store"),
+            #[cfg(test)]
+            publication_failure: None,
         })
     }
 }

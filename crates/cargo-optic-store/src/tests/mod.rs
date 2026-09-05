@@ -2,12 +2,18 @@
 //!
 //! Valid and corrupt layouts cover staging, visibility, identity, and decoding failures.
 
+mod bounds;
+mod candidates;
+mod initialization;
+mod publication;
+
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
 
 use optic_records::BuildRecord;
+use optic_records::CaptureAnalysis;
 use optic_records::CaptureId;
 use optic_records::CaptureRecord;
 use optic_records::CargoTargetKind;
@@ -53,13 +59,36 @@ fn record(id: &str, completed_at_unix_ms: u64) -> CaptureRecord {
         completed_at_unix_ms,
         build,
         compiler,
+        analysis(completed_at_unix_ms),
     )
+}
+
+fn analysis(completed_at_unix_ms: u64) -> CaptureAnalysis {
+    serde_json::from_value(serde_json::json!({
+        "request_key": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "token": format!("{completed_at_unix_ms:012x}40008000000000000000"),
+        "artifact": {
+            "package_id": "path+file:///workspace#example@0.1.0",
+            "manifest_path": "/workspace/Cargo.toml",
+            "target": {
+                "name": "example", "kind": ["lib"], "crate_types": ["lib"],
+                "src_path": "/workspace/src/lib.rs", "edition": "2024"
+            },
+            "profile": {
+                "opt_level": "3", "debuginfo": 0, "debug_assertions": false,
+                "overflow_checks": false, "test": false
+            },
+            "features": [], "filenames": [], "executable": null, "fresh": false
+        }
+    }))
+    .expect("the analysis fixture is valid")
 }
 
 fn manifest(id: &CaptureId) -> InstanceManifest {
     InstanceManifest::new(id.clone(), Vec::new()).expect("the fixture instance manifest is valid")
 }
 
+#[track_caller]
 fn publish_capture(store: &Store, capture: &CaptureRecord) {
     store
         .publish(capture, &manifest(capture.id()))
