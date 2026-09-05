@@ -131,6 +131,7 @@ Current behavior belongs in documentation on `main`. Planned behavior belongs he
 implementation passes its checkpoint. The status in this plan must distinguish implemented, tested,
 and merged work.
 
-Planning changes do not authorize execution in the same turn. The current task is to make the plan
-complete and reviewable. Automatic merging remains authorized for the subsequent implementation task
-after the final quality gate. Registry publication needs a separate release instruction.
+The user subsequently authorized implementation with “Implement the plan.” Execution is underway
+in draft PR #17. The [execution ledger](execution.md) records progress and verification without
+changing the checkpoint requirements. Automatic merging remains authorized after the final quality
+gate. Registry publication needs a separate release instruction.

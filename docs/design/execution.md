@@ -69,6 +69,7 @@ messages. Keep the existing private driver protocol and extend its documented re
 
 Update this ledger with implementation findings before dependent work starts. The detailed cache,
 show, testing, and installation documents remain the owning behavior contracts.
+The [acceptance evidence index](acceptance-evidence.md) maps claims to the owning tests.
 
 ## Current verification
 
