@@ -88,11 +88,22 @@ dependencies = [
 name = "cargo-optic-api"
 version = "0.0.1"
 dependencies = [
+ "cargo-optic-capture",
  "cargo-optic-compiler",
  "cargo-optic-records",
  "cargo-optic-store",
  "snafu",
  "tempfile",
+]
+
+[[package]]
+name = "cargo-optic-capture"
+version = "0.0.1"
+dependencies = [
+ "cargo-optic-compiler",
+ "cargo-optic-records",
+ "cargo-optic-store",
+ "snafu",
 ]
 
 [[package]]
@@ -120,6 +131,7 @@ name = "cargo-optic-store"
 version = "0.0.1"
 dependencies = [
  "cargo-optic-records",
+ "serde",
  "serde_json",
  "snafu",
  "tempfile",

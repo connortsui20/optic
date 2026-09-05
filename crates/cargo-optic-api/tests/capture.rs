@@ -1,11 +1,13 @@
 //! Protects capture behavior across the public application boundary.
 //!
-//! These tests keep compiler, record, and store integration separate from their local edge cases.
+//! Tests run the real compiler and store through [`Optic`](optic::Optic); subsystem tests cover
+//! local errors.
 
 use std::fs;
 use std::path::Path;
 
 use optic::BuildRequest;
+use optic::CaptureError;
 use optic::CaptureRecord;
 use optic::CargoTarget;
 use optic::CargoTargetKind;
@@ -45,6 +47,7 @@ fn library_request() -> BuildRequest {
 #[track_caller]
 fn assert_library_capture(capture: &CaptureRecord, workspace: &Path) {
     let build = capture.build();
+    let compiler = capture.compiler();
 
     assert_eq!(build.package(), "capture_fixture");
     assert_eq!(build.package_version(), "0.1.0");
@@ -52,6 +55,11 @@ fn assert_library_capture(capture: &CaptureRecord, workspace: &Path) {
     assert_eq!(build.target().kind(), CargoTargetKind::Lib);
     assert_eq!(build.profile(), "release");
     assert_eq!(build.invocation_directory(), workspace);
+    assert!(compiler.rustc().is_absolute());
+    assert!(!compiler.release().is_empty());
+    assert!(!compiler.commit_hash().is_empty());
+    assert!(!compiler.host().is_empty());
+    assert!(compiler.sysroot().is_absolute());
 }
 
 #[test]
@@ -85,6 +93,33 @@ fn captures_and_lists_builds_through_the_product_api() {
 }
 
 #[test]
+fn captures_when_cargo_appends_selected_target_flags() {
+    let temporary = fixture_workspace("0.1.0");
+    fs::write(
+        temporary.path().join("build.rs"),
+        "fn main() { println!(\"cargo::rustc-cfg=optic_fixture\"); }\n",
+    )
+    .expect("the fixture build script can be written");
+    let optic = Optic::open(temporary.path()).expect("the fixture workspace can be opened");
+
+    let capture = optic
+        .capture(&library_request())
+        .expect("the selected target can receive build-script flags");
+
+    assert_eq!(
+        capture.build().cargo_arguments(),
+        [
+            "rustc",
+            "--package",
+            "capture_fixture",
+            "--lib",
+            "--profile",
+            "release",
+        ]
+    );
+}
+
+#[test]
 fn failed_target_resolution_does_not_publish_a_capture() {
     let temporary = fixture_workspace("0.1.0");
     let optic = Optic::open(temporary.path()).expect("the fixture workspace can be opened");
@@ -99,7 +134,13 @@ fn failed_target_resolution_does_not_publish_a_capture() {
         .capture(&request)
         .expect_err("the missing target must fail capture");
 
-    assert!(matches!(&error, Error::Compiler { .. }));
+    assert!(matches!(
+        &error,
+        Error::Capture {
+            source: CaptureError::Compiler { .. },
+            ..
+        }
+    ));
     assert!(error.to_string().contains("binary missing"));
     assert!(
         optic
@@ -120,7 +161,13 @@ fn failed_cargo_process_does_not_publish_a_capture() {
         .capture(&library_request())
         .expect_err("the invalid source must fail capture");
 
-    assert!(matches!(&error, Error::Compiler { .. }));
+    assert!(matches!(
+        &error,
+        Error::Capture {
+            source: CaptureError::Compiler { .. },
+            ..
+        }
+    ));
     assert!(
         optic
             .list_captures()

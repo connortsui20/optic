@@ -2,77 +2,18 @@
 //!
 //! Collection keeps this resolution separate from compiler interception so the selected package,
 //! target, profile, and features produce both the durable build record and the one instrumented
-//! `cargo rustc` command. [`run_build`] remains the provenance-only entry point for existing
-//! callers while they migrate to complete compiler collection.
-
-use std::process::Command;
-use std::process::Stdio;
+//! `cargo rustc` command.
 
 use cargo_metadata::Metadata;
 use cargo_metadata::Package;
 use cargo_metadata::Target;
 use cargo_metadata::TargetKind;
-use optic_records::BuildRecord;
-use optic_records::TargetRecord;
-use snafu::ResultExt;
 
 use crate::BuildRequest;
 use crate::CargoTarget;
 use crate::Error;
 use crate::error::PackageNotFoundSnafu;
-use crate::error::ProcessFailedSnafu;
-use crate::error::StartProcessSnafu;
 use crate::error::TargetNotFoundSnafu;
-
-/// Runs one explicit Cargo target and returns its resolved build provenance.
-///
-/// This compatibility entry point does not collect concrete compiler instances. New capture code
-/// must use [`crate::collect_build`].
-///
-/// # Errors
-///
-/// Returns an error if the request does not resolve to one workspace target or `cargo rustc` fails.
-pub fn run_build(
-    workspace: &crate::Workspace,
-    request: &BuildRequest,
-) -> Result<BuildRecord, Error> {
-    let metadata = workspace.read_metadata(request)?;
-    let package = resolve_package(&metadata, request.package())?;
-    let target = resolve_target(package, request.target())?;
-    let arguments = cargo_arguments(request);
-
-    let status = Command::new(workspace.cargo())
-        .current_dir(workspace.invocation_directory())
-        .args(&arguments)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .with_context(|_| StartProcessSnafu {
-            program: workspace.cargo().to_owned(),
-        })?;
-    if !status.success() {
-        return ProcessFailedSnafu {
-            program: workspace.cargo().to_owned(),
-            status: status.to_string(),
-            diagnostics: None,
-        }
-        .fail();
-    }
-
-    let target = TargetRecord::new(target.name.clone(), request.target().kind())?;
-
-    BuildRecord::new(
-        package.name.to_string(),
-        package.version.to_string(),
-        target,
-        request.profile(),
-        workspace.cargo().to_owned(),
-        workspace.invocation_directory().to_owned(),
-        arguments,
-    )
-    .map_err(Error::from)
-}
 
 pub(crate) fn resolve_package<'a>(
     metadata: &'a Metadata,

@@ -1,8 +1,8 @@
 //! Defines the complete durable entry published for one successful capture.
 //!
-//! [`CaptureRecord`] joins a stable [`CaptureId`] and completion time to an already validated
-//! [`BuildRecord`]. Construction always writes the current format version and canonical capture ID.
-//! Deserialization rejects versions that this crate does not understand.
+//! [`CaptureRecord`] joins a stable [`CaptureId`], completion time, compiler identity, and a
+//! validated [`BuildRecord`]. Construction writes the current format version and canonical capture
+//! ID. Deserialization rejects versions that this crate does not understand.
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -11,7 +11,9 @@ use snafu::ensure;
 use crate::BuildRecord;
 use crate::CAPTURE_FORMAT_VERSION;
 use crate::CaptureId;
+use crate::CompilerIdentity;
 use crate::Error;
+use crate::error::InvalidFieldSnafu;
 use crate::error::UnsupportedFormatSnafu;
 
 /// One immutable entry in completed capture history.
@@ -22,16 +24,23 @@ pub struct CaptureRecord {
     id: CaptureId,
     completed_at_unix_ms: u64,
     build: BuildRecord,
+    compiler: CompilerIdentity,
 }
 
 impl CaptureRecord {
     /// Creates a capture using the format version understood by this release.
-    pub fn new(id: CaptureId, completed_at_unix_ms: u64, build: BuildRecord) -> Self {
+    pub fn new(
+        id: CaptureId,
+        completed_at_unix_ms: u64,
+        build: BuildRecord,
+        compiler: CompilerIdentity,
+    ) -> Self {
         Self {
             format_version: CAPTURE_FORMAT_VERSION,
             id,
             completed_at_unix_ms,
             build,
+            compiler,
         }
     }
 
@@ -54,9 +63,13 @@ impl CaptureRecord {
     pub fn build(&self) -> &BuildRecord {
         &self.build
     }
+
+    /// Returns the compiler that ran the selected target invocation.
+    pub fn compiler(&self) -> &CompilerIdentity {
+        &self.compiler
+    }
 }
 
-/// The serialized fields that must pass [`CaptureRecord`] validation during deserialization.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawCaptureRecord {
@@ -64,6 +77,8 @@ struct RawCaptureRecord {
     id: CaptureId,
     completed_at_unix_ms: u64,
     build: BuildRecord,
+    #[serde(default)]
+    compiler: Option<CompilerIdentity>,
 }
 
 impl TryFrom<RawCaptureRecord> for CaptureRecord {
@@ -78,10 +93,18 @@ impl TryFrom<RawCaptureRecord> for CaptureRecord {
             }
         );
 
+        let compiler = record.compiler.ok_or_else(|| {
+            InvalidFieldSnafu {
+                field: "compiler",
+                actual: "no value",
+            }
+            .build()
+        })?;
         Ok(Self::new(
             record.id,
             record.completed_at_unix_ms,
             record.build,
+            compiler,
         ))
     }
 }

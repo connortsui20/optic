@@ -17,7 +17,6 @@
 //! belong to the capture and store crates.
 
 mod build;
-pub use build::run_build;
 
 mod collection;
 pub use collection::CollectedBuild;
