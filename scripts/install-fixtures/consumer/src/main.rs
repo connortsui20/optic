@@ -103,6 +103,7 @@ fn copy(optic: &Optic, evidence: &EvidenceRange) -> Result<Vec<u8>, optic::Error
     Ok(bytes)
 }
 
+#[track_caller]
 fn exact_llvm(optic: &Optic, instance: &FoundInstance) -> Result<Vec<Vec<u8>>, optic::Error> {
     let LlvmEvidence::Available(bodies) = optic.llvm(instance.reference())? else {
         panic!("the release fixture must have exact LLVM bodies");

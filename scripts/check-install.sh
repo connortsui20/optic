@@ -3,7 +3,7 @@
 # Requires Python 3.11+, Git, and the installed toolchain from rust-toolchain.toml.
 # Linux also runs the public API consumer and explicitly captures this checkout.
 # The temporary root remains available after success or failure for diagnostics.
-set -euo pipefail
+set -Eeuo pipefail
 
 cd "$(dirname "$0")/.."
 checkout=$(pwd -P)
@@ -15,6 +15,7 @@ case $(uname -s) in
     Linux|Darwin) ;;
     *) echo "Installation verification supports Linux and macOS." >&2; exit 1 ;;
 esac
+python3 -c 'import tomllib'
 
 cargo_bin=$(rustup which cargo)
 toolchain=$(cd "$(dirname "$cargo_bin")/.." && pwd -P)
@@ -85,7 +86,7 @@ PY
 # These copies are complete before the runtime journey leaves the checkout.
 cp -R scripts/install-fixtures/consumer "$root/consumer"
 for journey in cli api; do
-    cp -R crates/cargo-optic-test-support/fixtures/default-tracking "$root/$journey-workspace"
+    cp -R scripts/install-fixtures/default-tracking "$root/$journey-workspace"
     setup git -C "$root/$journey-workspace" init -q
     setup git -C "$root/$journey-workspace" add .
     setup git -C "$root/$journey-workspace" -c user.name=Optic \
