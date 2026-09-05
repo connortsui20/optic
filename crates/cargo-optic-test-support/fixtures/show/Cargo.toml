@@ -1,0 +1,29 @@
+[package]
+name = "show_fixture"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+members = ["dependency"]
+
+[dependencies]
+show_dependency = { path = "dependency" }
+
+[profile.release]
+codegen-units = 4
+
+[profile.no-lto]
+inherits = "release"
+lto = "off"
+
+[profile.incremental]
+inherits = "release"
+incremental = true
+
+[profile.cross-thin]
+inherits = "release"
+lto = "thin"
+
+[profile.fat]
+inherits = "release"
+lto = "fat"

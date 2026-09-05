@@ -1,0 +1,3 @@
+pub fn generic<T: Copy>(value: T) -> T {
+    std::hint::black_box(value)
+}
