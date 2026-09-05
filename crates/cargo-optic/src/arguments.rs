@@ -41,7 +41,7 @@ enum Cargo {
 /// A parsed public subcommand before product-request validation.
 #[derive(Debug, Subcommand)]
 enum ParsedCommand {
-    /// Runs one explicit Cargo target and records its compiler evidence.
+    /// Reuses fresh evidence or captures one explicit Cargo target.
     Capture(CaptureOptions),
     /// Lists captures by descending recorded completion time, then ascending capture ID.
     #[command(name = "list-captures")]
