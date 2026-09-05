@@ -70,19 +70,33 @@ fn files(directory: &Path) -> Vec<(std::path::PathBuf, u64, std::time::SystemTim
     files
 }
 
+/// Retains the complete artifact inventory without Cargo bookkeeping modification times.
+fn file_sizes(directory: &Path) -> Vec<(std::path::PathBuf, u64)> {
+    files(directory)
+        .into_iter()
+        .map(|(path, size, _)| (path, size))
+        .collect()
+}
+
 #[test]
 fn reuses_edits_and_forces_capture_across_processes() {
     let workspace = TestWorkspace::new("capture");
     let mut command = capture_command(&workspace, CapturePolicy::Reuse);
     let first = capture(&mut command, "captured", 1);
     let store_files = files(&workspace.workspace().join(".optic"));
-    let artifacts = files(&workspace.target());
-    let build_files = files(&workspace.build());
+    let target_files = file_sizes(&workspace.target());
+    let build_files = file_sizes(&workspace.build());
+    let executable = workspace.target().join("release/generic");
+    let executable_modified = fs::metadata(&executable).unwrap().modified().unwrap();
 
     assert_eq!(capture(&mut command, "reused", 1), first);
     assert_eq!(files(&workspace.workspace().join(".optic")), store_files);
-    assert_eq!(files(&workspace.target()), artifacts);
-    assert_eq!(files(&workspace.build()), build_files);
+    assert_eq!(file_sizes(&workspace.target()), target_files);
+    assert_eq!(file_sizes(&workspace.build()), build_files);
+    assert_eq!(
+        fs::metadata(executable).unwrap().modified().unwrap(),
+        executable_modified
+    );
 
     let source = workspace.workspace().join("src/generic.rs");
     let contents = fs::read_to_string(&source).unwrap();
