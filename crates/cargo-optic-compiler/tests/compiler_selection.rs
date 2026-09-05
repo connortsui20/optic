@@ -1,4 +1,6 @@
 //! Exercises the supported compiler environment through real Cargo processes.
+//!
+//! Each scenario starts in a child with private Cargo configuration and build directories.
 
 #![cfg(unix)]
 
@@ -8,71 +10,55 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
+use cargo_optic_test_support::TestWorkspace;
+use cargo_optic_test_support::assert_success;
+use cargo_optic_test_support::diagnostics;
+use cargo_optic_test_support::run;
 use optic_compiler::BuildRequest;
 use optic_compiler::CargoTarget;
 use optic_compiler::collect_build;
 use optic_compiler::discover_workspace;
 
-fn write_package(directory: &Path) {
-    fs::create_dir(directory.join("src")).unwrap();
-    fs::create_dir(directory.join(".cargo")).unwrap();
-    fs::write(
-        directory.join("Cargo.toml"),
-        "[package]\nname = \"selection_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
-    )
-    .unwrap();
-    fs::write(directory.join("src/lib.rs"), "pub fn collected() {}\n").unwrap();
-}
-
-fn child_command(directory: &Path, scenario: &str) -> Command {
+fn child_command(workspace: &TestWorkspace, scenario: &str) -> Command {
     let mut command = Command::new(env::current_exe().unwrap());
+    workspace.apply(&mut command);
     command
         .args(["--exact", "collect_in_child", "--nocapture"])
-        .env("OPTIC_TEST_WORKSPACE", directory)
-        .env("OPTIC_TEST_SCENARIO", scenario)
-        .env_remove("RUSTC")
-        .env_remove("CARGO_BUILD_RUSTC")
-        .env_remove("RUSTC_WRAPPER")
-        .env_remove("RUSTC_WORKSPACE_WRAPPER")
-        .env_remove("CARGO_BUILD_RUSTC_WRAPPER")
-        .env_remove("CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER");
+        .env("OPTIC_TEST_WORKSPACE", workspace.workspace())
+        .env("OPTIC_TEST_SCENARIO", scenario);
 
     command
 }
 
 #[test]
 fn collects_with_the_default_rustc() {
-    let temporary = tempfile::tempdir().unwrap();
-    write_package(temporary.path());
-    fs::write(temporary.path().join(".cargo/config.toml"), "").unwrap();
-    let output = child_command(temporary.path(), "success")
+    let workspace = TestWorkspace::new("capture");
+    let mut command = child_command(&workspace, "success");
+    command
         .env("RUSTC_WRAPPER", "")
-        .env("RUSTC_WORKSPACE_WRAPPER", "")
-        .output()
-        .unwrap();
+        .env("RUSTC_WORKSPACE_WRAPPER", "");
+    let output = run(&mut command);
 
-    assert!(output.status.success(), "{}", diagnostics(&output));
+    assert_success(&command, &output);
 }
 
 #[test]
 fn collects_a_warm_target_again() {
-    let temporary = tempfile::tempdir().unwrap();
-    write_package(temporary.path());
-    fs::write(temporary.path().join(".cargo/config.toml"), "").unwrap();
-    let output = child_command(temporary.path(), "warm")
+    let workspace = TestWorkspace::new("capture");
+    let mut command = child_command(&workspace, "warm");
+    command
         .env("RUSTC_WRAPPER", "")
-        .env("RUSTC_WORKSPACE_WRAPPER", "")
-        .output()
-        .unwrap();
+        .env("RUSTC_WORKSPACE_WRAPPER", "");
+    let output = run(&mut command);
 
-    assert!(output.status.success(), "{}", diagnostics(&output));
+    assert_success(&command, &output);
 }
 
 #[test]
 fn disables_a_configured_wrapper_with_a_warning() {
-    let temporary = tempfile::tempdir().unwrap();
-    write_package(temporary.path());
-    let wrapper = temporary.path().join("wrapper");
+    let workspace = TestWorkspace::new("capture");
+    fs::create_dir(workspace.workspace().join(".cargo")).unwrap();
+    let wrapper = workspace.workspace().join("wrapper");
     fs::write(
         &wrapper,
         "#!/bin/sh\ntouch \"$OPTIC_TEST_WORKSPACE/wrapper-ran\"\nexec \"$@\"\n",
@@ -80,16 +66,17 @@ fn disables_a_configured_wrapper_with_a_warning() {
     .unwrap();
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
     fs::write(
-        temporary.path().join(".cargo/config.toml"),
+        workspace.workspace().join(".cargo/config.toml"),
         "[build]\nrustc-wrapper = \"./wrapper\"\n",
     )
     .unwrap();
 
-    let output = child_command(temporary.path(), "success").output().unwrap();
-    let diagnostics = diagnostics(&output);
+    let mut command = child_command(&workspace, "success");
+    let output = run(&mut command);
+    let diagnostics = diagnostics(&command, &output);
 
     assert!(output.status.success(), "{diagnostics}");
-    assert!(!temporary.path().join("wrapper-ran").exists());
+    assert!(!workspace.workspace().join("wrapper-ran").exists());
     assert!(diagnostics.contains(
         "warning: Cargo Optic does not support configured rustc wrappers; disabling them for this capture"
     ));
@@ -102,35 +89,33 @@ fn disables_a_configured_wrapper_with_a_warning() {
 
 #[test]
 fn rejects_a_configured_compiler() {
-    let temporary = tempfile::tempdir().unwrap();
-    write_package(temporary.path());
+    let workspace = TestWorkspace::new("capture");
+    fs::create_dir(workspace.workspace().join(".cargo")).unwrap();
     fs::write(
-        temporary.path().join(".cargo/config.toml"),
+        workspace.workspace().join(".cargo/config.toml"),
         "[build]\nrustc = \"rustc\"\n",
     )
     .unwrap();
-    let output = child_command(temporary.path(), "compiler-error")
+    let mut command = child_command(&workspace, "compiler-error");
+    command
         .env("RUSTC_WRAPPER", "")
-        .env("RUSTC_WORKSPACE_WRAPPER", "")
-        .output()
-        .unwrap();
+        .env("RUSTC_WORKSPACE_WRAPPER", "");
+    let output = run(&mut command);
 
-    assert!(output.status.success(), "{}", diagnostics(&output));
+    assert_success(&command, &output);
 }
 
 #[test]
 fn rejects_an_environment_compiler() {
-    let temporary = tempfile::tempdir().unwrap();
-    write_package(temporary.path());
-    fs::write(temporary.path().join(".cargo/config.toml"), "").unwrap();
-    let output = child_command(temporary.path(), "compiler-error")
+    let workspace = TestWorkspace::new("capture");
+    let mut command = child_command(&workspace, "compiler-error");
+    command
         .env("RUSTC", "rustc")
         .env("RUSTC_WRAPPER", "")
-        .env("RUSTC_WORKSPACE_WRAPPER", "")
-        .output()
-        .unwrap();
+        .env("RUSTC_WORKSPACE_WRAPPER", "");
+    let output = run(&mut command);
 
-    assert!(output.status.success(), "{}", diagnostics(&output));
+    assert_success(&command, &output);
 }
 
 #[test]
@@ -139,7 +124,7 @@ fn collect_in_child() {
         return;
     };
     let workspace = discover_workspace(Path::new(&directory)).unwrap();
-    let request = BuildRequest::new("selection_fixture", CargoTarget::Library, "release").unwrap();
+    let request = BuildRequest::new("capture_fixture", CargoTarget::Library, "release").unwrap();
     let result = collect_build(&workspace, &request);
 
     match env::var("OPTIC_TEST_SCENARIO").unwrap().as_str() {
@@ -162,12 +147,4 @@ fn collect_in_child() {
         }
         scenario => panic!("unknown test scenario {scenario}"),
     }
-}
-
-fn diagnostics(output: &std::process::Output) -> String {
-    format!(
-        "stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    )
 }
