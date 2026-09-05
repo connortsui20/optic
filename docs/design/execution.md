@@ -223,6 +223,11 @@ All seven archives, 54 unpacked compiler tests, installed CLI/API checks, and se
 Self-hosting returns `vqrqtnlnsoupvyovqpkprontwkrurwvx:691` for `CaptureId::generate` and preserves
 completion time `2026-09-05T23:42:55.794Z` on reuse. Final macOS CI remains the last merge gate.
 
+Final [CI run 33999328890](https://github.com/connortsui20/optic/actions/runs/33999328890) passes all
+jobs on `514b8a03c2981a1df45ef963bc75002932a9f883`: Linux and macOS workspace tests and installed
+verification, plus formatting, Clippy, and rustdoc. GitGuardian also passes. Every verification gate
+is complete. The integration owner can now squash-merge PR #17 under the user's authorization.
+
 ## Additional acceptance
 
 The user suggested exercising Optic on its own source during implementation. Add the single Linux

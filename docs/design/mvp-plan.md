@@ -102,7 +102,7 @@ reader semantics. Do not add convenience query selection or another compiler out
 - [x] Document installation, the full workflow, supported environments, and known limits.
 - [x] Reconcile public APIs, record constants, help text, tests, and the architecture guide.
 - [x] Complete independent correctness and Rust-style reviews of the whole implementation.
-- [ ] Run the final CI suite on the exact revision to merge.
+- [x] Run the final CI suite on the exact revision to merge.
 - [ ] Squash-merge the complete MVP and update `planning` with its evidence and status.
 
 The [installation document](installation.md) owns packaging and the external-consumer test. The

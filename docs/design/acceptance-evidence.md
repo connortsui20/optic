@@ -67,11 +67,11 @@ The stage proof runs both supported modes with the pinned compiler and matching 
 | Parser boundary tests force actual short reads. | Compiler `src/llvm_index/tests.rs` and its consumers. | All 21 indexer tests pass locally. |
 | Named protocol codes preserve their wire values and meanings. | Compiler `src/manifest/tests.rs`. | Passes locally. |
 | Both independent reviews resolve their findings. | Execution ledger. | Both approve `514b8a0`. |
-| The exact merge candidate passes both-host workspace and installed-product CI. | CI run linked in the execution ledger. | Final run pending. |
+| The exact merge candidate passes both-host workspace and installed-product CI. | [CI run 33999328890](https://github.com/connortsui20/optic/actions/runs/33999328890). | All jobs pass at `514b8a0`. |
 
 The final candidate `514b8a0` passes all 236 workspace tests, formatting, Clippy with warnings denied,
 and public/private rustdoc with warnings denied. Its complete installation repeat passes with evidence
-at `/tmp/optic-install.I30jpiuX`, including every installed-product row above. Final both-host CI is running.
+at `/tmp/optic-install.I30jpiuX`, including every installed-product row above. Final both-host CI passes.
 
 The first complete installed run retained its evidence at `/tmp/optic-install.0Tnsjkqs` locally.
 It used Rust 1.98.1, compiler commit `48a229ceaefd4985c50990b14116b6d856af0985`, and LLVM 22.1.8.
