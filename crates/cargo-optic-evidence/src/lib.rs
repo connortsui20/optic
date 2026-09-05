@@ -37,7 +37,7 @@ pub struct FoundInstance {
 }
 
 impl FoundInstance {
-    /// Returns the reference assigned before search sorting and limiting.
+    /// Returns the reference for the instance's original manifest position.
     pub fn reference(&self) -> &InstanceRef {
         &self.reference
     }
@@ -131,6 +131,7 @@ pub fn find_instances(
 
     let mut matches = instances
         .iter()
+        // The ordinal identifies the instance. Enumerating after filtering or sorting changes it.
         .enumerate()
         .filter(|(_, instance)| is_exact_match(instance, query))
         .collect::<Vec<_>>();
@@ -146,20 +147,6 @@ pub fn find_instances(
     } else {
         MatchKind::Exact
     };
-
-    // The ordinal comes from the manifest. Assigning it after sorting selects unrelated evidence.
-    let mut matches = matches
-        .into_iter()
-        .map(|(ordinal, record)| {
-            let reference = InstanceRef::new(
-                capture_id.clone(),
-                u64::try_from(ordinal)
-                    .expect("manifest positions fit in u64 on supported platforms"),
-            );
-
-            (reference, record)
-        })
-        .collect::<Vec<_>>();
 
     matches.sort_by(|(_, left), (_, right)| {
         left.display_name()
@@ -180,8 +167,12 @@ pub fn find_instances(
     let instances = matches
         .into_iter()
         .take(limit)
-        .map(|(reference, record)| FoundInstance {
-            reference,
+        .map(|(ordinal, record)| FoundInstance {
+            reference: InstanceRef::new(
+                capture_id.clone(),
+                u64::try_from(ordinal)
+                    .expect("manifest positions fit in u64 on supported platforms"),
+            ),
             record: record.clone(),
         })
         .collect::<Vec<_>>();
