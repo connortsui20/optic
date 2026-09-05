@@ -95,6 +95,8 @@ cd "$root"
 
 setup cargo metadata --manifest-path "$root/archives/cargo-optic-0.1.0/Cargo.toml" \
     --format-version 1 "${patches[@]}" > "$root/cli-metadata.json"
+setup cargo metadata --manifest-path "$root/archives/cargo-optic-compiler-0.1.0/Cargo.toml" \
+    --format-version 1 "${patches[@]}" > "$root/compiler-metadata.json"
 if [[ $(uname -s) == Linux ]]; then
     setup cargo metadata --manifest-path "$root/consumer/Cargo.toml" \
         --format-version 1 "${patches[@]}" > "$root/api-metadata.json"
@@ -122,11 +124,17 @@ for metadata in root.glob("*-metadata.json"):
             assert path == root / "consumer/Cargo.toml", package
         else:
             assert package["source"].startswith("registry+"), package
-    required = expected if metadata.name == "cli-metadata.json" else expected - {"cargo-optic"}
+    required = {
+        "cli-metadata.json": expected,
+        "api-metadata.json": expected - {"cargo-optic"},
+        "compiler-metadata.json": {"cargo-optic-compiler", "cargo-optic-records"},
+    }[metadata.name]
     assert seen == required, (metadata, seen)
     print("Archive-only Optic resolution:", metadata.name)
 PY
 
+setup cargo test --manifest-path "$root/archives/cargo-optic-compiler-0.1.0/Cargo.toml" \
+    --lib --locked "${patches[@]}" 2>&1 | tee "$root/compiler-tests.log"
 setup cargo install --path "$root/archives/cargo-optic-0.1.0" --root "$root/prefix" \
     --locked "${patches[@]}" 2>&1 | tee "$root/install.log"
 if [[ $(uname -s) == Linux ]]; then
@@ -201,14 +209,21 @@ def cli_journey(workspace, env, package, query, edit):
     def show(reference, output):
         return optic("show", "--instance", reference, "--output", output)
 
+    def drivers():
+        return {str(path): (path.stat().st_size, path.stat().st_mtime_ns)
+                for path in pathlib.Path(env["CARGO_HOME"]).rglob("optic-rustc-driver")}
+
     assert run(["/bin/sh", "-c", "command -v cargo-optic"], workspace, env).strip() == \
         os.fsencode(root / "prefix/bin/cargo-optic")
     assert b"0.1.0" in optic("--version")
     original = capture("Captured")
+    provisioned = drivers()
+    assert len(provisioned) == 1, provisioned
     history = optic("list-captures")
     assert original[0].encode() in history and original[1].encode() in history
     reference, symbol = find(original[0])
     assert capture("Reused") == original
+    assert drivers() == provisioned
     assert optic("list-captures") == history
     source = show(reference, "source")
     llvm = show(reference, "llvm")
@@ -234,6 +249,7 @@ def cli_journey(workspace, env, package, query, edit):
     fresh = capture("Captured", "--fresh")
     assert fresh[0] not in (original[0], changed[0])
     assert capture("Reused") == fresh
+    assert drivers() == provisioned
     assert len(re.findall(rb"^Capture ", optic("list-captures"), re.M)) == 3
     print("Installed fixture journey passed", flush=True)
 

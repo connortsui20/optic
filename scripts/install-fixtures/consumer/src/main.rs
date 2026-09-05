@@ -48,17 +48,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(reused.record(), &original);
     assert_eq!(optic.list_captures()?, [original.clone()]);
 
-    let SourceEvidence::Available { evidence, .. } = optic.source(instance.reference())? else {
+    let SourceEvidence::Available {
+        evidence: original_source,
+        ..
+    } = optic.source(instance.reference())?
+    else {
         panic!("the local fixture function must have captured source");
     };
-    let source = copy(&optic, &evidence)?;
+    let source = copy(&optic, &original_source)?;
     assert_eq!(source, b"pub fn captured_value() -> u64 {\n    42\n}");
     let llvm = exact_llvm(&optic, instance)?;
 
     let path = workspace.join("src/lib.rs");
     let edited = fs::read_to_string(&path)?.replace("    42", "    12345");
     fs::write(path, edited)?;
-    assert_eq!(copy(&optic, &evidence)?, source);
+    assert_eq!(copy(&optic, &original_source)?, source);
     assert_eq!(exact_llvm(&optic, instance)?, llvm);
 
     let changed = optic.capture(&request, CapturePolicy::Reuse)?;
@@ -76,6 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         b"pub fn captured_value() -> u64 {\n    12345\n}"
     );
     assert_ne!(exact_llvm(&optic, &changed_found.instances()[0])?, llvm);
+    assert_eq!(copy(&optic, &original_source)?, source);
     assert_eq!(exact_llvm(&optic, instance)?, llvm);
 
     let fresh = optic.capture(&request, CapturePolicy::Fresh)?;
