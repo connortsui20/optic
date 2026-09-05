@@ -102,7 +102,7 @@ Retain every expected regular CGU module, including modules without recorded fun
 Derive expected paths from rustc's output naming and CGU information. Do not glob for the first
 plausible bitcode file.
 
-The initial mapping to verify on Rust 1.98.1 is:
+The verified mapping on Rust 1.98.1 is:
 
 | Effective mode | Expected optimized module |
 | --- | --- |
@@ -113,6 +113,17 @@ Existing [research fixtures](../research/fixtures/README.md) are the starting ev
 that this mapping works in the product. Promote a focused reproduction into compiler tests. Inspect
 the matching compiler source and record a stable source/reproducer link beside the implementation.
 Resolve this artifact-stage check before exposing LLVM as available.
+
+The promoted `rustc-driver/stage-proof.rs` and compiler unit test passed on the pinned commit
+`48a229ceaefd4985c50990b14116b6d856af0985`, using LLVM 22.1.8. Both modes produced four regular
+modules. Paired invocations preserved effective optimization, LTO, CGU count, and output types.
+Both linked programs ran successfully. The retained modules contained constant folding that their
+`no-opt.bc` predecessors did not contain. The test runs in a cleared child environment.
+
+The matching compiler source writes [no-LTO bitcode after optimization](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/compiler/rustc_codegen_ssa/src/back/write.rs#L819-L840)
+and [local ThinLTO bitcode after its pass manager](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/compiler/rustc_codegen_llvm/src/back/lto.rs#L778-L782).
+Worker proof commits are `d98f141` and its process-isolation update in `76a0308`. Integrated product
+acceptance and both-host CI remain separate requirements.
 
 Disassemble each selected module once with the matching sysroot's `llvm-dis`. Store that unchanged
 text as the durable LLVM artifact. Intermediate bitcode and earlier stages remain temporary.

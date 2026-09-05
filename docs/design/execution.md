@@ -120,6 +120,11 @@ API/CLI process acceptance adds whole functions and methods, shared generic sour
 unsupported provenance, both optimized stages, stored bytes after edits, and closed stdout.
 These tests must still pass against the integrated compiler.
 
-The compiler worker is verifying the pinned compiler's optimized artifact stages before enabling
-LLVM availability. These partial commits are not a validated B implementation and have not replaced
-the accepted A revision on the PR.
+The compiler worker verified both optimized stages on the pinned compiler. The proof found four
+regular modules per mode and preserved effective codegen configuration. The
+[stage contract](show.md#selecting-the-artifact-stage) records the exact source and test evidence.
+Compiler handoffs `d98f141`, `76a0308`, and `6c74758` pass 65 compiler tests and quality checks in
+the worker. They are ready for integration and full process acceptance.
+
+These partial commits are not a validated B implementation and have not replaced the accepted A
+revision on the PR.
