@@ -62,15 +62,15 @@ impl CaptureOutcome {
 ///
 /// # Errors
 ///
-/// Returns an error if compiler collection fails, the instance manifest is invalid, or the
-/// complete capture cannot be published.
+/// Returns an error if request preparation, candidate validation, freshness verification,
+/// compiler collection, or publication fails.
 pub fn capture(
     workspace: &Workspace,
     store: &Store,
     request: &BuildRequest,
     policy: CapturePolicy,
 ) -> Result<CaptureOutcome, Error> {
-    let prepared = optic_compiler::prepare_build(workspace, request)?;
+    let mut prepared = optic_compiler::prepare_build(workspace, request)?;
     store.initialize()?;
 
     if policy == CapturePolicy::Reuse

@@ -22,6 +22,7 @@ use optic::CapturePolicy;
 use optic::CargoTarget;
 use optic::InvalidBuildRequest;
 
+/// Keeps ordinary search output short while reporting the complete match count separately.
 const DEFAULT_FIND_LIMIT: usize = 20;
 
 /// The outer command form that Cargo passes to this executable.
