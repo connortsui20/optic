@@ -9,3 +9,6 @@ mod scanner;
 pub(crate) use scanner::index;
 
 mod stream;
+
+#[cfg(test)]
+mod tests;

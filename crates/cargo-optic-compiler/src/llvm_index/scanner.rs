@@ -153,13 +153,13 @@ mod tests {
     use std::io::{BufReader, Cursor, ErrorKind, Read};
 
     use super::super::stream::HEADER_LIMIT;
+    use super::super::tests::ShortReader;
     use super::*;
 
     #[track_caller]
     fn check(input: &str, expected: &[(&str, LlvmDefinitionKind, &str)]) {
-        for capacity in [1, 2, 7, 8192] {
-            let actual =
-                super::super::index(BufReader::with_capacity(capacity, input.as_bytes())).unwrap();
+        for max_read in [1, 2, 7, 8192] {
+            let actual = super::super::index(ShortReader::new(input.as_bytes(), max_read)).unwrap();
             assert_eq!(actual.len(), expected.len());
 
             for (definition, (symbol, kind, excerpt)) in actual.iter().zip(expected) {

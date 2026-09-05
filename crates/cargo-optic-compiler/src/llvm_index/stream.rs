@@ -407,11 +407,12 @@ pub(super) fn invalid(offset: u64, message: impl std::fmt::Display) -> io::Error
 mod tests {
     use std::io::{BufReader, Cursor, Read};
 
+    use super::super::tests::ShortReader;
     use super::*;
 
     #[track_caller]
-    fn decode(input: &[u8], capacity: usize) -> io::Result<String> {
-        let mut stream = Stream::new(BufReader::with_capacity(capacity, input));
+    fn decode(input: &[u8], max_read: usize) -> io::Result<String> {
+        let mut stream = Stream::new(ShortReader::new(input, max_read));
         stream.begin_header(0);
 
         stream.required_token()?.symbol()
@@ -428,8 +429,8 @@ mod tests {
         ];
 
         for &(input, expected) in cases {
-            for capacity in [1, 2, 7, 8192] {
-                assert_eq!(decode(input, capacity).unwrap(), expected);
+            for max_read in [1, 2, 7, 8192] {
+                assert_eq!(decode(input, max_read).unwrap(), expected);
             }
         }
     }
@@ -489,7 +490,7 @@ mod tests {
     #[test]
     fn body_ignores_quoted_and_commented_braces() {
         let input = b"\n; } define @fake {\n %x = insertvalue {i8, i8} poison, i8 0, 0\n call void asm \"{\\22}\", \"\"()\n ret void\n}tail";
-        let mut stream = Stream::new(BufReader::with_capacity(1, &input[..]));
+        let mut stream = Stream::new(ShortReader::new(input, 1));
         stream.body().unwrap();
 
         assert_eq!(stream.offset(), (input.len() - 4) as u64);

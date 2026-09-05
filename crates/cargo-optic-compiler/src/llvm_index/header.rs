@@ -242,13 +242,14 @@ fn consume_group(reader: &mut Stream<impl BufRead>, token: &Token) -> io::Result
 
 #[cfg(test)]
 mod tests {
-    use std::io::{BufReader, ErrorKind};
+    use std::io::ErrorKind;
 
+    use super::super::tests::ShortReader;
     use super::*;
 
     #[track_caller]
-    fn parse_function(input: &str, capacity: usize) -> io::Result<String> {
-        let mut stream = Stream::new(BufReader::with_capacity(capacity, input.as_bytes()));
+    fn parse_function(input: &str, max_read: usize) -> io::Result<String> {
+        let mut stream = Stream::new(ShortReader::new(input.as_bytes(), max_read));
         stream.begin_header(0);
         let name = function(&mut stream)?;
         stream.end_header();
@@ -266,8 +267,8 @@ mod tests {
             "void @f() prefix {i32, i8} {i32 1, i8 2} prologue [2 x i8] c\"ab\" personality ptr @p { ret void }", // Header constants.
             "void @f() prefix ptr getelementptr (i8, ptr @g, i64 1) !dbg !0 { ret void }", // Expression constant.
         ] {
-            for capacity in [1, 7, 8192] {
-                assert_eq!(parse_function(header, capacity).unwrap(), "f");
+            for max_read in [1, 7, 8192] {
+                assert_eq!(parse_function(header, max_read).unwrap(), "f");
             }
         }
     }
@@ -295,8 +296,8 @@ mod tests {
         ];
 
         for (input, expected) in cases {
-            for capacity in [1, 2, 8192] {
-                let mut stream = Stream::new(BufReader::with_capacity(capacity, input.as_bytes()));
+            for max_read in [1, 2, 8192] {
+                let mut stream = Stream::new(ShortReader::new(input.as_bytes(), max_read));
                 stream.begin_header(0);
                 assert_eq!(alias_target(&mut stream).unwrap().as_deref(), expected);
             }
