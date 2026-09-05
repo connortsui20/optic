@@ -25,7 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let captured = optic.capture(&request, CapturePolicy::Reuse)?;
     assert!(matches!(captured, CaptureOutcome::Captured(_)));
     let original = captured.into_record();
-    assert_eq!(optic.list_captures()?, [original.clone()]);
+    assert_eq!(optic.list_captures()?, std::slice::from_ref(&original));
 
     let found = optic.find(
         original.id(),
@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reused = optic.capture(&request, CapturePolicy::Reuse)?;
     assert!(matches!(reused, CaptureOutcome::Reused(_)));
     assert_eq!(reused.record(), &original);
-    assert_eq!(optic.list_captures()?, [original.clone()]);
+    assert_eq!(optic.list_captures()?, std::slice::from_ref(&original));
 
     let SourceEvidence::Available {
         evidence: original_source,
