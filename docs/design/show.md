@@ -102,6 +102,11 @@ Retain every expected regular CGU module, including modules without recorded fun
 Derive expected paths from rustc's output naming and CGU information. Do not glob for the first
 plausible bitcode file.
 
+For `Collected` evidence, durable validation requires a module for every CGU named by an instance
+placement. Extra modules without placements remain valid. This checks collection completeness, not
+body location: exact symbol queries still search all modules after optimization. `NotCaptured`
+evidence does not require LLVM modules.
+
 The verified mapping on Rust 1.98.1 is:
 
 | Effective mode | Expected optimized module |

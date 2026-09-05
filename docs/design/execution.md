@@ -188,6 +188,20 @@ whose executable is intentionally absent from the isolated PATH. Refine self-hos
 the user's proposed real-source test without configuration overrides or changes to their store.
 Repeat the full script after this final isolation correction.
 
+## Independent review corrections
+
+Harvey found one correctness gap: a durable manifest could retain instance placements while removing
+their LLVM modules and artifacts, then claim `Collected` evidence. Require each placement CGU to
+exist in collected module identities. Keep modules without placements and `NotCaptured` valid.
+Add constructor, deserialization, and candidate-read regressions; make existing test fixtures obey
+the complete graph invariant.
+
+Hooke identified four required quality corrections: use readers that actually split LLVM test input,
+replace raw protocol decision codes with shared named constants, extract repeated disassembly/body
+comparison from the nested stage-proof test, and document `InstanceRef`'s text/Serde contract.
+The integration owner handles durable validation and reference docs. Separate workers handle indexer
+test input, driver protocol names, and stage-proof structure. Both reviewers recheck their findings.
+
 ## Additional acceptance
 
 The user suggested exercising Optic on its own source during implementation. Add the single Linux
