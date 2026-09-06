@@ -14,6 +14,10 @@ The [acceptance index](acceptance-evidence.md) and [execution ledger](execution.
 revisions, tests, installed-product results, and independent reviews. Registry publication remains
 unauthorized. Future features need a new active plan before implementation.
 
+The post-merge review found source-line lookup and Cargo executable-search regressions. The user
+authorized a corrective PR and a related-issue audit. The [follow-up plan](review-follow-up.md) owns
+that work without expanding the MVP's supported environments or feature scope.
+
 ## Definition of done
 
 The following workflow must work through both the CLI and the `optic` library:
