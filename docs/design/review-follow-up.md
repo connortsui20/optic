@@ -70,8 +70,8 @@ correctness review, installed verification, and both-host CI remain pending.
 ## Source-line cost reproduction
 
 The reproduction isolates the standalone driver process, not total Cargo capture time. It uses
-4,000 generated public functions in one 802,890-byte file. Each function has four repeated source
-padding comments and returns `value.wrapping_add(index)`. Source is identical in both variants.
+4,000 generated public functions in one 802,890-byte file. Each function has one comment with four
+repeated padding phrases and returns `value.wrapping_add(index)`. Source is identical in both variants.
 
 Driver binaries use the production driver build flags from `driver.rs`. Both invoke the pinned
 Rust 1.98.1 compiler with `--crate-type rlib --edition=2024 -C opt-level=0 -C codegen-units=1
@@ -90,3 +90,17 @@ with the same source and output locations. The baseline uses `bae4ca0`; the cand
 The median time ratio is 46.4 on this workload. Manifests and source snapshots match byte-for-byte.
 The runner, input, binaries, output, and raw times remain under
 `/tmp/optic-source-line-fix/target/source-line-bench`. CI has no timing threshold.
+
+The timed process includes compiler startup, parsing, analysis, Optic collection, code generation,
+and artifact output. It excludes driver compilation, parent-side manifest processing, LLVM
+disassembly, and the comparison/archive steps.
+
+## Final review cleanup
+
+Independent correctness and style reviews approve `f84a25b`. The complete installed workflow also
+passes at that revision, with evidence retained in `/tmp/optic-install.Y4Q6DcbE`.
+
+An extra standalone-driver rustdoc invocation finds three existing `private_intra_doc_links`
+warnings in the crate documentation. The links describe private entry points in a binary that has
+no public library API. Keep those useful links and narrowly document this binary's private-link
+allowance. Resolve the correctness review's two whitespace nits, then repeat final verification.
