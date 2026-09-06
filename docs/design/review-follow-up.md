@@ -3,6 +3,9 @@
 The user requested a new PR for two reproduced regressions in `main` at `bae4ca0`, plus related cleanup.
 The completed MVP remains the baseline. This follow-up does not add features or compatibility layers.
 
+The follow-up is complete in [PR #18](https://github.com/connortsui20/optic/pull/18), merged as
+`c94cc22` after explicit user approval. The merged tree matches the reviewed and tested `f84a25b`.
+
 ## Fixes and ownership
 
 - The integration owner fixes Cargo executable discovery and adds isolated process regressions.
@@ -30,15 +33,16 @@ large-file cost without a machine-dependent timing assertion or another source-l
 - [x] Run workspace tests, standalone formatting, Clippy, and public/private rustdoc.
 - [x] Run archive installation, the external API consumer, and self-hosting verification.
 - [x] Complete independent correctness and Rust-style review of the final diff.
-- [ ] Open the corrective PR and verify Linux/macOS CI on its final revision.
+- [x] Open the corrective PR and verify Linux/macOS CI on its final revision.
 - [x] Record results and the PR link on `planning`.
+- [x] Merge the approved revision and sync main and planning.
 
 Use the existing isolated fixture framework. Never change the parent process environment, uninstall
 toolchain components, or modify user Cargo configuration to reproduce errors. Registry DNS failure
 is a verification blocker, not a reason to change product code or disable archive verification.
 
-The user reviewed PR #18 and explicitly requested its merge. Merge the approved revision after
-the exact-revision CI gate, then rebase planning onto main. No registry publication is authorized.
+The user reviewed PR #18 and explicitly requested its merge. The exact-revision CI gate passed,
+the PR is merged, and planning is rebased onto main. No registry publication is authorized.
 
 ## Execution evidence
 
@@ -66,7 +70,7 @@ and BOM/CRLF normalization. It passes before and after the algorithm change and 
 
 All 241 workspace tests, standalone formatting, Clippy, and public/private rustdoc pass locally.
 Independent correctness and Rust-style reviews approve the complete diff. Installed verification
-also passes. Both-host CI remains the final merge gate.
+and both-host CI also pass.
 
 ## Source-line cost reproduction
 
@@ -107,3 +111,13 @@ no public library API. This extra lint invocation is outside the passing workspa
 gate. The user then requested merging the reviewed PR as-is. No additional lint allowance or
 whitespace change was made after that approval. These nonblocking observations are not feature work
 or additional requirements for this correction.
+
+## Completed verification
+
+[CI run 34001278916](https://github.com/connortsui20/optic/actions/runs/34001278916) passes all jobs on
+`f84a25b469823d024c350035f93c740c8d03faac`. This includes Linux/macOS workspace and installation
+tests, plus formatting, Clippy, and workspace rustdoc. GitGuardian also passes.
+
+PR #18 merged on 2026-09-06 at 00:30:42 UTC as `c94cc22887dff08ac3df7a2b7eb7a2e8bf7d73f3`.
+The shared checkout is clean on main. Planning remains confined to design documents and research
+on top of main. No user store, worker worktree, or preexisting stash was removed.

@@ -252,3 +252,10 @@ worker worktree, or preexisting stash was removed.
 The completed MVP retains its explicit limits in the main README. These include the pinned compiler,
 serialized writers, narrow source spans, supported optimized-LLVM modes, and no migrations or crash
 recovery. Deferred features require a new plan, not automatic continuation of this effort.
+
+## Post-merge correction
+
+The subsequent [review follow-up](review-follow-up.md) is complete in
+[PR #18](https://github.com/connortsui20/optic/pull/18), merged as `c94cc22`. Both reported regressions
+are fixed. All 241 workspace tests, installed-product checks, independent reviews, and Linux/macOS
+CI pass on the reviewed revision. The follow-up record contains the detailed evidence and scope.

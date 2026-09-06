@@ -14,9 +14,9 @@ The [acceptance index](acceptance-evidence.md) and [execution ledger](execution.
 revisions, tests, installed-product results, and independent reviews. Registry publication remains
 unauthorized. Future features need a new active plan before implementation.
 
-The post-merge review found source-line lookup and Cargo executable-search regressions. The user
-authorized a corrective PR and a related-issue audit. The [follow-up plan](review-follow-up.md) owns
-that work without expanding the MVP's supported environments or feature scope.
+The post-merge review found source-line lookup and Cargo executable-search regressions. Both are
+fixed in [PR #18](https://github.com/connortsui20/optic/pull/18), merged as `c94cc22` after the user's
+approval. The [follow-up record](review-follow-up.md) contains tests and the related-issue audit.
 
 ## Definition of done
 
