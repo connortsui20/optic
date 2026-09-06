@@ -24,10 +24,10 @@ large-file cost without a machine-dependent timing assertion or another source-l
 
 ## Verification and delivery
 
-- [ ] Reproduce each reported regression and add focused coverage.
-- [ ] Complete both fixes under the full Rust style rules.
-- [ ] Audit related code and resolve any additional reproducible issues found.
-- [ ] Run workspace tests, standalone formatting, Clippy, and public/private rustdoc.
+- [x] Reproduce each reported regression and add focused coverage.
+- [x] Complete both fixes under the full Rust style rules.
+- [x] Audit related code and resolve any additional reproducible issues found.
+- [x] Run workspace tests, standalone formatting, Clippy, and public/private rustdoc.
 - [ ] Run archive installation, the external API consumer, and self-hosting verification.
 - [ ] Complete independent correctness and Rust-style review of the final diff.
 - [ ] Open the corrective PR and verify Linux/macOS CI on its final revision.
@@ -55,3 +55,38 @@ isolated workspace verified member features, warm reuse, shared-file source attr
 lookup. No additional reproducible defect was found in those inspected paths and exercised cases.
 The audit fixture remains at `/tmp/optic-followup-repro.VC9jd4C9`. This is not a claim that all possible
 inputs are free of defects.
+
+## Corrective PR
+
+[PR #18](https://github.com/connortsui20/optic/pull/18) contains both corrections at `f84a25b`.
+The Cargo change is `851f408`. The source-line change is `f84a25b`, from worker commit `6d5fcee`.
+The source test covers first and later lines, multiple files, repeated monomorphizations, Unicode,
+and BOM/CRLF normalization. It passes before and after the algorithm change and preserves semantics.
+
+All 241 workspace tests, standalone formatting, Clippy, and public/private rustdoc pass locally.
+Independent Rust-style review approves the complete diff with no actionable findings. Final
+correctness review, installed verification, and both-host CI remain pending.
+
+## Source-line cost reproduction
+
+The reproduction isolates the standalone driver process, not total Cargo capture time. It uses
+4,000 generated public functions in one 802,890-byte file. Each function has four repeated source
+padding comments and returns `value.wrapping_add(index)`. Source is identical in both variants.
+
+Driver binaries use the production driver build flags from `driver.rs`. Both invoke the pinned
+Rust 1.98.1 compiler with `--crate-type rlib --edition=2024 -C opt-level=0 -C codegen-units=1
+-C lto=off -C debuginfo=0`. After one warmup per variant, five alternating before/after pairs run
+with the same source and output locations. The baseline uses `bae4ca0`; the candidate uses `6d5fcee`.
+
+| Wall time in seconds | Before | After |
+| --- | --- | --- |
+| Pair 1. | 13.647 | 0.298 |
+| Pair 2. | 13.599 | 0.294 |
+| Pair 3. | 13.592 | 0.293 |
+| Pair 4. | 13.604 | 0.291 |
+| Pair 5. | 13.620 | 0.286 |
+| Median. | 13.604 | 0.293 |
+
+The median time ratio is 46.4 on this workload. Manifests and source snapshots match byte-for-byte.
+The runner, input, binaries, output, and raw times remain under
+`/tmp/optic-source-line-fix/target/source-line-bench`. CI has no timing threshold.
