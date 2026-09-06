@@ -125,6 +125,7 @@ dependencies = [
  "cargo-optic-records",
  "cargo-optic-test-support",
  "cargo_metadata",
+ "rustix",
  "serde_json",
  "sha2",
  "snafu",

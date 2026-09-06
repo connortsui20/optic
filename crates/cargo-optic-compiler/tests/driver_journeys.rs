@@ -336,6 +336,94 @@ fn main() { assert_eq!(first::folded_first(10) + second::folded_second(20), 59);
 }
 
 #[test]
+fn source_lines_follow_each_normalized_file_for_repeated_instances() {
+    child(&TestWorkspace::new("capture"), "source_lines_child");
+}
+
+#[test]
+fn source_lines_child() {
+    if env::var_os("OPTIC_TEST_CHILD").is_none() {
+        return;
+    }
+
+    let workspace = discover_workspace(&env::current_dir().unwrap()).unwrap();
+    let first = "pub fn first<T: Copy>(value: T) -> T { value }";
+    let later = "pub fn later() -> u64 { first(1_u64) + u64::from(first(2_u32)) + other::first() }";
+    let other_first = "pub fn first() -> u64 { later(3_u64) + u64::from(later(4_u32)) }";
+    let other_later = "pub fn later<T: Copy>(value: T) -> T { value }";
+    let root =
+        format!("{first}\n// Unicode before a later definition: λ.\n\n{later}\nmod other;\n");
+    let other = format!("{other_first}\n\n// Another Unicode prefix: é.\n\n{other_later}\n");
+
+    for (file, normalized) in [("lib.rs", &root), ("other.rs", &other)] {
+        fs::write(
+            workspace.root().join("src").join(file),
+            format!("\u{feff}{}", normalized.replace('\n', "\r\n")),
+        )
+        .unwrap();
+    }
+
+    let request = BuildRequest::new("capture_fixture", CargoTarget::Library, "dev").unwrap();
+    let (_, _, _, manifest, temporary) = prepare_build(&workspace, &request)
+        .unwrap()
+        .collect()
+        .unwrap()
+        .into_parts(CaptureId::generate())
+        .unwrap();
+    assert_eq!(manifest.artifacts().len(), 2);
+
+    for (name, file, normalized, definition, line, count) in [
+        ("capture_fixture::first::<", "lib.rs", &root, first, 1, 2), // First-line instances.
+        ("capture_fixture::later", "lib.rs", &root, later, 4, 1),    // Later root definition.
+        (
+            "capture_fixture::other::first",
+            "other.rs",
+            &other,
+            other_first,
+            1,
+            1,
+        ), // New file.
+        (
+            "capture_fixture::other::later::<",
+            "other.rs",
+            &other,
+            other_later,
+            5,
+            2,
+        ), // Repeated instances.
+    ] {
+        let instances: Vec<_> = manifest
+            .instances()
+            .iter()
+            .filter(|instance| instance.display_name().starts_with(name))
+            .collect();
+        assert_eq!(instances.len(), count, "{name}");
+
+        for instance in &instances {
+            assert_eq!(instance.source(), instances[0].source(), "{name}");
+            let SourceAvailability::Available(source) = instance.source() else {
+                panic!("the local definition has source: {name}");
+            };
+            let artifact = manifest
+                .artifacts()
+                .iter()
+                .find(|artifact| artifact.id() == source.artifact())
+                .unwrap();
+            let snapshot = fs::read_to_string(temporary.path().join(artifact.file_name())).unwrap();
+            assert_eq!(&snapshot, normalized);
+            let start = normalized.find(definition).unwrap();
+            assert_eq!(source.range().start(), start as u64);
+            assert_eq!(source.range().end(), (start + definition.len()) as u64);
+            assert_eq!(source.starting_line(), line);
+            assert_eq!(
+                source.display_path(),
+                fs::canonicalize(workspace.root().join("src").join(file)).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
 fn source_snapshots_preserve_normalized_whole_definitions_for_unsupported_llvm() {
     child(&TestWorkspace::new("capture"), "source_snapshots_child");
 }

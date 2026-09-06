@@ -106,6 +106,12 @@ impl Snapshots {
         if text.get(start..end).is_none() {
             return Ok(Source::Unavailable(protocol::SOURCE_UNSUPPORTED_SPAN));
         }
+
+        // Rustc's line index uses normalized byte positions and returns a zero-based line.
+        let Some(line) = file.lookup_line(file.relative_position(span.lo())) else {
+            return Ok(Source::Unavailable(protocol::SOURCE_UNSUPPORTED_SPAN));
+        };
+
         let artifact = match self.files.get(&path) {
             Some(&(position, id)) => {
                 if position != file.start_pos.0 {
@@ -132,7 +138,7 @@ impl Snapshots {
             start: start as u64,
             length: (end - start) as u64,
             display_path: path,
-            starting_line: 1 + text[..start].bytes().filter(|byte| *byte == b'\n').count() as u64,
+            starting_line: 1 + line as u64,
         }))
     }
 }
