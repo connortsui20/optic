@@ -28,16 +28,17 @@ large-file cost without a machine-dependent timing assertion or another source-l
 - [x] Complete both fixes under the full Rust style rules.
 - [x] Audit related code and resolve any additional reproducible issues found.
 - [x] Run workspace tests, standalone formatting, Clippy, and public/private rustdoc.
-- [ ] Run archive installation, the external API consumer, and self-hosting verification.
-- [ ] Complete independent correctness and Rust-style review of the final diff.
+- [x] Run archive installation, the external API consumer, and self-hosting verification.
+- [x] Complete independent correctness and Rust-style review of the final diff.
 - [ ] Open the corrective PR and verify Linux/macOS CI on its final revision.
-- [ ] Record results and the PR link on `planning`.
+- [x] Record results and the PR link on `planning`.
 
 Use the existing isolated fixture framework. Never change the parent process environment, uninstall
 toolchain components, or modify user Cargo configuration to reproduce errors. Registry DNS failure
 is a verification blocker, not a reason to change product code or disable archive verification.
 
-The corrective PR remains open for review at handoff. No registry publication is authorized.
+The user reviewed PR #18 and explicitly requested its merge. Merge the approved revision after
+the exact-revision CI gate, then rebase planning onto main. No registry publication is authorized.
 
 ## Execution evidence
 
@@ -64,8 +65,8 @@ The source test covers first and later lines, multiple files, repeated monomorph
 and BOM/CRLF normalization. It passes before and after the algorithm change and preserves semantics.
 
 All 241 workspace tests, standalone formatting, Clippy, and public/private rustdoc pass locally.
-Independent Rust-style review approves the complete diff with no actionable findings. Final
-correctness review, installed verification, and both-host CI remain pending.
+Independent correctness and Rust-style reviews approve the complete diff. Installed verification
+also passes. Both-host CI remains the final merge gate.
 
 ## Source-line cost reproduction
 
@@ -95,12 +96,14 @@ The timed process includes compiler startup, parsing, analysis, Optic collection
 and artifact output. It excludes driver compilation, parent-side manifest processing, LLVM
 disassembly, and the comparison/archive steps.
 
-## Final review cleanup
+## Final review and merge decision
 
 Independent correctness and style reviews approve `f84a25b`. The complete installed workflow also
 passes at that revision, with evidence retained in `/tmp/optic-install.Y4Q6DcbE`.
 
 An extra standalone-driver rustdoc invocation finds three existing `private_intra_doc_links`
 warnings in the crate documentation. The links describe private entry points in a binary that has
-no public library API. Keep those useful links and narrowly document this binary's private-link
-allowance. Resolve the correctness review's two whitespace nits, then repeat final verification.
+no public library API. This extra lint invocation is outside the passing workspace/CI documentation
+gate. The user then requested merging the reviewed PR as-is. No additional lint allowance or
+whitespace change was made after that approval. These nonblocking observations are not feature work
+or additional requirements for this correction.
