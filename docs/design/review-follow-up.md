@@ -14,6 +14,10 @@ Preserve explicit `CARGO` selection and the selected executable's invocation pat
 skip non-executable entries and retain ordinary symlink and relative-directory behavior. Do not add
 Windows support, shell invocation, compiler overrides, or wrapper-composition machinery.
 
+Use `rustix::fs::accessat` with effective-user execute access for PATH candidates. Rustix is already
+in the resolved dependency graph through tempfile. A direct dependency avoids unsafe local FFI or
+manual permission-bit emulation. Keep the existing path-selection loop and explicit-path behavior.
+
 Source line lookup must use the pinned compiler's source map and preserve one-based normalized line
 numbers. Test first and later lines, multiple files, and repeated concrete instances. Reproduce the
 large-file cost without a machine-dependent timing assertion or another source-line cache.
