@@ -4,6 +4,7 @@
 
 use std::ffi::OsStr;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 use std::process::Output;
@@ -140,6 +141,102 @@ fn find_reference(workspace: &TestWorkspace, capture: &str, query: &str) -> Stri
     assert_eq!(references.len(), 1, "{stdout}");
 
     references[0].to_owned()
+}
+
+#[test]
+fn direct_cli_skips_non_executable_cargo_on_path() {
+    let workspace = TestWorkspace::new("capture");
+    let shadow = workspace.observations().join("shadow");
+    fs::create_dir(&shadow).unwrap();
+    let cargo = shadow.join("cargo");
+    fs::write(&cargo, "not an executable\n").unwrap();
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o644)).unwrap();
+
+    let mut ordinary = Command::new("cargo");
+    workspace.apply(&mut ordinary);
+    let path = ordinary
+        .get_envs()
+        .find(|(name, _)| *name == "PATH")
+        .unwrap()
+        .1
+        .unwrap();
+    let paths = std::iter::once(shadow).chain(std::env::split_paths(path));
+    let path = std::env::join_paths(paths).unwrap();
+    ordinary.env("PATH", &path).env_remove("CARGO").arg("-V");
+    let output = run_command(&mut ordinary);
+    assert_success(&ordinary, &output);
+
+    for cargo in [None, Some(""), Some("cargo")] {
+        let mut direct = Command::new(env!("CARGO_BIN_EXE_cargo-optic"));
+        workspace.apply(&mut direct);
+        direct.env("PATH", &path).args(["optic", "list-captures"]);
+        match cargo {
+            Some(cargo) => direct.env("CARGO", cargo),
+            None => direct.env_remove("CARGO"),
+        };
+        let output = run_command(&mut direct);
+        assert_success(&direct, &output);
+    }
+}
+
+#[test]
+fn direct_cli_keeps_path_order_and_the_cargo_symlink_name() {
+    let workspace = TestWorkspace::new("capture");
+    let shim = workspace.observations().join("dispatch");
+    fs::write(
+        &shim,
+        "#!/bin/sh\nprintf 'selected Cargo: %s\\n' \"$0\" >&2\nexit 41\n",
+    )
+    .unwrap();
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    let first = workspace.workspace().join("tools");
+    fs::create_dir(&first).unwrap();
+    let cargo = first.join("cargo");
+    std::os::unix::fs::symlink(&shim, &cargo).unwrap();
+
+    for entry in [first.as_path(), Path::new("tools")] {
+        let mut direct = Command::new(env!("CARGO_BIN_EXE_cargo-optic"));
+        workspace.apply(&mut direct);
+        let path = direct
+            .get_envs()
+            .find(|(name, _)| *name == "PATH")
+            .unwrap()
+            .1
+            .unwrap();
+        let paths = std::iter::once(entry.to_owned()).chain(std::env::split_paths(path));
+        let path = std::env::join_paths(paths).unwrap();
+        direct
+            .env("PATH", path)
+            .env_remove("CARGO")
+            .args(["optic", "list-captures"]);
+        let output = run_command(&mut direct);
+
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains(&format!("selected Cargo: {}", cargo.display()))
+        );
+    }
+}
+
+#[test]
+fn direct_cli_does_not_replace_explicit_non_executable_cargo() {
+    let workspace = TestWorkspace::new("capture");
+    let cargo = workspace.workspace().join("chosen-cargo");
+    fs::write(&cargo, "not an executable\n").unwrap();
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o644)).unwrap();
+
+    for selected in [cargo.as_os_str(), OsStr::new("./chosen-cargo")] {
+        let mut direct = Command::new(env!("CARGO_BIN_EXE_cargo-optic"));
+        workspace.apply(&mut direct);
+        direct
+            .env("CARGO", selected)
+            .args(["optic", "list-captures"]);
+        let output = run_command(&mut direct);
+
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Permission denied"));
+    }
 }
 
 #[test]

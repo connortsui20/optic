@@ -13,6 +13,10 @@ use std::path::PathBuf;
 use cargo_metadata::CargoOpt;
 use cargo_metadata::Metadata;
 use cargo_metadata::MetadataCommand;
+use rustix::fs::Access;
+use rustix::fs::AtFlags;
+use rustix::fs::CWD;
+use rustix::fs::accessat;
 use snafu::ResultExt;
 
 use crate::BuildRequest;
@@ -89,7 +93,10 @@ fn resolve_executable(program: &Path, directory: &Path) -> Result<PathBuf, Error
     if let Some(path) = env::var_os("PATH") {
         for entry in env::split_paths(&path) {
             let candidate = directory.join(entry).join(program);
-            if candidate.is_file() {
+            // An earlier non-executable file must not hide a later Cargo executable on PATH.
+            if candidate.is_file()
+                && accessat(CWD, &candidate, Access::EXEC_OK, AtFlags::EACCESS).is_ok()
+            {
                 return Ok(candidate);
             }
         }
