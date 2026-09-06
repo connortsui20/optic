@@ -38,3 +38,20 @@ toolchain components, or modify user Cargo configuration to reproduce errors. Re
 is a verification blocker, not a reason to change product code or disable archive verification.
 
 The corrective PR remains open for review at handoff. No registry publication is authorized.
+
+## Execution evidence
+
+The integration branch is `ct/fix-mvp-review` from `bae4ca0`. The source worker uses the separate
+`ct/fix-source-line-index` worktree. Both follow the complete Rust style rules.
+
+The Cargo process regression fails before the permission fix: `cargo -V` succeeds while direct
+`cargo-optic optic list-captures` fails with `Permission denied`. Three new process tests pass after
+the fix. They cover unset, empty, and bare-name `CARGO`, explicit-path failures, PATH precedence,
+relative PATH directories, and preservation of the executable symlink's invocation name.
+
+The independent audit covered source identity/ranges, LLVM indexing and aliases, Cargo selection and
+freshness, and publication failures at `bae4ca0`. All 170 relevant tests passed. An additional
+isolated workspace verified member features, warm reuse, shared-file source attribution, and LLVM
+lookup. No additional reproducible defect was found in those inspected paths and exercised cases.
+The audit fixture remains at `/tmp/optic-followup-repro.VC9jd4C9`. This is not a claim that all possible
+inputs are free of defects.
