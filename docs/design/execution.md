@@ -273,10 +273,17 @@ does not change product behavior, MVP scope, or test requirements.
 
 - [x] Separate current contracts from completed delivery records and optional research.
 - [x] Correct obsolete setup instructions and claims that temporary evidence remains available.
-- [ ] Add a review entry point on `main`, linked from `AGENTS.md` and the README.
-- [ ] Verify Markdown links, branch roles, scope boundaries, and the documentation-only diff.
+- [x] Add a review entry point for `main`, linked from `AGENTS.md` and the README.
+- [x] Verify Markdown links, branch roles, scope boundaries, and the documentation-only diff.
 - [ ] Publish the documentation and rebase `planning` onto the updated `main`.
 
-The review entry point will identify the required documents, evidence limits, and full-tree review
-scope. It will require no prior conversation or personal skill installation. Historical results
-will remain distinct from checks run during a new review.
+The review entry point identifies the required documents, evidence limits, and full-tree review
+scope. It requires no prior conversation or personal skill installation. Historical results remain
+distinct from checks run during a new review.
+
+Planning commit `8477200` persisted the cleanup before the main-side documentation change.
+[PR #19](https://github.com/connortsui20/optic/pull/19) contains the review guide at `fcaa707`.
+The local link check passed 161 repository links and anchors across both documentation trees.
+Standalone/workspace formatting, Clippy with warnings denied, and workspace rustdoc with warnings
+denied passed locally. The prose checks covered sentence length, terminology, and branch authority.
+The diff changes Markdown only. Product code, manifests, tests, and CI configuration are unchanged.

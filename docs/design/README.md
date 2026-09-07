@@ -4,6 +4,8 @@ The `planning` branch owns product scope, behavior contracts, decisions, and acc
 The `main` branch owns the implementation and current contributor documentation. Together, these
 branches provide the context for a review without prior conversation history.
 
+Start a full review with [the review guide][review] on `main`.
+
 The MVP is complete through [PR #17](https://github.com/connortsui20/optic/pull/17).
 [PR #18](https://github.com/connortsui20/optic/pull/18) corrected two regressions at `c94cc22`.
 The contracts describe the completed MVP. They do not authorize deferred features.
@@ -39,3 +41,5 @@ target. Neither that branch nor its capabilities are prerequisites for reviewing
 
 A future feature needs an active plan before implementation. Historical requirements do not expand
 the current contracts, even when an older document calls them required or implemented.
+
+[review]: https://github.com/connortsui20/optic/blob/main/docs/review.md
