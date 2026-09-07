@@ -1,7 +1,8 @@
 //! Identifies the source definition behind a concrete compiler instance.
 //!
 //! [`DefinitionRecord`] keeps rustc's owning crate and canonical definition path without adding
-//! source lookup data. Captured source belongs to a later evidence channel.
+//! source lookup data. [`InstanceRecord::source`](crate::InstanceRecord::source) associates each
+//! concrete instance with its captured source or an explicit unavailability reason.
 
 use serde::Deserialize;
 use serde::Serialize;

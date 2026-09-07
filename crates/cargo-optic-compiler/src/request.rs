@@ -19,13 +19,10 @@ use snafu::Snafu;
 pub enum CargoTarget {
     /// Selects the package's library-like target.
     Library,
-
     /// Selects a binary by its Cargo metadata name.
     Binary(String),
-
     /// Selects an example by its Cargo metadata name.
     Example(String),
-
     /// Selects a benchmark by its Cargo metadata name.
     Benchmark(String),
 }

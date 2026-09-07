@@ -22,11 +22,15 @@ use crate::error::JsonSnafu;
 use crate::error::RecordTooLargeSnafu;
 use crate::error::UnexpectedFileTypeSnafu;
 
+/// Validates the file type and metadata before reading the actual bytes.
+///
+/// The limit follows the lookahead requirement of [`read_bounded_record`].
 pub(crate) fn read_record<T: DeserializeOwned>(path: &Path, limit: u64) -> Result<T, Error> {
     let metadata = fs::symlink_metadata(path).with_context(|_| FilesystemSnafu {
         operation: "open",
         path: path.to_owned(),
     })?;
+
     if !metadata.is_file() {
         return UnexpectedFileTypeSnafu {
             expected: "file",
@@ -34,6 +38,7 @@ pub(crate) fn read_record<T: DeserializeOwned>(path: &Path, limit: u64) -> Resul
         }
         .fail();
     }
+
     if metadata.len() > limit {
         return RecordTooLargeSnafu {
             path: path.to_owned(),
@@ -47,10 +52,14 @@ pub(crate) fn read_record<T: DeserializeOwned>(path: &Path, limit: u64) -> Resul
         operation: "open",
         path: path.to_owned(),
     })?;
+
     read_bounded_record(file, path, limit)
 }
 
-// The separate reader boundary also covers files that grow after the metadata check.
+/// Reads at most one byte beyond the record budget before deserialization.
+///
+/// The extra byte detects files that grow after a metadata check. The limit **must** be less than
+/// [`u64::MAX`] so this lookahead length remains representable.
 pub(crate) fn read_bounded_record<T: DeserializeOwned>(
     reader: impl Read,
     path: &Path,
@@ -64,6 +73,7 @@ pub(crate) fn read_bounded_record<T: DeserializeOwned>(
             operation: "read",
             path: path.to_owned(),
         })?;
+
     if bytes.len() as u64 > limit {
         return RecordTooLargeSnafu {
             path: path.to_owned(),
@@ -78,6 +88,10 @@ pub(crate) fn read_bounded_record<T: DeserializeOwned>(
     })
 }
 
+/// Writes one new record whose encoded bytes and final newline fit within the budget.
+///
+/// The limit **must** be less than [`u64::MAX`] so an oversized result can report `limit + 1`.
+/// Failed writes can leave a partial file, which remains private to the caller's staging directory.
 pub(crate) fn write_record<T: Serialize>(path: &Path, record: &T, limit: u64) -> Result<(), Error> {
     let file = OpenOptions::new()
         .write(true)
@@ -93,6 +107,7 @@ pub(crate) fn write_record<T: Serialize>(path: &Path, record: &T, limit: u64) ->
         exceeded: false,
     };
     let encoded = serde_json::to_writer(&mut writer, record);
+
     if writer.exceeded {
         return RecordTooLargeSnafu {
             path: path.to_owned(),
@@ -101,9 +116,11 @@ pub(crate) fn write_record<T: Serialize>(path: &Path, record: &T, limit: u64) ->
         }
         .fail();
     }
+
     encoded.with_context(|_| JsonSnafu {
         path: path.to_owned(),
     })?;
+
     if writer.remaining == 0 {
         return RecordTooLargeSnafu {
             path: path.to_owned(),
@@ -112,6 +129,7 @@ pub(crate) fn write_record<T: Serialize>(path: &Path, record: &T, limit: u64) ->
         }
         .fail();
     }
+
     writer.write_all(b"\n").with_context(|_| FilesystemSnafu {
         operation: "write",
         path: path.to_owned(),
@@ -126,7 +144,9 @@ pub(crate) fn write_record<T: Serialize>(path: &Path, record: &T, limit: u64) ->
 /// Stops the serializer before it writes more encoded bytes than a reader accepts.
 struct BoundedWriter {
     inner: BufWriter<File>,
+    /// The budget not yet accepted by the buffered writer, including the final newline.
     remaining: u64,
+    /// Preserves a size failure when the serializer wraps the I/O error in a JSON error.
     exceeded: bool,
 }
 
@@ -134,6 +154,7 @@ impl Write for BoundedWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         if bytes.len() as u64 > self.remaining {
             self.exceeded = true;
+
             return Err(io::Error::other("encoded record exceeds its byte limit"));
         }
 

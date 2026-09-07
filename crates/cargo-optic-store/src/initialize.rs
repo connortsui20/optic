@@ -36,6 +36,7 @@ impl Store {
             .expect("Store::new places the store beneath .optic");
         create_directory(optic)?;
         let ignore = optic.join(".gitignore");
+
         match fs::symlink_metadata(&ignore) {
             Ok(metadata) => {
                 if !metadata.is_file() {
@@ -45,6 +46,7 @@ impl Store {
                     }
                     .fail();
                 }
+
                 if metadata.len() != 2 {
                     return ConflictingIgnoreFileSnafu { path: ignore }.fail();
                 }
@@ -56,6 +58,7 @@ impl Store {
                         operation: "read",
                         path: ignore.clone(),
                     })?;
+
                 if bytes != b"*\n" {
                     return ConflictingIgnoreFileSnafu { path: ignore }.fail();
                 }
@@ -69,6 +72,7 @@ impl Store {
                         operation: "create",
                         path: ignore.clone(),
                     })?;
+
                 file.write_all(b"*\n").with_context(|_| FilesystemSnafu {
                     operation: "write",
                     path: ignore,
@@ -84,6 +88,7 @@ impl Store {
         }
 
         create_directory(&self.root)?;
+
         for name in ["staging", "captures", "candidates"] {
             create_directory(&self.root.join(name))?;
         }
@@ -97,6 +102,7 @@ impl Store {
             .root
             .parent()
             .expect("Store::new places the store beneath .optic");
+
         for path in [
             optic.to_owned(),
             self.root.clone(),

@@ -1,6 +1,7 @@
 //! Records complete optimized modules and their exact symbol definitions.
 //!
-//! A module owns its definitions. Direct aliases name symbols in that same module. Evidence queries
+//! Each regular module corresponds to a codegen unit reported by rustc's partition query. A module
+//! owns its definitions, and direct aliases name symbols in that same module. Evidence queries
 //! resolve alias chains and cycles without using display names or adding another row identity.
 
 use std::collections::HashSet;
@@ -72,7 +73,9 @@ impl LlvmDefinitionRecord {
         kind: LlvmDefinitionKind,
     ) -> Result<Self, Error> {
         let raw_symbol = raw_symbol.into();
+
         require_text("LLVM raw symbol", &raw_symbol)?;
+
         if let LlvmDefinitionKind::DirectAlias { target } = &kind {
             require_text("LLVM alias target", target)?;
         }
@@ -110,6 +113,7 @@ struct RawLlvmDefinitionRecord {
 
 impl TryFrom<RawLlvmDefinitionRecord> for LlvmDefinitionRecord {
     type Error = Error;
+
     fn try_from(raw: RawLlvmDefinitionRecord) -> Result<Self, Error> {
         Self::new(raw.raw_symbol, raw.range, raw.kind)
     }
@@ -138,10 +142,13 @@ impl LlvmModuleRecord {
         definitions: Vec<LlvmDefinitionRecord>,
     ) -> Result<Self, Error> {
         let compiler_module = compiler_module.into();
+
         require_text("LLVM compiler module", &compiler_module)?;
-        let mut symbols = HashSet::with_capacity(definitions.len());
+
+        let mut raw_symbols = HashSet::with_capacity(definitions.len());
+
         for definition in &definitions {
-            if !symbols.insert(definition.raw_symbol()) {
+            if !raw_symbols.insert(definition.raw_symbol()) {
                 return InvalidFieldSnafu {
                     field: "LLVM module symbols",
                     actual: format!("duplicate {}", definition.raw_symbol()),
@@ -163,7 +170,7 @@ impl LlvmModuleRecord {
         self.artifact
     }
 
-    /// Returns the regular CGU module identity supplied by the compiler.
+    /// Returns the regular codegen-unit module identity supplied by the compiler.
     pub fn compiler_module(&self) -> &str {
         &self.compiler_module
     }
@@ -190,6 +197,7 @@ struct RawLlvmModuleRecord {
 
 impl TryFrom<RawLlvmModuleRecord> for LlvmModuleRecord {
     type Error = Error;
+
     fn try_from(raw: RawLlvmModuleRecord) -> Result<Self, Error> {
         Self::new(
             raw.artifact,
@@ -216,14 +224,19 @@ pub enum LlvmCollection {
 pub enum UnsupportedLlvmConfiguration {
     /// The selected target uses incremental compilation.
     Incremental,
+
     /// The selected target uses cross-crate ThinLTO.
     CrossCrateThinLto,
+
     /// The selected target uses fat LTO.
     FatLto,
+
     /// The selected target delegates LTO to the linker plugin.
     LinkerPluginLto,
+
     /// The selected target uses another compiler backend.
     OtherBackend,
+
     /// The compiler release has no verified optimized-artifact stage mapping.
     UnverifiedCompiler,
 }

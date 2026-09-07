@@ -22,8 +22,8 @@ impl CargoArtifactRecord {
     ///
     /// # Errors
     ///
-    /// Returns an error for incomplete package or target identity, empty profile optimization level,
-    /// or source, manifest, and output paths that are not absolute and lexically normalized.
+    /// Returns an error for incomplete package or target identity, an empty optimization level, or
+    /// source, manifest, and output paths that are not absolute and lexically normalized.
     /// Empty features and output filenames are valid. Referenced files need not still exist.
     pub fn new(mut artifact: Artifact) -> Result<Self, Error> {
         require_text("Cargo artifact package ID", &artifact.package_id.repr)?;
@@ -32,6 +32,7 @@ impl CargoArtifactRecord {
             "Cargo artifact optimization level",
             &artifact.profile.opt_level,
         )?;
+
         if artifact.target.kind.is_empty() || artifact.target.crate_types.is_empty() {
             return InvalidFieldSnafu {
                 field: "Cargo artifact target identity",
@@ -43,9 +44,11 @@ impl CargoArtifactRecord {
         for kind in &artifact.target.kind {
             require_text("Cargo artifact target kind", &kind.to_string())?;
         }
+
         for kind in &artifact.target.crate_types {
             require_text("Cargo artifact crate type", &kind.to_string())?;
         }
+
         for feature in artifact
             .features
             .iter()
@@ -62,6 +65,7 @@ impl CargoArtifactRecord {
             "Cargo artifact source path",
             artifact.target.src_path.as_std_path(),
         )?;
+
         for path in artifact.filenames.iter().chain(artifact.executable.iter()) {
             require_absolute_normalized_path("Cargo artifact output path", path.as_std_path())?;
         }

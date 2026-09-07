@@ -15,10 +15,19 @@ use tempfile::TempDir;
 
 /// A copied fixture whose files remain alive until the test finishes.
 pub struct TestWorkspace {
+    /// Owns the fixture and all child-process directories until the scenario finishes.
     root: TempDir,
+
+    /// The absolute installed Cargo executable, resolved before child-process isolation.
     cargo: PathBuf,
+
+    /// The installed toolchain root used for compiler binaries and shared libraries.
     toolchain: PathBuf,
+
+    /// The canonical rustup home, retained for child commands without automatic installation.
     rustup_home: PathBuf,
+
+    /// The toolchain's binary directory and fixed system paths, retained for every child command.
     path: OsString,
 }
 
@@ -26,12 +35,14 @@ impl TestWorkspace {
     /// Copies a bundled fixture name or an absolute fixture directory into a private workspace.
     ///
     /// Resolves the active rustup toolchain before isolation. Panics if the fixture or installed
-    /// toolchain cannot be read. Fixtures must contain only ordinary files and directories.
+    /// toolchain cannot be read. Fixtures **must** contain only ordinary files and directories.
+    #[track_caller]
     pub fn new(fixture: impl AsRef<Path>) -> Self {
         let mut resolve = Command::new("rustup");
         resolve.args(["which", "cargo"]);
         let output = run(&mut resolve);
         assert_success(&resolve, &output);
+
         let cargo = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
         let toolchain = cargo.parent().unwrap().parent().unwrap().to_owned();
         let rustup_home = env::var_os("RUSTUP_HOME")
@@ -49,6 +60,7 @@ impl TestWorkspace {
             PathBuf::from("/sbin"),
         ])
         .unwrap();
+
         let root = tempfile::Builder::new()
             .prefix("optic-test-")
             .tempdir_in(fs::canonicalize(env::temp_dir()).unwrap())
@@ -111,7 +123,7 @@ impl TestWorkspace {
 
     /// Clears the child environment and applies the fixture paths and installed toolchain.
     ///
-    /// Tests must apply scenario-specific environment changes after this call. The parent process
+    /// Tests **must** apply scenario-specific environment changes after this call. The parent
     /// environment remains unchanged. Child Cargo commands operate offline without automatic rustup
     /// installation, developer Cargo configuration, compiler overrides, or inherited wrappers.
     pub fn apply(&self, command: &mut Command) {
@@ -146,6 +158,8 @@ impl TestWorkspace {
     }
 }
 
+/// Copies ordinary fixture entries recursively and rejects symlinks instead of following them.
+#[track_caller]
 fn copy_fixture(source: &Path, destination: &Path) {
     for entry in fs::read_dir(source).unwrap() {
         let entry = entry.unwrap();

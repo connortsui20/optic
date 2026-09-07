@@ -51,9 +51,17 @@ fn rejects_oversized_durable_files_before_json_decoding() {
         let error = store
             .read_candidate(capture.analysis().request_key())
             .unwrap_err();
-        assert!(
-            matches!(error, Error::RecordTooLarge { limit: actual_limit, actual, .. } if actual_limit == limit && actual == limit + 1)
-        );
+        let Error::RecordTooLarge {
+            limit: actual_limit,
+            actual,
+            ..
+        } = error
+        else {
+            panic!("the oversized fixture must return a size error, got {error}");
+        };
+
+        assert_eq!(actual_limit, limit);
+        assert_eq!(actual, limit + 1);
         if file != "pointer" {
             assert!(matches!(
                 store.read_instances(capture.id()),

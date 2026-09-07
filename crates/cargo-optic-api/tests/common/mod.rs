@@ -2,6 +2,8 @@
 //!
 //! The parent retains each fixture until the exact child test exits. API calls inherit only the
 //! environment that the shared workspace applies before startup.
+//!
+//! This directory keeps shared support out of Cargo's integration test executable discovery.
 
 use std::env;
 use std::path::Path;
@@ -13,6 +15,7 @@ use cargo_optic_test_support::assert_success;
 use cargo_optic_test_support::run;
 
 /// Returns the workspace in the child, or runs the child and returns nothing in the parent.
+#[track_caller]
 pub fn workspace_in_child(test: &str, fixture: impl AsRef<Path>) -> Option<PathBuf> {
     if env::var("OPTIC_TEST_CHILD").as_deref() == Ok(test) {
         return Some(env::current_dir().unwrap());
@@ -24,6 +27,7 @@ pub fn workspace_in_child(test: &str, fixture: impl AsRef<Path>) -> Option<PathB
     command
         .args(["--exact", test, "--nocapture"])
         .env("OPTIC_TEST_CHILD", test);
+
     let output = run(&mut command);
     assert_success(&command, &output);
 

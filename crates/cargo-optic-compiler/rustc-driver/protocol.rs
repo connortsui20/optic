@@ -5,8 +5,10 @@
 //! ```text
 //! magic, version, selected-marker string, configuration, (placement | source-file | module)*, end
 //! configuration = kind, backend string, target string, optimization string, lto u32,
-//!                 incremental u32, linker-plugin u32, configured-cgus u32, recipe u32, unsupported u32
-//! placement = kind, four instance strings, three placement strings, local-copy u32, size u64, source
+//!                 incremental u32, linker-plugin u32, configured-cgus u32, recipe u32,
+//!                 unsupported u32
+//! placement = kind, four instance strings, three placement strings, local-copy u32, size u64,
+//!             source
 //! source = availability u32, [artifact u64, start u64, length u64, display-path string, line u64]
 //! source-file = kind, artifact u64, byte-length u64
 //! module = kind, compiler-module string, expected-bitcode-path string
@@ -16,10 +18,15 @@
 //! Booleans use zero or one. The named source-availability, LTO, and LLVM-support constants define
 //! the other field codes. Only [`SOURCE_AVAILABLE`] includes the bracketed source fields.
 //!
-//! Source files use `artifact-<16-lowercase-hex-id>` in the attempt directory. Module paths come
-//! from rustc's output naming API and must name immediate files in the attempt's `llvm` directory.
-//! The parent converts every expected module with the matching sysroot's disassembler. No module
-//! record is valid for an unsupported configuration. File and module identities must be unique.
+//! Source-file IDs start at zero and increase by one for each new canonical source path, in
+//! first-capture order. Each ID is a little-endian `u64`, unique only within its attempt. Source
+//! files use `artifact-<16-lowercase-hex-id>` in that directory. [`PROTOCOL_VERSION`] covers this
+//! ID encoding and the record layout independently of durable capture IDs.
+//!
+//! Module paths come from rustc's output naming API and must name immediate files in the attempt's
+//! `llvm` directory. The parent converts every expected module with the matching sysroot's
+//! disassembler. No module record is valid for an unsupported configuration. File and module
+//! identities must be unique.
 //!
 //! This protocol is private because both ends ship in the same Cargo Optic binary. Its version is
 //! independent of the durable capture format. A stale receipt contains only the header. Its marker
@@ -104,14 +111,19 @@ pub(crate) const MARKER_PREFIX: &str = "--cfg=cargo_optic_selected_target=";
 pub(crate) const DRIVER_KEY_ARGUMENT: &str = "--optic-driver-key";
 
 /// Encodes the common header without an end record or placement payload.
+///
+/// The marker **must** be the collector's fixed-length selected-target argument. A marker longer
+/// than the protocol's `u32` string-length field causes a panic.
 pub(crate) fn header(marker: &str) -> Vec<u8> {
     let mut bytes = MANIFEST_MAGIC.to_vec();
     bytes.extend(PROTOCOL_VERSION.to_le_bytes());
+
     bytes.extend(
         u32::try_from(marker.len())
-            .expect("the marker contains one fixed-length token")
+            .expect("the collector builds the marker from one fixed-length analysis token")
             .to_le_bytes(),
     );
+
     bytes.extend(marker.as_bytes());
 
     bytes

@@ -4,9 +4,9 @@
 //! enter [`wrapper::run`] and are replaced by the original rustc process without inspection. The
 //! selected probe writes a stale receipt and exits before rustc analysis. A selected collection
 //! contains a private marker argument. The wrapper removes that marker and starts this executable
-//! again with [`protocol::DRIVER_INNER_ENV`] set. The second invocation
-//! enters [`analysis::run`] and drives rustc. Its private manifest contains monomorphized functions,
-//! normalized source relationships, effective codegen configuration, and expected optimized modules.
+//! again with [`protocol::DRIVER_INNER_ENV`] set. The second invocation enters [`analysis::run`]
+//! and drives rustc. Its private manifest contains monomorphized functions, normalized source
+//! relationships, effective codegen configuration, and expected optimized modules.
 //!
 //! This two-stage entry point keeps Cargo's wrapper calling convention out of the rustc callback.
 //! The process boundary also lets ordinary compiler invocations use `exec`, so the wrapper does not

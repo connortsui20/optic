@@ -16,11 +16,13 @@ use std::process::Stdio;
 use cargo_metadata::Message;
 use cargo_metadata::PackageId;
 use cargo_metadata::Target;
+use cargo_metadata::diagnostic::Diagnostic;
 use cargo_metadata::diagnostic::DiagnosticLevel;
 
 use crate::Error;
 use crate::observation::CargoObservation;
 
+/// Owns one Cargo result and the evidence and diagnostics needed to classify it.
 pub(crate) struct CargoAttempt {
     /// Owns the stderr file, manifest, and stale receipt until the attempt is no longer needed.
     temporary: tempfile::TempDir,
@@ -49,6 +51,7 @@ impl CargoAttempt {
             .stdin(Stdio::inherit())
             .stdout(Stdio::piped())
             .stderr(stderr);
+
         let program = command.get_program().to_owned();
         let mut child = command.spawn().map_err(|source| Error::StartProcess {
             program: program.clone().into(),
@@ -69,23 +72,12 @@ impl CargoAttempt {
                     observation.record(artifact, package, target)
                 }
                 Ok(Message::BuildFinished(finished)) => observation.finished.push(finished.success),
-                Ok(Message::CompilerMessage(message)) => {
-                    let diagnostic = message.message;
-                    let rendered = diagnostic
-                        .rendered
-                        .unwrap_or_else(|| format!("{}\n", diagnostic.message));
-                    if diagnostic.level == DiagnosticLevel::Warning {
-                        warnings.push(rendered);
-                    } else {
-                        observation.has_errors |= matches!(
-                            diagnostic.level,
-                            DiagnosticLevel::Error
-                                | DiagnosticLevel::Ice
-                                | DiagnosticLevel::FailureNote
-                        );
-                        diagnostics.push(rendered);
-                    }
-                }
+                Ok(Message::CompilerMessage(message)) => record_diagnostic(
+                    message.message,
+                    &mut observation,
+                    &mut diagnostics,
+                    &mut warnings,
+                ),
                 Ok(Message::TextLine(line)) if !line.is_empty() => {
                     diagnostics.push(format!("{line}\n"))
                 }
@@ -108,6 +100,7 @@ impl CargoAttempt {
             diagnostics,
             warnings,
         };
+
         if let Some(source) = read_error {
             attempt.replay()?;
 
@@ -134,6 +127,7 @@ impl CargoAttempt {
         for warning in &self.warnings {
             write_diagnostic(warning.as_bytes())?;
         }
+
         self.warnings.clear();
 
         Ok(())
@@ -141,9 +135,11 @@ impl CargoAttempt {
 
     pub(crate) fn replay(&mut self) -> Result<(), Error> {
         self.relay_warnings()?;
+
         for diagnostic in &self.diagnostics {
             write_diagnostic(diagnostic.as_bytes())?;
         }
+
         let path = self.path("stderr");
         let mut file = File::open(&path).map_err(|source| Error::Filesystem {
             operation: "open Cargo diagnostic file",
@@ -166,6 +162,30 @@ impl CargoAttempt {
             diagnostics: None,
         }
     }
+}
+
+/// Separates warnings so stopped probes can relay them without replaying other diagnostics.
+fn record_diagnostic(
+    diagnostic: Diagnostic,
+    observation: &mut CargoObservation,
+    diagnostics: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) {
+    let rendered = diagnostic
+        .rendered
+        .unwrap_or_else(|| format!("{}\n", diagnostic.message));
+
+    if diagnostic.level == DiagnosticLevel::Warning {
+        warnings.push(rendered);
+
+        return;
+    }
+
+    observation.has_errors |= matches!(
+        diagnostic.level,
+        DiagnosticLevel::Error | DiagnosticLevel::Ice | DiagnosticLevel::FailureNote
+    );
+    diagnostics.push(rendered);
 }
 
 fn write_diagnostic(bytes: &[u8]) -> Result<(), Error> {

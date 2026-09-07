@@ -14,8 +14,6 @@ use crate::Error;
 use crate::error::InvalidCaptureIdSnafu;
 use crate::reverse_hex;
 
-const TEXT_LENGTH: usize = 32;
-
 /// An opaque, immutable identifier for all evidence from one capture.
 ///
 /// [`CaptureId::generate`] encodes a random 128-bit version 4 UUID as 32 reverse-hexadecimal
@@ -26,6 +24,8 @@ const TEXT_LENGTH: usize = 32;
 pub struct CaptureId(String);
 
 impl CaptureId {
+    const TEXT_LENGTH: usize = 32;
+
     /// Generates a new capture identifier.
     pub fn generate() -> Self {
         Self(reverse_hex::encode(uuid::Uuid::new_v4().as_bytes()))
@@ -47,7 +47,8 @@ impl FromStr for CaptureId {
     type Err = Error;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let valid = value.len() == TEXT_LENGTH && reverse_hex::is_canonical(value);
+        let valid = value.len() == Self::TEXT_LENGTH && reverse_hex::is_canonical(value);
+
         if !valid {
             return InvalidCaptureIdSnafu {
                 value: value.to_owned(),
@@ -100,9 +101,9 @@ mod tests {
     #[test]
     fn rejects_each_noncanonical_text_shape() {
         for value in [
-            "zyxw",                                 // Too short.
-            "zyxwvutsrqponmlkzyxwvutsrqponmlj",     // Digit outside `k` through `z`.
-            "cap_0123456789abcdef0123456789abcdef", // Different identifier grammar.
+            "zyxw",                                 // Reject a short identifier.
+            "zyxwvutsrqponmlkzyxwvutsrqponmlj",     // Reject a digit outside `k` through `z`.
+            "cap_0123456789abcdef0123456789abcdef", // Reject a different identifier grammar.
         ] {
             let error = value
                 .parse::<CaptureId>()

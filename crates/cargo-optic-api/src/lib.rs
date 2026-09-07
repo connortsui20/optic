@@ -55,7 +55,7 @@ use snafu::Snafu;
 
 /// Cargo Optic operations for one discovered workspace.
 ///
-/// The invocation directory, workspace root, and member paths must keep their locations for the
+/// The invocation directory, workspace root, and member paths **must** keep their locations for the
 /// lifetime of this value. Open a new value after moving the workspace.
 pub struct Optic {
     workspace: Workspace,
@@ -81,7 +81,8 @@ impl Optic {
     ///
     /// [`CapturePolicy::Fresh`] forces selected-target analysis without discarding compatible
     /// driver or dependency artifacts. [`CaptureOutcome::Reused`] preserves the original record's
-    /// ID and completion time. The caller must obey [`optic_capture::capture`]'s writer constraints.
+    /// ID and completion time. The caller **must** obey the writer constraints in
+    /// [`optic_capture::capture`].
     ///
     /// # Errors
     ///

@@ -19,6 +19,7 @@ use crate::protocol::PLACEMENT_RECORD;
 use crate::protocol::SELECTED_TARGET_MARKER_ENV;
 use crate::source::Source;
 
+/// The definition and symbol identity that rustc assigns to one monomorphized function.
 pub(crate) struct ConcreteInstance {
     /// The crate that owns the generic or nongeneric function definition.
     pub(crate) definition_crate: String,
@@ -30,27 +31,42 @@ pub(crate) struct ConcreteInstance {
     pub(crate) raw_symbol: String,
 }
 
+/// One codegen unit's copy of a concrete function, as assigned by rustc's mono-item collector.
 pub(crate) struct Placement {
     /// The codegen unit that contains this copy of the instance.
     pub(crate) codegen_unit: String,
+
     /// Rustc's linkage classification for this copy.
     pub(crate) linkage: &'static str,
+
     /// Rustc's symbol visibility for this copy.
     pub(crate) visibility: &'static str,
+
     /// Whether rustc placed this copy in the codegen unit for local use.
     pub(crate) local_copy: bool,
+
     /// Rustc's pre-codegen estimate of this copy's size.
     pub(crate) size_estimate: usize,
 }
 
+/// Writes an attempt's private manifest and publishes it only when [`Self::finish`] succeeds.
+///
+/// The caller **must** follow the record order and identity requirements in [`crate::protocol`].
+/// The reader rejects invalid records after publication. Dropping an unfinished writer leaves
+/// its output at the temporary path.
 pub(crate) struct ManifestWriter {
+    /// The final manifest path, made visible only after the end record is flushed.
     path: PathBuf,
+    /// A sibling `.tmp` file used for all writes before publication.
     temporary_path: PathBuf,
     file: BufWriter<File>,
 }
 
 impl ManifestWriter {
     /// Creates an incomplete manifest and writes its format header.
+    ///
+    /// The path **must** name a file in the private attempt directory. The collector supplies the
+    /// selected-target marker through [`SELECTED_TARGET_MARKER_ENV`].
     pub(crate) fn create(path: &Path) -> io::Result<Self> {
         let temporary_path = path.with_extension("tmp");
         let file = BufWriter::new(File::create(&temporary_path)?);
@@ -59,6 +75,7 @@ impl ManifestWriter {
             temporary_path,
             file,
         };
+
         let marker = std::env::var(SELECTED_TARGET_MARKER_ENV)
             .map_err(|error| invalid_data(error.to_string()))?;
         writer.write_bytes(&crate::protocol::header(&marker))?;
@@ -84,30 +101,34 @@ impl ManifestWriter {
         self.write_string(placement.linkage)?;
         self.write_string(placement.visibility)?;
         self.write_u32(u32::from(placement.local_copy))?;
-        self.write_u64(u64::try_from(placement.size_estimate).map_err(|_| {
+        let size_estimate = u64::try_from(placement.size_estimate).map_err(|_| {
             invalid_data(format!(
                 "placement size estimate must fit in u64, got {}",
                 placement.size_estimate
             ))
-        })?)?;
-        if let Source::Available(span) = source {
-            self.write_u32(crate::protocol::SOURCE_AVAILABLE)?;
-            self.write_u64(span.artifact)?;
-            self.write_u64(span.start)?;
-            self.write_u64(span.length)?;
-            self.write_string(
-                span.display_path
+        })?;
+        self.write_u64(size_estimate)?;
+
+        match source {
+            Source::Available(span) => {
+                self.write_u32(crate::protocol::SOURCE_AVAILABLE)?;
+                self.write_u64(span.artifact)?;
+                self.write_u64(span.start)?;
+                self.write_u64(span.length)?;
+                let display_path = span
+                    .display_path
                     .to_str()
-                    .ok_or_else(|| invalid_data("source display path must be UTF-8"))?,
-            )?;
-            self.write_u64(span.starting_line)?;
-        } else if let Source::Unavailable(reason) = source {
-            self.write_u32(*reason)?;
+                    .ok_or_else(|| invalid_data("source display path must be UTF-8"))?;
+                self.write_string(display_path)?;
+                self.write_u64(span.starting_line)?;
+            }
+            Source::Unavailable(reason) => self.write_u32(*reason)?,
         }
 
         Ok(())
     }
 
+    /// Writes the single effective configuration before any source, module, or placement record.
     pub(crate) fn write_configuration(&mut self, configuration: &Configuration) -> io::Result<()> {
         self.write_u32(crate::protocol::CONFIGURATION_RECORD)?;
         self.write_string(&configuration.backend)?;
@@ -118,22 +139,33 @@ impl ManifestWriter {
         self.write_u32(u32::from(configuration.linker_plugin))?;
         self.write_u32(configuration.codegen_units)?;
         self.write_u32(crate::protocol::LLVM_RECIPE_REVISION)?;
+
         self.write_u32(configuration.unsupported)
     }
 
+    /// Declares an already-written snapshot with its attempt-local ID and normalized byte length.
+    ///
+    /// The ID **must** be unique within this manifest. The snapshot can be empty.
     pub(crate) fn write_source_file(&mut self, id: u64, length: u64) -> io::Result<()> {
         self.write_u32(crate::protocol::SOURCE_FILE_RECORD)?;
         self.write_u64(id)?;
+
         self.write_u64(length)
     }
 
+    /// Records the bitcode file that a regular codegen unit will produce after compilation.
+    ///
+    /// The name **must** be unique, and the path **must** come from rustc's output naming API.
+    /// Unsupported configurations cannot include module records.
     pub(crate) fn write_module(&mut self, name: &str, path: &Path) -> io::Result<()> {
         self.write_u32(crate::protocol::MODULE_RECORD)?;
         self.write_string(name)?;
-        self.write_string(
-            path.to_str()
-                .ok_or_else(|| invalid_data("bitcode path must be UTF-8"))?,
-        )
+
+        let path = path
+            .to_str()
+            .ok_or_else(|| invalid_data("bitcode path must be UTF-8"))?;
+
+        self.write_string(path)
     }
 
     /// Completes the stream and makes the final manifest path visible to the parent process.
@@ -141,6 +173,7 @@ impl ManifestWriter {
         self.write_u32(END_RECORD)?;
         self.file.flush()?;
         drop(self.file);
+
         fs::rename(self.temporary_path, self.path)
     }
 
@@ -152,6 +185,7 @@ impl ManifestWriter {
             ))
         })?;
         self.write_u32(length)?;
+
         self.write_bytes(value.as_bytes())
     }
 
@@ -168,6 +202,7 @@ impl ManifestWriter {
     }
 }
 
+/// Reports a value that the private manifest format cannot encode.
 fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }

@@ -34,7 +34,8 @@ pub enum Error {
     },
     /// An exact direct-alias chain revisited a symbol in the same module.
     #[snafu(display(
-        "LLVM alias chain for {reference} in module {compiler_module:?} must be acyclic, got repeated symbol {raw_symbol:?}"
+        "LLVM alias chain for {reference} in module {compiler_module:?} must be acyclic, \
+         got repeated symbol {raw_symbol:?}"
     ))]
     AliasCycle {
         /// The instance whose raw symbol started the chain.

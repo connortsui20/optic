@@ -98,7 +98,7 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Returns an error if the manifest or header is missing, invalid, or scoped to another capture.
+    /// Returns an error for a missing, invalid, or differently scoped manifest or header.
     /// Missing artifacts, nonregular files, symlinks, and mismatched file lengths are errors.
     pub fn read_instances(&self, id: &CaptureId) -> Result<InstanceManifest, Error> {
         let directory = self.capture_directory(id)?;
@@ -117,6 +117,7 @@ impl Store {
         }
 
         let directory = self.root.join("captures").join(id.as_str());
+
         match fs::symlink_metadata(&directory) {
             Ok(metadata) if metadata.is_dir() => {}
             Ok(_) => return ExpectedCaptureDirectorySnafu { path: directory }.fail(),
@@ -153,6 +154,7 @@ fn require_instances_file(directory: &Path) -> Result<PathBuf, Error> {
         operation: "read metadata for",
         path: path.clone(),
     })?;
+
     if !metadata.is_file() {
         return ExpectedInstanceFileSnafu { path }.fail();
     }
@@ -166,6 +168,7 @@ fn capture_id_from_entry(entry: &fs::DirEntry) -> Result<CaptureId, Error> {
         operation: "read metadata for",
         path: entry_path.clone(),
     })?;
+
     if !file_type.is_dir() {
         return ExpectedCaptureDirectorySnafu { path: entry_path }.fail();
     }

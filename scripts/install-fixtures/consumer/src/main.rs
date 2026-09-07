@@ -33,13 +33,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         10,
     )?;
     assert_eq!(found.instances().len(), 1);
+
     let instance = &found.instances()[0];
     assert_eq!(instance.reference().capture_id(), original.id());
+
     let parsed = instance
         .reference()
         .to_string()
         .parse::<optic::InstanceRef>()?;
     assert_eq!(&parsed, instance.reference());
+
     let exact = optic.find(original.id(), instance.record().raw_symbol(), 10)?;
     assert_eq!(exact.instances()[0].reference(), instance.reference());
 
@@ -55,59 +58,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     else {
         panic!("the local fixture function must have captured source");
     };
-    let source = copy(&optic, &original_source)?;
+
+    let source = read_evidence(&optic, &original_source)?;
     assert_eq!(source, b"pub fn captured_value() -> u64 {\n    42\n}");
-    let llvm = exact_llvm(&optic, instance)?;
+    let llvm = read_exact_llvm(&optic, instance)?;
 
     let path = workspace.join("src/lib.rs");
     let edited = fs::read_to_string(&path)?.replace("    42", "    12345");
     fs::write(path, edited)?;
-    assert_eq!(copy(&optic, &original_source)?, source);
-    assert_eq!(exact_llvm(&optic, instance)?, llvm);
+    assert_eq!(read_evidence(&optic, &original_source)?, source);
+    assert_eq!(read_exact_llvm(&optic, instance)?, llvm);
 
     let changed = optic.capture(&request, CapturePolicy::Reuse)?;
     assert!(matches!(changed, CaptureOutcome::Captured(_)));
     assert_ne!(changed.record().id(), original.id());
+
     let changed_found = optic.find(changed.record().id(), "captured_value", 10)?;
     assert_eq!(changed_found.instances().len(), 1);
+
     let SourceEvidence::Available { evidence, .. } =
         optic.source(changed_found.instances()[0].reference())?
     else {
         panic!("the edited function must have captured source");
     };
+
     assert_eq!(
-        copy(&optic, &evidence)?,
+        read_evidence(&optic, &evidence)?,
         b"pub fn captured_value() -> u64 {\n    12345\n}"
     );
-    assert_ne!(exact_llvm(&optic, &changed_found.instances()[0])?, llvm);
-    assert_eq!(copy(&optic, &original_source)?, source);
-    assert_eq!(exact_llvm(&optic, instance)?, llvm);
+    assert_ne!(
+        read_exact_llvm(&optic, &changed_found.instances()[0])?,
+        llvm
+    );
+    assert_eq!(read_evidence(&optic, &original_source)?, source);
+    assert_eq!(read_exact_llvm(&optic, instance)?, llvm);
 
     let fresh = optic.capture(&request, CapturePolicy::Fresh)?;
     assert!(matches!(fresh, CaptureOutcome::Captured(_)));
     assert_ne!(fresh.record().id(), changed.record().id());
     assert_ne!(fresh.record().id(), original.id());
+
     let reused = optic.capture(&request, CapturePolicy::Reuse)?;
     assert!(matches!(reused, CaptureOutcome::Reused(_)));
     assert_eq!(reused.record(), fresh.record());
     assert_eq!(optic.list_captures()?.len(), 3);
+
     println!("Packaged API journey passed: {}", fresh.record().id());
 
     Ok(())
 }
 
-fn copy(optic: &Optic, evidence: &EvidenceRange) -> Result<Vec<u8>, optic::Error> {
+fn read_evidence(optic: &Optic, evidence: &EvidenceRange) -> Result<Vec<u8>, optic::Error> {
     let mut bytes = Vec::new();
     optic.copy_evidence(evidence, &mut bytes)?;
 
     Ok(bytes)
 }
 
+/// Reads emitted bodies after checking their capture, symbol, and textual definition.
 #[track_caller]
-fn exact_llvm(optic: &Optic, instance: &FoundInstance) -> Result<Vec<Vec<u8>>, optic::Error> {
+fn read_exact_llvm(optic: &Optic, instance: &FoundInstance) -> Result<Vec<Vec<u8>>, optic::Error> {
     let LlvmEvidence::Available(bodies) = optic.llvm(instance.reference())? else {
         panic!("the release fixture must have exact LLVM bodies");
     };
+
     assert!(!bodies.is_empty());
     let mut result = Vec::new();
 
@@ -118,10 +132,12 @@ fn exact_llvm(optic: &Optic, instance: &FoundInstance) -> Result<Vec<Vec<u8>>, o
         );
         assert_eq!(body.raw_symbol(), instance.record().raw_symbol());
         assert!(body.aliases().is_empty());
-        let bytes = copy(optic, body.evidence())?;
-        let text = std::str::from_utf8(&bytes).expect("llvm-dis output must be UTF-8");
+
+        let bytes = read_evidence(optic, body.evidence())?;
+        let text = std::str::from_utf8(&bytes).expect("LLVM evidence from llvm-dis must be UTF-8");
         assert!(text.starts_with("define "));
         assert!(text.contains(&format!("@{}(", body.raw_symbol())));
+
         result.push(bytes);
     }
 

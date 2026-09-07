@@ -30,6 +30,10 @@ pub struct CollectedBuild {
 }
 
 impl CollectedBuild {
+    /// Keeps validated evidence together with the directory that owns its artifact files.
+    ///
+    /// The evidence must come from collection in this exact temporary directory. A different
+    /// directory can select unrelated files or make later publication fail.
     pub(crate) fn new(
         build: BuildRecord,
         compiler: CompilerIdentity,

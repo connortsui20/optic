@@ -24,7 +24,7 @@ use std::path::PathBuf;
 const CAPTURE_FILE_NAME: &str = "capture.json";
 const INSTANCES_FILE_NAME: &str = "instances.json";
 
-/// Maximum encoded capture header or candidate pointer length: 1 MiB, including trailing whitespace.
+/// Maximum encoded capture header or candidate pointer length: 1 MiB, including whitespace.
 ///
 /// This MVP resource budget applies to both readers and writers. It is not a compiler limit or a
 /// bound on total process memory. Changes require a fixture or workload that demonstrates the need.

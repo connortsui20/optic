@@ -55,6 +55,7 @@ impl BuildRecord {
         require_text("profile", &profile)?;
         require_path("Cargo program", &cargo_program)?;
         require_path("invocation directory", &invocation_directory)?;
+
         if !invocation_directory.is_absolute() {
             return InvalidFieldSnafu {
                 field: "invocation directory",

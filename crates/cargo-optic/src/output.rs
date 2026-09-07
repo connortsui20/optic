@@ -26,6 +26,9 @@ pub(crate) struct CaptureOutput<'a> {
 }
 
 impl<'a> CaptureOutput<'a> {
+    /// Formats the completion time before the capture is displayed.
+    ///
+    /// Returns an error if the recorded timestamp cannot use the required RFC 3339 representation.
     pub(crate) fn new(title: &'static str, capture: &'a CaptureRecord) -> Result<Self, Error> {
         let nanoseconds = i128::from(capture.completed_at_unix_ms()) * 1_000_000;
         let completed = OffsetDateTime::from_unix_timestamp_nanos(nanoseconds)
@@ -60,6 +63,7 @@ impl fmt::Display for CaptureOutput<'_> {
             target.kind(),
             target.name(),
         )?;
+
         writeln!(formatter, "  Profile    {}", build.profile())
     }
 }
@@ -71,6 +75,7 @@ pub(crate) struct InstanceOutput<'a> {
 }
 
 impl<'a> InstanceOutput<'a> {
+    /// Borrows one search result for command output.
     pub(crate) fn new(found: &'a FoundInstance) -> Self {
         Self { found }
     }

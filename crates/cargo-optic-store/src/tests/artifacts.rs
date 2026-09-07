@@ -26,6 +26,7 @@ use optic_records::SourceAvailability;
 use optic_records::SourceUnavailable;
 use optic_records::UnsupportedLlvmConfiguration;
 
+use super::PUBLICATION_BOUNDARIES;
 use super::manifest;
 use super::provenance;
 use super::publish_capture;
@@ -36,7 +37,9 @@ use crate::Error;
 use crate::INSTANCES_FILE_NAME;
 use crate::Store;
 use crate::artifacts::copy_evidence_bytes;
+use crate::publish::PublicationBoundary;
 
+/// Declares one source artifact with ID 7 and the selected byte length.
 fn artifact_manifest(id: &CaptureId, length: u64) -> InstanceManifest {
     InstanceManifest::new(
         id.clone(),
@@ -52,6 +55,35 @@ fn artifact_manifest(id: &CaptureId, length: u64) -> InstanceManifest {
     .unwrap()
 }
 
+/// The file layouts that fail validation against a declared three-byte artifact.
+#[derive(Clone, Copy, Debug)]
+enum ArtifactCorruption {
+    Missing,
+    Short,
+    Long,
+    Directory,
+}
+
+impl ArtifactCorruption {
+    const CASES: [Self; 4] = [
+        Self::Missing,   // The artifact is absent.
+        Self::Short,     // The artifact has two bytes instead of three.
+        Self::Long,      // The artifact has four bytes instead of three.
+        Self::Directory, // The artifact is a directory.
+    ];
+
+    /// Creates the corrupt fixture at a path that **must** be absent.
+    #[track_caller]
+    fn write(self, path: &Path) {
+        match self {
+            Self::Missing => {}
+            Self::Short => fs::write(path, b"ab").unwrap(),
+            Self::Long => fs::write(path, b"abcd").unwrap(),
+            Self::Directory => fs::create_dir(path).unwrap(),
+        }
+    }
+}
+
 /// A caller-owned writer that accepts a prefix and then reports its chosen I/O error.
 struct FailingWriter {
     accepted: Vec<u8>,
@@ -64,6 +96,7 @@ impl Write for FailingWriter {
         if self.accepted.len() == self.limit {
             return Err(io::Error::new(self.kind, "caller writer failure"));
         }
+
         let count = bytes.len().min(self.limit - self.accepted.len());
         self.accepted.extend_from_slice(&bytes[..count]);
 
@@ -195,7 +228,7 @@ fn missing_placement_modules_are_corruption_even_without_orphan_artifacts() {
 
 #[test]
 fn invalid_inputs_leave_previous_capture_and_candidate_intact() {
-    for corruption in ["missing", "short", "long", "directory"] {
+    for corruption in ArtifactCorruption::CASES {
         let temporary = tempfile::tempdir().unwrap();
         let inputs = tempfile::tempdir().unwrap();
         let store = Store::new(temporary.path()).unwrap();
@@ -204,13 +237,7 @@ fn invalid_inputs_leave_previous_capture_and_candidate_intact() {
         publish_capture(&store, &older);
         let evidence = artifact_manifest(newer.id(), 3);
         let path = inputs.path().join(evidence.artifacts()[0].file_name());
-        match corruption {
-            "missing" => {}
-            "short" => fs::write(path, b"ab").unwrap(),
-            "long" => fs::write(path, b"abcd").unwrap(),
-            "directory" => fs::create_dir(path).unwrap(),
-            _ => unreachable!("the case table names only four corruptions"),
-        }
+        corruption.write(&path);
 
         store.publish(&newer, &evidence, inputs.path()).unwrap_err();
         assert_eq!(
@@ -229,7 +256,7 @@ fn invalid_inputs_leave_previous_capture_and_candidate_intact() {
 
 #[test]
 fn corrupt_artifacts_are_errors_in_both_manifest_and_candidate_reads() {
-    for corruption in ["missing", "short", "long", "directory"] {
+    for corruption in ArtifactCorruption::CASES {
         let temporary = tempfile::tempdir().unwrap();
         let inputs = tempfile::tempdir().unwrap();
         let store = Store::new(temporary.path()).unwrap();
@@ -240,21 +267,18 @@ fn corrupt_artifacts_are_errors_in_both_manifest_and_candidate_reads() {
         store.publish(&capture, &evidence, inputs.path()).unwrap();
         let path = store.capture_directory(capture.id()).unwrap().join(name);
         fs::remove_file(&path).unwrap();
-        match corruption {
-            "missing" => {}
-            "short" => fs::write(path, b"ab").unwrap(),
-            "long" => fs::write(path, b"abcd").unwrap(),
-            "directory" => fs::create_dir(path).unwrap(),
-            _ => unreachable!("the case table names only four corruptions"),
-        }
+        corruption.write(&path);
 
         assert!(
             store
                 .read_candidate(capture.analysis().request_key())
                 .is_err(),
-            "{corruption}"
+            "{corruption:?}"
         );
-        assert!(store.read_instances(capture.id()).is_err(), "{corruption}");
+        assert!(
+            store.read_instances(capture.id()).is_err(),
+            "{corruption:?}"
+        );
         let mut output = Vec::new();
         assert!(
             store
@@ -287,9 +311,11 @@ fn validates_every_artifact_even_when_copying_another_one() {
         LlvmCollection::Collected(vec![]),
     )
     .unwrap();
+
     for artifact in evidence.artifacts() {
         fs::write(inputs.path().join(artifact.file_name()), b"abc").unwrap();
     }
+
     store.publish(&capture, &evidence, inputs.path()).unwrap();
     fs::remove_file(
         store
@@ -413,16 +439,7 @@ fn empty_artifacts_publish_and_copy_successfully() {
 
 #[test]
 fn publication_failures_preserve_old_artifacts_and_invalidate_only_after_pointer_replacement() {
-    use crate::publish::PublicationBoundary;
-
-    for boundary in [
-        PublicationBoundary::CaptureWrite,   // Header write.
-        PublicationBoundary::InstancesWrite, // Manifest write.
-        PublicationBoundary::ArtifactCopy,   // Artifact copy.
-        PublicationBoundary::PointerWrite,   // Pointer write.
-        PublicationBoundary::PointerReplace, // Pointer replacement.
-        PublicationBoundary::CaptureRename,  // Capture commit.
-    ] {
+    for boundary in PUBLICATION_BOUNDARIES {
         let temporary = tempfile::tempdir().unwrap();
         let inputs = tempfile::tempdir().unwrap();
         let mut store = Store::new(temporary.path()).unwrap();
@@ -508,9 +525,11 @@ fn detects_premature_eof_after_metadata_and_keeps_reader_error_context() {
         Path::new("stored-artifact"),
     )
     .unwrap_err();
-    assert!(
-        matches!(error, Error::Filesystem { source, .. } if source.kind() == io::ErrorKind::UnexpectedEof)
-    );
+    let Error::Filesystem { source, .. } = error else {
+        panic!("the truncated reader must return a filesystem error, got {error}");
+    };
+
+    assert_eq!(source.kind(), io::ErrorKind::UnexpectedEof);
     assert!(!output.is_empty());
     assert!(output.len() < input.len());
 
@@ -527,9 +546,11 @@ fn detects_premature_eof_after_metadata_and_keeps_reader_error_context() {
         Path::new("stored-artifact"),
     )
     .unwrap_err();
-    assert!(
-        matches!(error, Error::Filesystem { source, .. } if source.kind() == io::ErrorKind::BrokenPipe)
-    );
+    let Error::Filesystem { source, .. } = error else {
+        panic!("the broken reader must return a filesystem error, got {error}");
+    };
+
+    assert_eq!(source.kind(), io::ErrorKind::BrokenPipe);
 }
 
 #[cfg(unix)]
@@ -546,6 +567,7 @@ fn rejects_symlinked_input_directories_and_input_or_stored_artifacts() {
         fs::write(&input, b"abc").unwrap();
         let outside = temporary.path().join("outside");
         fs::write(&outside, b"abc").unwrap();
+
         match boundary {
             "input-directory" => {
                 let link = temporary.path().join("input-link");
@@ -586,6 +608,7 @@ fn rejects_symlinked_input_directories_and_input_or_stored_artifacts() {
             }
             _ => unreachable!("the case table names only three boundaries"),
         }
+
         assert_eq!(fs::read(outside).unwrap(), b"abc");
     }
 }

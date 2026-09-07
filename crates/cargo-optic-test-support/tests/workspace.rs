@@ -3,6 +3,7 @@
 //! The child builds offline with a private Cargo home and ignores hostile command overrides.
 
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 
 use cargo_optic_test_support::TestWorkspace;
@@ -24,6 +25,7 @@ fn builds_offline_in_private_directories() {
 
     let output = run(&mut command);
     assert_success(&command, &output);
+
     assert!(workspace.target().join("debug/generic").is_file());
     assert!(workspace.target().join("debug/feature-gated").is_file());
     assert!(workspace.build().join("debug/deps").is_dir());
@@ -36,7 +38,10 @@ fn builds_offline_in_private_directories() {
     let mut command = Command::new("rustc");
     workspace.apply(&mut command);
     command.args(["--print", "sysroot"]);
+
     let output = run(&mut command);
     assert_success(&command, &output);
-    assert!(std::path::Path::new(String::from_utf8(output.stdout).unwrap().trim()).is_absolute());
+    let sysroot = String::from_utf8(output.stdout).unwrap();
+
+    assert!(Path::new(sysroot.trim()).is_absolute());
 }

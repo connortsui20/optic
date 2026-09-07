@@ -57,7 +57,7 @@ impl CaptureOutcome {
 
 /// Reuses a Cargo-fresh capture or collects and publishes new evidence.
 ///
-/// The caller must serialize captures within the workspace and driver-cache provisioning within
+/// The caller **must** serialize captures within the workspace and driver-cache provisioning within
 /// its Cargo home. A reuse performs no durable writes. A failed new capture leaves previous
 /// completed captures readable, but never falls back to their evidence as the operation's result.
 ///

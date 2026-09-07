@@ -5,6 +5,7 @@
 
 use std::fs;
 
+use super::PUBLICATION_BOUNDARIES;
 use super::manifest;
 use super::publish_capture;
 use super::record;
@@ -14,14 +15,7 @@ use crate::publish::PublicationBoundary;
 
 #[test]
 fn each_precommit_failure_keeps_old_evidence_readable() {
-    for boundary in [
-        PublicationBoundary::CaptureWrite,   // First staged record write.
-        PublicationBoundary::InstancesWrite, // Second staged record write.
-        PublicationBoundary::ArtifactCopy,   // Declared artifact copying.
-        PublicationBoundary::PointerWrite,   // Staged pointer write.
-        PublicationBoundary::PointerReplace, // Pointer installation.
-        PublicationBoundary::CaptureRename,  // Final capture commit.
-    ] {
+    for boundary in PUBLICATION_BOUNDARIES {
         let temporary = tempfile::tempdir().unwrap();
         let mut store = Store::new(temporary.path()).unwrap();
         let older = record("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzy", 1_000);

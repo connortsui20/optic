@@ -165,36 +165,40 @@ fn rejects_present_corrupt_pointers_and_captures() {
 
 #[test]
 fn rejects_missing_truncated_and_nonregular_candidate_files() {
-    for file in [CAPTURE_FILE_NAME, INSTANCES_FILE_NAME, "pointer"] {
-        for corruption in ["missing", "truncated", "directory"] {
-            if file == "pointer" && corruption == "missing" {
-                continue;
-            }
+    for (file, corruption) in [
+        (CAPTURE_FILE_NAME, "missing"),     // The header is absent.
+        (CAPTURE_FILE_NAME, "truncated"),   // The header is truncated.
+        (CAPTURE_FILE_NAME, "directory"),   // The header is a directory.
+        (INSTANCES_FILE_NAME, "missing"),   // The manifest is absent.
+        (INSTANCES_FILE_NAME, "truncated"), // The manifest is truncated.
+        (INSTANCES_FILE_NAME, "directory"), // The manifest is a directory.
+        ("pointer", "truncated"),           // The pointer is truncated.
+        ("pointer", "directory"),           // The pointer is a directory.
+    ] {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::new(temporary.path()).unwrap();
+        let capture = record("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzy", 1_000);
+        publish_capture(&store, &capture);
+        let path = if file == "pointer" {
+            store.candidate_path(capture.analysis().request_key())
+        } else {
+            store.capture_directory(capture.id()).unwrap().join(file)
+        };
+        fs::remove_file(&path).unwrap();
 
-            let temporary = tempfile::tempdir().unwrap();
-            let store = Store::new(temporary.path()).unwrap();
-            let capture = record("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzy", 1_000);
-            publish_capture(&store, &capture);
-            let path = if file == "pointer" {
-                store.candidate_path(capture.analysis().request_key())
-            } else {
-                store.capture_directory(capture.id()).unwrap().join(file)
-            };
-            fs::remove_file(&path).unwrap();
-            match corruption {
-                "missing" => {}
-                "truncated" => fs::write(&path, b"{\"format_version\":").unwrap(),
-                "directory" => fs::create_dir(&path).unwrap(),
-                _ => unreachable!("the case table names only three corruptions"),
-            }
-
-            assert!(
-                store
-                    .read_candidate(capture.analysis().request_key())
-                    .is_err(),
-                "{file} {corruption}"
-            );
+        match corruption {
+            "missing" => {}
+            "truncated" => fs::write(&path, b"{\"format_version\":").unwrap(),
+            "directory" => fs::create_dir(&path).unwrap(),
+            _ => unreachable!("the case table names only three corruptions"),
         }
+
+        assert!(
+            store
+                .read_candidate(capture.analysis().request_key())
+                .is_err(),
+            "{file} {corruption}"
+        );
     }
 }
 

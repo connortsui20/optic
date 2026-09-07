@@ -28,51 +28,34 @@ fn scan(reader: &mut Stream<impl BufRead>) -> io::Result<Vec<LlvmDefinitionRecor
     while let Some(byte) = reader.peek()? {
         if byte.is_ascii_whitespace() {
             reader.take()?;
+
             continue;
         }
 
         let start = reader.offset();
 
         if byte == b'@' {
-            reader.begin_header(start);
-            let symbol = reader.required_token()?;
-            reader.expect(b"=")?;
-
-            if let Some(kind) = global(reader)? {
-                let symbol = symbol.symbol()?;
-                let range = ByteRange::new(start, reader.offset() - start)
-                    .map_err(|error| invalid(start, error))?;
-                definitions.push(
-                    LlvmDefinitionRecord::new(symbol, range, kind)
-                        .map_err(|error| invalid(start, error))?,
-                );
+            if let Some(definition) = read_global_definition(reader, start)? {
+                definitions.push(definition);
             }
 
-            reader.end_header();
             continue;
         }
 
         // AssemblyWriter emits define/declare at the start of a line. Probe only six bytes before
         // discarding an unrelated line, even when that line contains a very long first token.
         // See https://github.com/llvm/llvm-project/blob/llvmorg-22.1.0/llvm/lib/IR/AsmWriter.cpp.
-        let mut prefix = [0; 6];
-
-        if byte == b'd' {
-            for next in &mut prefix {
-                let Some(byte) = reader.take()? else { break };
-                *next = byte;
-
-                if byte == b'\n' {
-                    break;
-                }
-            }
-        }
+        let prefix = if byte == b'd' {
+            read_keyword_prefix(reader)?
+        } else {
+            [0; 6]
+        };
 
         if prefix == *b"define" && reader.peek()?.is_none_or(|byte| byte.is_ascii_whitespace()) {
             reader.begin_header(start);
-            let symbol = header::function(reader)?;
+            let symbol = header::read_function(reader)?;
             reader.end_header();
-            reader.body()?;
+            reader.skip_body()?;
 
             let range = ByteRange::new(start, reader.offset() - start)
                 .map_err(|error| invalid(start, error))?;
@@ -88,27 +71,73 @@ fn scan(reader: &mut Stream<impl BufRead>) -> io::Result<Vec<LlvmDefinitionRecor
     Ok(definitions)
 }
 
-fn global(reader: &mut Stream<impl BufRead>) -> io::Result<Option<LlvmDefinitionKind>> {
-    // These modifiers precede global/constant, alias, or ifunc. Stop before an unrelated initializer.
+fn read_global_definition(
+    reader: &mut Stream<impl BufRead>,
+    start: u64,
+) -> io::Result<Option<LlvmDefinitionRecord>> {
+    reader.begin_header(start);
+    let symbol = reader.read_required_token()?;
+    reader.expect(b"=")?;
+
+    let Some(kind) = read_global_kind(reader)? else {
+        reader.end_header();
+
+        return Ok(None);
+    };
+
+    let symbol = symbol.decode_symbol()?;
+    let range =
+        ByteRange::new(start, reader.offset() - start).map_err(|error| invalid(start, error))?;
+    let definition =
+        LlvmDefinitionRecord::new(symbol, range, kind).map_err(|error| invalid(start, error))?;
+    reader.end_header();
+
+    Ok(Some(definition))
+}
+
+/// Reads at most one keyword prefix without consuming bytes past a newline.
+fn read_keyword_prefix(reader: &mut Stream<impl BufRead>) -> io::Result<[u8; 6]> {
+    let mut prefix = [0; 6];
+
+    for next in &mut prefix {
+        let Some(byte) = reader.take()? else {
+            break;
+        };
+
+        *next = byte;
+
+        if byte == b'\n' {
+            break;
+        }
+    }
+
+    Ok(prefix)
+}
+
+fn read_global_kind(reader: &mut Stream<impl BufRead>) -> io::Result<Option<LlvmDefinitionKind>> {
+    // These modifiers precede global/constant, alias, or ifunc. Stop before unrelated initializers.
     // See https://llvm.org/docs/LangRef.html#global-variables and #aliases.
     loop {
-        let token = reader.required_token()?;
+        let token = reader.read_required_token()?;
 
         match token.bytes.as_slice() {
             b"global" | b"constant" => {
                 reader.end_header();
                 reader.skip_line()?;
+
                 return Ok(None);
             }
             b"alias" => {
-                let target = header::alias_target(reader)?;
+                let target = header::read_alias_target(reader)?;
+
                 return Ok(Some(match target {
                     Some(target) => LlvmDefinitionKind::DirectAlias { target },
                     None => LlvmDefinitionKind::ExpressionAlias,
                 }));
             }
             b"ifunc" => {
-                header::alias_target(reader)?;
+                header::read_alias_target(reader)?;
+
                 return Ok(Some(LlvmDefinitionKind::Ifunc));
             }
             b"private"
@@ -135,9 +164,9 @@ fn global(reader: &mut Stream<impl BufRead>) -> io::Result<Option<LlvmDefinition
             | b"thread_local" => {}
             b"addrspace" => {
                 reader.expect(b"(")?;
-                reader.group(b'(')?;
+                reader.consume_group(b'(')?;
             }
-            b"(" => reader.group(b'(')?,
+            b"(" => reader.consume_group(b'(')?,
             _ => {
                 return Err(invalid(
                     token.offset,
@@ -153,19 +182,22 @@ mod tests {
     use std::io::{BufReader, Cursor, ErrorKind, Read};
 
     use super::super::stream::HEADER_LIMIT;
+    use super::super::tests::READ_LIMITS;
     use super::super::tests::ShortReader;
     use super::*;
 
     #[track_caller]
     fn check(input: &str, expected: &[(&str, LlvmDefinitionKind, &str)]) {
-        for max_read in [1, 2, 7, 8192] {
+        for max_read in READ_LIMITS {
             let actual = super::super::index(ShortReader::new(input.as_bytes(), max_read)).unwrap();
             assert_eq!(actual.len(), expected.len());
 
             for (definition, (symbol, kind, excerpt)) in actual.iter().zip(expected) {
                 assert_eq!(definition.raw_symbol(), *symbol);
                 assert_eq!(definition.kind(), kind);
+
                 let range = definition.range();
+
                 assert_eq!(
                     &input[range.start() as usize..range.end() as usize],
                     *excerpt
@@ -181,7 +213,8 @@ mod tests {
         let expression = "@e = alias i8, getelementptr (i8, ptr @g, i64 1)\n";
         let ifunc = "@i = ifunc void (), ptr @resolver\n";
         let input = format!(
-            "; define @fake\ndeclare void @decl()\n@g = global i8 0\n{alias}{expression}{ifunc}\n{function}\n!0 = !{{ptr @f}}\n"
+            "; define @fake\ndeclare void @decl()\n@g = global i8 0\n\
+             {alias}{expression}{ifunc}\n{function}\n!0 = !{{ptr @f}}\n"
         );
 
         check(
@@ -201,7 +234,8 @@ mod tests {
 
     #[test]
     fn multiline_quoted_alias_and_function() {
-        let alias = "@\"alias\\20name\"\n = linkonce_odr\n dso_local hidden\n alias void (),\n ptr @\"raw\\22\\\\name\"\n";
+        let alias = "@\"alias\\20name\"\n = linkonce_odr\n dso_local hidden\n alias void (),\n \
+                     ptr @\"raw\\22\\\\name\"\n";
         let function = "define void\n @\"raw\\22\\\\name\"(\n) { ret void }";
         let input = format!("{alias}{function}");
 
@@ -276,7 +310,11 @@ mod tests {
 
     #[test]
     fn range_endings_preserve_input_bytes() {
-        for ending in ["\n", "\r\n", ""] {
+        for ending in [
+            "\n",   // The line uses a Unix ending.
+            "\r\n", // The line uses a Windows ending.
+            "",     // The final line has no ending.
+        ] {
             let alias = format!("@a = alias void (), ptr @f{ending}");
             check(
                 &alias,
@@ -308,7 +346,9 @@ mod tests {
         assert_eq!(definitions[0].raw_symbol(), "f");
         assert!(definitions[0].range().start() > length);
         assert!(definitions[0].range().length() > length);
+
         let (chunk, token, group) = stream.buffer_peaks();
+
         assert_eq!(chunk, 8192);
         assert!(token <= 16);
         assert!(group <= 8);
@@ -316,13 +356,20 @@ mod tests {
 
     #[test]
     fn complete_header_budget_boundaries() {
-        for prefix in ["define void @f() ", "@a = alias void (), ptr "] {
+        for prefix in [
+            "define void @f() ",        // The prefix starts a function header.
+            "@a = alias void (), ptr ", // The prefix starts an alias header.
+        ] {
             let suffix = if prefix.starts_with("define") {
                 "{"
             } else {
                 "@f\n"
             };
-            for length in [HEADER_LIMIT - 1, HEADER_LIMIT, HEADER_LIMIT + 1] {
+            for length in [
+                HEADER_LIMIT - 1, // The length is below the limit.
+                HEADER_LIMIT,     // The length equals the limit.
+                HEADER_LIMIT + 1, // The length exceeds the limit.
+            ] {
                 let padding = length - (prefix.len() + suffix.len()) as u64;
                 let input = Cursor::new(prefix.as_bytes())
                     .chain(std::io::repeat(b' ').take(padding))
@@ -335,6 +382,7 @@ mod tests {
                 let result = index(BufReader::new(input));
 
                 assert_eq!(result.is_ok(), length <= HEADER_LIMIT);
+
                 if let Err(error) = result {
                     assert_eq!(error.kind(), ErrorKind::InvalidData);
                     assert!(error.to_string().contains("1 MiB"));
@@ -356,6 +404,7 @@ mod tests {
             "@a alias void (), ptr @f",      // Missing assignment.
         ] {
             let error = index(input.as_bytes()).unwrap_err();
+
             assert_eq!(error.kind(), ErrorKind::InvalidData);
             assert!(error.to_string().contains("at byte"));
         }
@@ -374,9 +423,14 @@ mod tests {
             }
         }
 
-        for prefix in ["", "define void @f() {", "@a = alias void (), ptr "] {
+        for prefix in [
+            "",                         // The reader fails before input.
+            "define void @f() {",       // The reader fails inside a body.
+            "@a = alias void (), ptr ", // The reader fails inside an alias header.
+        ] {
             let input = Cursor::new(prefix.as_bytes()).chain(Failure);
             let error = index(BufReader::new(input)).unwrap_err();
+
             assert_eq!(error.kind(), ErrorKind::BrokenPipe);
             assert_eq!(error.to_string(), "fixture reader failed");
         }

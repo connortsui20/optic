@@ -1,6 +1,6 @@
 //! Checks literal search precedence, result order, and immutable references.
 //!
-//! Search order differs from manifest order. Every returned reference must retain its original scope.
+//! Search order differs from manifest order. Every result must retain its original reference scope.
 
 use optic_records::InstanceRef;
 
@@ -121,6 +121,7 @@ fn stable_order_is_applied_before_the_result_limit() {
         raw_symbols,
         vec!["symbol_e", "symbol_d", "symbol_c", "symbol_a"]
     );
+
     let ordinals = found
         .instances()
         .iter()
@@ -195,6 +196,7 @@ fn rejects_a_zero_result_limit() {
 
     let zero_limit = find_instances(&fixture.store, &capture_id, "kernel", 0)
         .expect_err("a zero limit must be rejected before reading the store");
+
     assert!(matches!(zero_limit, Error::InvalidLimit { actual: 0 }));
 }
 
@@ -208,6 +210,7 @@ fn equal_display_names_keep_distinct_references() {
             instance("fixture", "first", "same", "symbol"),  //
         ],
     );
+
     let found = find_instances(&fixture.store, &id, "same", 2).unwrap();
 
     assert_eq!(found.match_kind(), MatchKind::Exact);

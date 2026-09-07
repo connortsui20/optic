@@ -15,7 +15,7 @@ use crate::error::invalid_environment;
 pub(crate) struct CargoObservation {
     /// Artifacts with the selected package, target name, and target kinds.
     pub(crate) selected: Vec<Artifact>,
-    /// Cargo's final structured completion statuses, which must contain exactly one value.
+    /// All build-finished statuses, checked for exactly one success by [`Self::completed`].
     pub(crate) finished: Vec<bool>,
     /// Whether any structured compiler diagnostic reports an error.
     pub(crate) has_errors: bool,
@@ -25,8 +25,10 @@ impl CargoObservation {
     pub(crate) fn record(&mut self, artifact: Artifact, package: &PackageId, target: &Target) {
         let mut kinds = artifact.target.kind.clone();
         kinds.sort();
+
         let mut expected_kinds = target.kind.clone();
         expected_kinds.sort();
+
         if artifact.package_id == *package
             && artifact.target.name == target.name
             && kinds == expected_kinds
@@ -43,26 +45,31 @@ impl CargoObservation {
     ) -> Result<CargoArtifactRecord, Error> {
         if self.finished != [true] || self.has_errors {
             return Err(invalid_environment(
-                "successful Cargo completion requires one successful build-finished message and no compiler errors",
+                "successful Cargo completion requires one successful build-finished message \
+                 and no compiler errors",
             ));
         }
+
         let [artifact] = self.selected.as_slice() else {
             return Err(invalid_environment(format!(
                 "Cargo requires one matching selected artifact, got {}",
                 self.selected.len()
             )));
         };
+
         if artifact.fresh != fresh {
             return Err(invalid_environment(format!(
                 "selected artifact freshness must be {fresh}, got {}",
                 artifact.fresh
             )));
         }
+
         let record = CargoArtifactRecord::new(artifact.clone())?;
         let mut expected_target = target.clone();
         expected_target.kind.sort();
         expected_target.crate_types.sort();
         expected_target.required_features.sort();
+
         if record.artifact().target != expected_target {
             return Err(invalid_environment(
                 "selected artifact must match the prepared Cargo target, got a conflicting target",
@@ -102,6 +109,7 @@ mod tests {
                 finished,
                 has_errors,
             };
+
             assert_eq!(observation.completed(&artifact.target, true).is_ok(), valid);
         }
     }
@@ -114,9 +122,12 @@ mod tests {
             finished: vec![true],
             has_errors: false,
         };
+
         assert!(observation.completed(&artifact.target, false).is_err());
+
         let mut target = artifact.target;
         target.src_path = "/other/lib.rs".into();
+
         assert!(observation.completed(&target, true).is_err());
     }
 
@@ -125,10 +136,12 @@ mod tests {
         let artifact = artifact();
         let mut dependency = artifact.clone();
         dependency.package_id.repr = "dependency".to_owned();
+
         let mut observation = CargoObservation {
             finished: vec![true],
             ..Default::default()
         };
+
         observation.record(dependency, &artifact.package_id, &artifact.target);
         observation.record(artifact.clone(), &artifact.package_id, &artifact.target);
         let normalized = observation.completed(&artifact.target, true).unwrap();

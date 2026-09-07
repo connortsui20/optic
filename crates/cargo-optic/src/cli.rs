@@ -8,6 +8,7 @@ use std::env;
 use std::io;
 use std::io::Write;
 
+use optic::CaptureId;
 use optic::CaptureOutcome;
 use optic::Optic;
 use snafu::ResultExt;
@@ -17,6 +18,7 @@ use crate::arguments;
 use crate::output::CaptureOutput;
 use crate::output::InstanceOutput;
 
+/// Runs the requested command and treats a closed stdout pipe as normal completion.
 pub(crate) fn run() -> Result<(), Error> {
     let stdout = io::stdout();
 
@@ -44,56 +46,78 @@ fn run_with_output(mut stdout: impl Write) -> Result<(), Error> {
             write!(stdout, "{output}").context(WriteSnafu)?;
         }
         arguments::Command::ListCaptures => {
-            let captures = optic.list_captures()?;
-            if captures.is_empty() {
-                writeln!(stdout, "No captures.").context(WriteSnafu)?;
-
-                return Ok(());
-            }
-
-            writeln!(stdout, "Captures").context(WriteSnafu)?;
-            for capture in captures {
-                let output = CaptureOutput::new("Capture", &capture)?;
-
-                writeln!(stdout).context(WriteSnafu)?;
-                write!(stdout, "{output}").context(WriteSnafu)?;
-            }
+            list_captures(&optic, &mut stdout)?;
         }
         arguments::Command::Find {
             capture,
             query,
             limit,
         } => {
-            let results = optic.find(&capture, &query, limit)?;
-            if results.instances().is_empty() {
-                writeln!(stdout, "No instances found.").context(WriteSnafu)?;
-
-                return Ok(());
-            }
-
-            for (index, instance) in results.instances().iter().enumerate() {
-                if index != 0 {
-                    writeln!(stdout).context(WriteSnafu)?;
-                }
-
-                let output = InstanceOutput::new(instance);
-                write!(stdout, "{output}").context(WriteSnafu)?;
-            }
-
-            if results.is_truncated() {
-                writeln!(stdout).context(WriteSnafu)?;
-                writeln!(
-                    stdout,
-                    "Showing {} of {} matching instances. Narrow the query to reduce the result set.",
-                    results.instances().len(),
-                    results.total_matches(),
-                )
-                .context(WriteSnafu)?;
-            }
+            find_instances(&optic, &capture, &query, limit, &mut stdout)?;
         }
         arguments::Command::Show { instance, output } => {
             crate::show::run(&optic, &instance, output, &mut stdout)?;
         }
+    }
+
+    Ok(())
+}
+
+fn list_captures(optic: &Optic, stdout: &mut impl Write) -> Result<(), Error> {
+    let captures = optic.list_captures()?;
+
+    if captures.is_empty() {
+        writeln!(stdout, "No captures.").context(WriteSnafu)?;
+
+        return Ok(());
+    }
+
+    writeln!(stdout, "Captures").context(WriteSnafu)?;
+
+    for capture in captures {
+        let output = CaptureOutput::new("Capture", &capture)?;
+
+        writeln!(stdout).context(WriteSnafu)?;
+        write!(stdout, "{output}").context(WriteSnafu)?;
+    }
+
+    Ok(())
+}
+
+fn find_instances(
+    optic: &Optic,
+    capture: &CaptureId,
+    query: &str,
+    limit: usize,
+    stdout: &mut impl Write,
+) -> Result<(), Error> {
+    let results = optic.find(capture, query, limit)?;
+
+    if results.instances().is_empty() {
+        writeln!(stdout, "No instances found.").context(WriteSnafu)?;
+
+        return Ok(());
+    }
+
+    for (index, instance) in results.instances().iter().enumerate() {
+        if index != 0 {
+            writeln!(stdout).context(WriteSnafu)?;
+        }
+
+        let output = InstanceOutput::new(instance);
+        write!(stdout, "{output}").context(WriteSnafu)?;
+    }
+
+    if results.is_truncated() {
+        writeln!(stdout).context(WriteSnafu)?;
+        writeln!(
+            stdout,
+            "Showing {} of {} matching instances. \
+             Narrow the query to reduce the result set.",
+            results.instances().len(),
+            results.total_matches(),
+        )
+        .context(WriteSnafu)?;
     }
 
     Ok(())

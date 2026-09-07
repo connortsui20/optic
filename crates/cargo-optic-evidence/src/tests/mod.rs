@@ -27,6 +27,13 @@ use optic_records::TargetRecord;
 use optic_records::UnsupportedLlvmConfiguration;
 use optic_store::Store;
 
+struct TestStore {
+    /// Keeps the temporary workspace alive for the lifetime of the store handle.
+    temporary: tempfile::TempDir,
+    /// The store under test.
+    store: Store,
+}
+
 mod find;
 
 mod references;
@@ -34,13 +41,6 @@ mod references;
 mod source;
 
 mod llvm;
-
-struct TestStore {
-    /// Keeps the temporary workspace alive for the lifetime of the store handle.
-    temporary: tempfile::TempDir,
-    /// The store under test.
-    store: Store,
-}
 
 impl TestStore {
     fn new() -> Self {
@@ -81,6 +81,7 @@ impl TestStore {
             vec!["rustc".to_owned()],
         )
         .expect("the fixture build is valid");
+
         let sysroot = self.temporary.path().join("toolchain");
         let compiler = CompilerIdentity::new(
             sysroot
@@ -92,6 +93,7 @@ impl TestStore {
             sysroot,
         )
         .expect("the fixture compiler identity is valid");
+
         let artifact_directory = tempfile::tempdir().expect("the fixture artifacts can be created");
 
         for (artifact, bytes) in &artifacts {
@@ -110,6 +112,7 @@ impl TestStore {
             llvm,
         )
         .expect("the fixture instance manifest is valid");
+
         let artifact = serde_json::from_value(serde_json::json!({
             "package_id": "fixture@0.1.0",
             "manifest_path": self.temporary.path().join("Cargo.toml"),
@@ -153,16 +156,19 @@ impl TestStore {
     }
 }
 
+/// Selects effective compiler settings consistent with the fixture's LLVM collection status.
 fn provenance(llvm: &LlvmCollection) -> LlvmProvenance {
     let reason = match llvm {
         LlvmCollection::NotCaptured(reason) => Some(*reason),
         LlvmCollection::Collected(_) => None,
     };
+
     let lto = match reason {
         Some(UnsupportedLlvmConfiguration::CrossCrateThinLto) => LlvmLto::CrossCrateThin,
         Some(UnsupportedLlvmConfiguration::FatLto) => LlvmLto::Fat,
         _ => LlvmLto::Off,
     };
+
     let backend = if reason == Some(UnsupportedLlvmConfiguration::OtherBackend) {
         "other"
     } else {

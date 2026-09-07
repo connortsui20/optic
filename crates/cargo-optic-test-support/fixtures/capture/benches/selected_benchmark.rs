@@ -1,6 +1,6 @@
 //! Supplies a distinct concrete instance for explicit benchmark selection.
 //!
-//! Cargo disables the test harness for this target, so the benchmark uses an ordinary main function.
+//! Cargo disables this target's test harness, so the benchmark uses an ordinary main function.
 
 #[inline(never)]
 fn benchmark_instance<T: Copy>(value: T) -> T {

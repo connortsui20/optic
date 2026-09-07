@@ -46,6 +46,7 @@ impl InstanceRecord {
 
         require_text("instance display name", &display_name)?;
         require_text("instance raw symbol", &raw_symbol)?;
+
         if placements.is_empty() {
             return InvalidFieldSnafu {
                 field: "instance placements",
@@ -55,6 +56,7 @@ impl InstanceRecord {
         }
 
         let mut codegen_units = HashSet::with_capacity(placements.len());
+
         for placement in &placements {
             if !codegen_units.insert(placement.codegen_unit()) {
                 return InvalidFieldSnafu {

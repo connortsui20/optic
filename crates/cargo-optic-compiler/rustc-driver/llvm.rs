@@ -18,26 +18,41 @@ use crate::protocol;
 /// The compiler source revision exercised by the retained-bitcode unit reproducer.
 const VERIFIED_COMMIT: &str = "48a229ceaefd4985c50990b14116b6d856af0985";
 
+/// Effective compiler settings paired with the pre-retention LLVM support decision.
+///
+/// [`Self::observed`] checks the initialized backend and LTO mode before a supported configuration
+/// can select a retained bitcode suffix through [`Self::extension`].
 pub(crate) struct Configuration {
     /// The backend name reported after its initialization.
     pub(crate) backend: String,
+
     /// The effective target tuple or target-specification identity.
     pub(crate) target: String,
+
     /// The effective optimization level, encoded as rustc's CLI spelling.
     pub(crate) optimization: &'static str,
+
     /// The effective LTO code defined by the private protocol.
     pub(crate) lto: u32,
+
     /// Whether this invocation uses an incremental compilation directory.
     pub(crate) incremental: bool,
+
     /// Whether this invocation delegates LTO to the linker plugin.
     pub(crate) linker_plugin: bool,
+
     /// The configured CGU count, independent of the actual regular module count.
     pub(crate) codegen_units: u32,
-    /// The LLVM-support code defined by the private protocol.
+
+    /// The LLVM-support code returned by [`configure`] before temporary-file retention changes.
     pub(crate) unsupported: u32,
 }
 
-/// Rejects unsupported configurations before changing either temporary-file option.
+/// Classifies LLVM support and enables temporary-file retention only for supported configurations.
+///
+/// Returns the private protocol's support code. Unsupported configurations continue compiling
+/// without changing either temporary-file option. The directory **must** be a fresh path inside
+/// the private collection attempt. Target resolution and directory setup can return an error.
 pub(crate) fn configure(config: &mut Config, directory: &Path) -> io::Result<u32> {
     let options = &config.opts;
     let (target, _) = Target::search(
@@ -46,12 +61,14 @@ pub(crate) fn configure(config: &mut Config, directory: &Path) -> io::Result<u32
         options.unstable_opts.unstable_options,
     )
     .map_err(io::Error::other)?;
+
     let backend = options
         .unstable_opts
         .codegen_backend
         .as_deref()
         .or(target.default_codegen_backend.as_deref())
         .unwrap_or("llvm");
+
     let unsupported = if env!("OPTIC_RUSTC_COMMIT") != VERIFIED_COMMIT {
         protocol::LLVM_UNSUPPORTED_UNVERIFIED_COMPILER
     } else if backend != "llvm" {
@@ -85,15 +102,23 @@ pub(crate) fn configure(config: &mut Config, directory: &Path) -> io::Result<u32
 }
 
 impl Configuration {
+    /// Records effective settings after rustc initializes the codegen backend.
+    ///
+    /// The support code **must** come from [`configure`] for this invocation. Returns an error if a
+    /// supported recipe disagrees with the initialized backend or LTO mode, or its CGU count does
+    /// not fit the protocol field.
     pub(crate) fn observed(compiler: &Compiler, unsupported: u32) -> io::Result<Self> {
         let session = &compiler.sess;
+
         let lto = match session.lto() {
             Lto::No => protocol::LTO_OFF,
             Lto::ThinLocal => protocol::LTO_LOCAL_THIN,
             Lto::Thin => protocol::LTO_CROSS_CRATE_THIN,
             Lto::Fat => protocol::LTO_FAT,
         };
+
         let backend = compiler.codegen_backend.name().to_owned();
+
         if unsupported == protocol::LLVM_SUPPORTED
             && (backend != "llvm" || !matches!(lto, protocol::LTO_OFF | protocol::LTO_LOCAL_THIN))
         {
@@ -101,6 +126,7 @@ impl Configuration {
                 "retained LLVM requires the supported backend and LTO mode",
             ));
         }
+
         let optimization = match session.opts.optimize {
             OptLevel::No => "0",
             OptLevel::Less => "1",
@@ -123,11 +149,11 @@ impl Configuration {
         })
     }
 
-    /// Selects the proven post-optimization write point, not a pre-LTO or no-opt snapshot.
+    /// Selects the verified optimized-bitcode suffix, or none for unsupported configurations.
     ///
-    /// The `tests/fixtures/stage-proof.rs` reproducer checks these suffixes against rustc's naming API.
-    /// [No LTO] writes `bc` after optimization. [Local ThinLTO] saves `thin-lto-after-pm` after its
-    /// pass manager.
+    /// The `tests/fixtures/stage-proof.rs` reproducer checks these suffixes against rustc's naming
+    /// API. [No LTO] writes `bc` after optimization. [Local ThinLTO] saves `thin-lto-after-pm`
+    /// after its pass manager.
     ///
     /// [No LTO]: https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/compiler/rustc_codegen_ssa/src/back/write.rs#L819-L840
     /// [Local ThinLTO]: https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/compiler/rustc_codegen_llvm/src/back/lto.rs#L778-L782

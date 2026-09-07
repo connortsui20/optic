@@ -19,6 +19,7 @@ use optic::Optic;
 
 use common::workspace_in_child;
 
+#[track_caller]
 fn library_request() -> BuildRequest {
     BuildRequest::new("capture_fixture", CargoTarget::Library, "release")
         .expect("the fixture request is valid")
@@ -35,6 +36,7 @@ fn assert_library_capture(capture: &CaptureRecord, workspace: &Path) {
     assert_eq!(build.target().kind(), CargoTargetKind::Lib);
     assert_eq!(build.profile(), "release");
     assert_eq!(build.invocation_directory(), workspace);
+
     assert!(compiler.rustc().is_absolute());
     assert!(!compiler.release().is_empty());
     assert!(!compiler.commit_hash().is_empty());
@@ -59,8 +61,10 @@ fn captures_and_lists_builds_through_the_product_api() {
     ) else {
         return;
     };
+
     let optic = Optic::open(&workspace).expect("the fixture workspace can be opened");
     let request = library_request();
+
     let first = optic
         .capture(&request, CapturePolicy::Reuse)
         .expect("the first capture succeeds")
@@ -76,7 +80,9 @@ fn captures_and_lists_builds_through_the_product_api() {
     let captures = optic
         .list_captures()
         .expect("completed captures can be listed");
+
     assert_eq!(captures.len(), 1);
+
     for capture in &captures {
         assert_library_capture(capture, &workspace);
     }
@@ -90,11 +96,13 @@ fn captures_when_cargo_appends_selected_target_flags() {
     ) else {
         return;
     };
+
     fs::write(
         workspace.join("build.rs"),
         "fn main() { println!(\"cargo::rustc-cfg=optic_fixture\"); }\n",
     )
     .expect("the fixture build script can be written");
+
     let optic = Optic::open(&workspace).expect("the fixture workspace can be opened");
 
     let capture = optic
@@ -123,6 +131,7 @@ fn reuses_a_custom_profile_with_its_observed_settings() {
     ) else {
         return;
     };
+
     let optic = Optic::open(&workspace).unwrap();
     let request = BuildRequest::new(
         "capture_fixture",
@@ -130,6 +139,7 @@ fn reuses_a_custom_profile_with_its_observed_settings() {
         "checked",
     )
     .unwrap();
+
     let first = optic
         .capture(&request, CapturePolicy::Reuse)
         .unwrap()
@@ -150,6 +160,7 @@ fn failed_target_resolution_does_not_publish_a_capture() {
     ) else {
         return;
     };
+
     let optic = Optic::open(&workspace).expect("the fixture workspace can be opened");
     let request = BuildRequest::new(
         "capture_fixture",
@@ -185,8 +196,10 @@ fn failed_cargo_process_does_not_publish_a_capture() {
     else {
         return;
     };
+
     fs::write(workspace.join("src/lib.rs"), "pub fn broken( {\n")
         .expect("the invalid fixture source can be written");
+
     let optic = Optic::open(&workspace).expect("the fixture workspace can be opened");
 
     let error = optic
@@ -211,6 +224,7 @@ fn failed_cargo_process_does_not_publish_a_capture() {
     let error = optic
         .find(&unpublished, "broken", 100)
         .expect_err("a failed capture must not leave findable evidence");
+
     assert!(matches!(error, Error::Evidence { .. }));
 }
 
@@ -221,6 +235,7 @@ fn refreshes_cargo_metadata_for_each_capture() {
     else {
         return;
     };
+
     let optic = Optic::open(&workspace).expect("the fixture workspace can be opened");
     let manifest = workspace.join("Cargo.toml");
     let contents = fs::read_to_string(&manifest).unwrap();

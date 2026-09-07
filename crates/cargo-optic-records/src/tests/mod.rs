@@ -4,7 +4,11 @@
 
 mod evidence;
 
+use std::fmt::Debug;
 use std::path::PathBuf;
+
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use crate::AnalysisToken;
 use crate::BuildRecord;
@@ -27,6 +31,51 @@ use crate::SourceUnavailable;
 use crate::TargetRecord;
 use crate::UnsupportedLlvmConfiguration;
 
+/// Checks that a valid record survives conversion to and from a JSON value.
+#[track_caller]
+fn assert_json_round_trip<T>(expected: &T)
+where
+    T: Serialize + DeserializeOwned + Debug + PartialEq,
+{
+    let encoded = serde_json::to_value(expected).expect("the valid fixture can be encoded as JSON");
+    let actual = serde_json::from_value::<T>(encoded)
+        .expect("the JSON produced from the valid fixture can be read");
+
+    assert_eq!(&actual, expected);
+}
+
+#[track_caller]
+fn assert_record_error(encoded: &str, expected: &str) {
+    let error = serde_json::from_str::<CaptureRecord>(encoded)
+        .expect_err("the invalid record must be rejected");
+
+    assert!(
+        error.to_string().contains(expected),
+        "expected an error containing {expected:?}, got {error}"
+    );
+}
+
+/// Checks one empty field without changing any other field in the valid fixture.
+#[track_caller]
+fn assert_empty_field_error<T>(encoded: &serde_json::Value, pointer: &str, expected: &str)
+where
+    T: DeserializeOwned + Debug,
+{
+    let mut invalid = encoded.clone();
+    *invalid
+        .pointer_mut(pointer)
+        .expect("the case names a field in the serialized fixture") =
+        serde_json::Value::String(String::new());
+
+    let error = serde_json::from_value::<T>(invalid)
+        .expect_err("the fixture with the empty required field must be rejected");
+
+    assert!(
+        error.to_string().contains(expected),
+        "expected an error containing {expected:?} at {pointer}, got {error}"
+    );
+}
+
 fn capture_id() -> CaptureId {
     "zyxwvutsrqponmlkzyxwvutsrqponmlk"
         .parse()
@@ -46,9 +95,10 @@ fn compiler_identity() -> CompilerIdentity {
     .expect("the fixture compiler identity is valid")
 }
 
-fn record() -> CaptureRecord {
+fn capture_record() -> CaptureRecord {
     let target =
         TargetRecord::new("example", CargoTargetKind::Lib).expect("the fixture target is valid");
+
     let build = BuildRecord::new(
         "example",
         "0.1.0",
@@ -74,14 +124,22 @@ fn cargo_artifact() -> cargo_metadata::Artifact {
             "required-features": ["alpha", "beta"],
             "src_path": "/workspace/src/lib.rs",
             "edition": "2024",
-            "doc": true, "doctest": true, "test": true
+            "doc": true,
+            "doctest": true,
+            "test": true
         },
         "profile": {
-            "opt_level": "s", "debuginfo": 1,
-            "debug_assertions": false, "overflow_checks": true, "test": false
+            "opt_level": "s",
+            "debuginfo": 1,
+            "debug_assertions": false,
+            "overflow_checks": true,
+            "test": false
         },
         "features": ["alpha", "beta"],
-        "filenames": ["/workspace/target/libexample.rlib", "/workspace/target/libexample.rmeta"],
+        "filenames": [
+            "/workspace/target/libexample.rlib",
+            "/workspace/target/libexample.rmeta"
+        ],
         "executable": null,
         "fresh": false
     }))
@@ -100,7 +158,7 @@ fn analysis() -> CaptureAnalysis {
     )
 }
 
-fn instance() -> InstanceRecord {
+fn instance_record() -> InstanceRecord {
     let definition = DefinitionRecord::new("example", "example::kernel")
         .expect("the fixture definition is valid");
     let placement = PlacementRecord::new("example-cgu.0", "External", "Default", false, 17)
@@ -116,18 +174,18 @@ fn instance() -> InstanceRecord {
     .expect("the fixture instance is valid")
 }
 
-fn manifest() -> InstanceManifest {
+fn instance_manifest() -> InstanceManifest {
     InstanceManifest::new(
         capture_id(),
-        vec![instance()],
+        vec![instance_record()],
         vec![],
-        provenance(),
+        llvm_provenance(),
         LlvmCollection::NotCaptured(UnsupportedLlvmConfiguration::UnverifiedCompiler),
     )
     .expect("the fixture instance manifest is valid")
 }
 
-fn provenance() -> LlvmProvenance {
+fn llvm_provenance() -> LlvmProvenance {
     LlvmProvenance::new(
         "llvm",
         Some("22.1.0".into()),
@@ -142,20 +200,10 @@ fn provenance() -> LlvmProvenance {
     .unwrap()
 }
 
-#[track_caller]
-fn assert_record_error(encoded: &str, expected: &str) {
-    let error = serde_json::from_str::<CaptureRecord>(encoded)
-        .expect_err("the invalid record must be rejected");
-
-    assert!(
-        error.to_string().contains(expected),
-        "expected an error containing {expected:?}, got {error}"
-    );
-}
-
 #[test]
 fn rejects_noncanonical_capture_ids() {
-    let encoded = serde_json::to_string(&record()).expect("the fixture record can be encoded");
+    let encoded =
+        serde_json::to_string(&capture_record()).expect("the fixture record can be encoded");
     let noncanonical = encoded.replace(
         "zyxwvutsrqponmlkzyxwvutsrqponmlk",
         "cap_0123456789abcdef0123456789abcdef",
@@ -166,7 +214,7 @@ fn rejects_noncanonical_capture_ids() {
 
 #[test]
 fn round_trips_a_valid_record() {
-    let expected = record();
+    let expected = capture_record();
     let encoded = serde_json::to_vec(&expected).expect("the fixture record can be encoded");
     let actual = serde_json::from_slice::<CaptureRecord>(&encoded)
         .expect("the encoded fixture record can be read");
@@ -176,7 +224,8 @@ fn round_trips_a_valid_record() {
 
 #[test]
 fn rejects_an_unknown_capture_format() {
-    let encoded = serde_json::to_string(&record()).expect("the fixture record can be encoded");
+    let encoded =
+        serde_json::to_string(&capture_record()).expect("the fixture record can be encoded");
     let unsupported_version = encoded.replace(r#""format_version":4"#, r#""format_version":5"#);
 
     assert_record_error(
@@ -187,10 +236,12 @@ fn rejects_an_unknown_capture_format() {
 
 #[test]
 fn reports_the_previous_capture_format_before_its_missing_fields() {
-    let mut previous = serde_json::to_value(record()).expect("the fixture record can be encoded");
+    let mut previous =
+        serde_json::to_value(capture_record()).expect("the fixture record can be encoded");
     let previous = previous
         .as_object_mut()
         .expect("the capture fixture is an object");
+
     previous.insert("format_version".to_owned(), serde_json::Value::from(1));
     previous.remove("compiler");
     previous.remove("analysis");
@@ -204,20 +255,21 @@ fn reports_the_previous_capture_format_before_its_missing_fields() {
 
 #[test]
 fn round_trips_a_manifest_with_no_collected_llvm_modules() {
-    let expected = manifest();
+    let expected = instance_manifest();
     let encoded = serde_json::to_string(&expected).expect("the fixture manifest can be encoded");
     let actual = serde_json::from_str::<InstanceManifest>(&encoded)
         .expect("the encoded fixture manifest can be read");
 
     assert_eq!(actual, expected);
     assert_eq!(actual.format_version(), 4);
-    assert_eq!(actual.capture_id(), record().id());
+    assert_eq!(actual.capture_id(), &capture_id());
     assert!(!encoded.contains("body"));
 }
 
 #[test]
 fn rejects_an_unknown_instance_manifest_format() {
-    let encoded = serde_json::to_string(&manifest()).expect("the fixture manifest can be encoded");
+    let encoded =
+        serde_json::to_string(&instance_manifest()).expect("the fixture manifest can be encoded");
     let unsupported_version = encoded.replace(r#""format_version":4"#, r#""format_version":5"#);
     let error = serde_json::from_str::<InstanceManifest>(&unsupported_version)
         .expect_err("the unsupported manifest must be rejected");
@@ -227,10 +279,13 @@ fn rejects_an_unknown_instance_manifest_format() {
 
 #[test]
 fn rejects_a_malformed_instance_manifest() {
-    let encoded = serde_json::to_string(&manifest()).expect("the fixture manifest can be encoded");
+    let encoded =
+        serde_json::to_string(&instance_manifest()).expect("the fixture manifest can be encoded");
     let mut malformed =
         serde_json::from_str::<serde_json::Value>(&encoded).expect("the fixture JSON is valid");
+
     malformed["instances"][0]["placements"] = serde_json::Value::Array(Vec::new());
+
     let malformed =
         serde_json::to_string(&malformed).expect("the modified fixture manifest can be encoded");
     let error = serde_json::from_str::<InstanceManifest>(&malformed)
@@ -249,6 +304,7 @@ fn rejects_duplicate_codegen_unit_placements() {
         .expect("the fixture placement is valid");
     let definition = DefinitionRecord::new("example", "example::kernel")
         .expect("the fixture definition is valid");
+
     let error = InstanceRecord::new(
         definition,
         "example::kernel::<u64>",
@@ -263,12 +319,13 @@ fn rejects_duplicate_codegen_unit_placements() {
 
 #[test]
 fn rejects_duplicate_instance_identities() {
-    let duplicate = instance();
+    let duplicate = instance_record();
+
     let error = InstanceManifest::new(
         capture_id(),
         vec![duplicate.clone(), duplicate],
         vec![],
-        provenance(),
+        llvm_provenance(),
         LlvmCollection::Collected(vec![]),
     )
     .expect_err("duplicate instance identities must be rejected");
@@ -279,11 +336,12 @@ fn rejects_duplicate_instance_identities() {
 #[test]
 fn rejects_each_invalid_compiler_path() {
     let root = std::env::current_dir().expect("the test invocation directory is available");
+
     let cases = [
-        (PathBuf::new(), "rustc path"),            // Empty rustc path.
-        (PathBuf::from("rustc"), "relative path"), // Relative rustc path.
-        (root.join("toolchain/./rustc"), "not lexically normalized"), // Dot rustc path.
-        (root.join("toolchain/../rustc"), "not lexically normalized"), // Non-normal rustc path.
+        (PathBuf::new(), "rustc path"), // Reject an empty rustc path.
+        (PathBuf::from("rustc"), "relative path"), // Reject a relative rustc path.
+        (root.join("toolchain/./rustc"), "not lexically normalized"), // Reject `.` components.
+        (root.join("toolchain/../rustc"), "not lexically normalized"), // Reject `..` components.
     ];
 
     for (rustc, expected) in cases {
@@ -304,10 +362,11 @@ fn rejects_each_invalid_compiler_path() {
 fn rejects_each_invalid_compiler_sysroot() {
     let root = std::env::current_dir().expect("the test invocation directory is available");
     let rustc = root.join("toolchain/bin/rustc");
+
     let sysroots = [
-        PathBuf::new(),                    // Empty sysroot path.
-        PathBuf::from("toolchain"),        // Relative sysroot path.
-        root.join("toolchain/../sysroot"), // Non-normal sysroot path.
+        PathBuf::new(),                    // Reject an empty sysroot path.
+        PathBuf::from("toolchain"),        // Reject a relative sysroot path.
+        root.join("toolchain/../sysroot"), // Reject `..` components.
     ];
 
     for sysroot in sysroots {
@@ -326,64 +385,56 @@ fn rejects_each_invalid_compiler_sysroot() {
 
 #[test]
 fn deserialization_rejects_each_empty_compiler_text_field() {
-    let encoded = serde_json::to_value(record()).expect("the fixture record can be encoded");
+    let encoded =
+        serde_json::to_value(capture_record()).expect("the fixture record can be encoded");
+
     let cases = [
-        ("/compiler/release", "rustc release"), // Release string.
-        ("/compiler/commit_hash", "rustc commit hash"), // Commit hash.
-        ("/compiler/host", "rustc host"),       // Host triple.
+        ("/compiler/release", "rustc release"), // Require the release string.
+        ("/compiler/commit_hash", "rustc commit hash"), // Require the commit hash.
+        ("/compiler/host", "rustc host"),       // Require the host triple.
     ];
 
     for (pointer, field) in cases {
-        let mut invalid = encoded.clone();
-        *invalid
-            .pointer_mut(pointer)
-            .expect("the compiler fixture field exists") = serde_json::Value::String(String::new());
-        let error = serde_json::from_value::<CaptureRecord>(invalid)
-            .expect_err("the empty compiler field must be rejected");
-
-        assert!(error.to_string().contains(field));
+        assert_empty_field_error::<CaptureRecord>(&encoded, pointer, field);
     }
 }
 
 #[test]
 fn deserialization_rejects_each_empty_instance_text_field() {
-    let encoded = serde_json::to_value(manifest()).expect("the fixture manifest can be encoded");
+    let encoded =
+        serde_json::to_value(instance_manifest()).expect("the fixture manifest can be encoded");
+
     let cases = [
         (
             "/instances/0/definition/crate_name",
             "definition crate name",
-        ), // Definition crate.
-        ("/instances/0/definition/definition_path", "definition path"), // Definition path.
-        ("/instances/0/display_name", "instance display name"),         // Display name.
-        ("/instances/0/raw_symbol", "instance raw symbol"),             // Raw symbol.
-        ("/instances/0/placements/0/codegen_unit", "codegen unit"),     // Codegen unit.
-        ("/instances/0/placements/0/linkage", "placement linkage"),     // Linkage.
+        ), // Require the definition crate name.
+        ("/instances/0/definition/definition_path", "definition path"), // Require the path.
+        ("/instances/0/display_name", "instance display name"),         // Require the display name.
+        ("/instances/0/raw_symbol", "instance raw symbol"),             // Require the raw symbol.
+        ("/instances/0/placements/0/codegen_unit", "codegen unit"),     // Require the codegen unit.
+        ("/instances/0/placements/0/linkage", "placement linkage"),     // Require the linkage.
         (
             "/instances/0/placements/0/visibility",
             "placement visibility",
-        ), // Visibility.
+        ), // Require the visibility.
     ];
 
     for (pointer, field) in cases {
-        let mut invalid = encoded.clone();
-        *invalid
-            .pointer_mut(pointer)
-            .expect("the instance fixture field exists") = serde_json::Value::String(String::new());
-        let error = serde_json::from_value::<InstanceManifest>(invalid)
-            .expect_err("the empty instance field must be rejected");
-
-        assert!(error.to_string().contains(field));
+        assert_empty_field_error::<InstanceManifest>(&encoded, pointer, field);
     }
 }
 
 #[test]
 fn deserialization_rejects_unknown_evidence_fields() {
-    let encoded = serde_json::to_value(manifest()).expect("the fixture manifest can be encoded");
+    let encoded =
+        serde_json::to_value(instance_manifest()).expect("the fixture manifest can be encoded");
+
     let pointers = [
-        "",                          // Manifest.
-        "/instances/0",              // Instance.
-        "/instances/0/definition",   // Definition.
-        "/instances/0/placements/0", // Placement.
+        "",                          // Reject unknown manifest fields.
+        "/instances/0",              // Reject unknown instance fields.
+        "/instances/0/definition",   // Reject unknown definition fields.
+        "/instances/0/placements/0", // Reject unknown placement fields.
     ];
 
     for pointer in pointers {
@@ -399,7 +450,8 @@ fn deserialization_rejects_unknown_evidence_fields() {
         assert!(error.to_string().contains("unknown field `unknown`"));
     }
 
-    let mut invalid = serde_json::to_value(record()).expect("the fixture record can be encoded");
+    let mut invalid =
+        serde_json::to_value(capture_record()).expect("the fixture record can be encoded");
     invalid["compiler"]["unknown"] = serde_json::Value::Bool(true);
     let error = serde_json::from_value::<CaptureRecord>(invalid)
         .expect_err("the unknown compiler field must be rejected");
@@ -409,7 +461,8 @@ fn deserialization_rejects_unknown_evidence_fields() {
 
 #[test]
 fn rejects_an_unknown_target_kind() {
-    let encoded = serde_json::to_string(&record()).expect("the fixture record can be encoded");
+    let encoded =
+        serde_json::to_string(&capture_record()).expect("the fixture record can be encoded");
     let invalid_target = encoded.replace(r#""kind":"lib""#, r#""kind":"test""#);
 
     assert_record_error(&invalid_target, "unknown variant `test`");
@@ -417,33 +470,28 @@ fn rejects_an_unknown_target_kind() {
 
 #[test]
 fn rejects_each_empty_text_field() {
-    let encoded = serde_json::to_string(&record()).expect("the fixture record can be encoded");
+    let encoded =
+        serde_json::to_value(capture_record()).expect("the fixture record can be encoded");
+
     let cases = [
-        (r#""package":"example""#, r#""package":"""#, "package name"), // Package name.
-        (
-            r#""package_version":"0.1.0""#,
-            r#""package_version":"""#,
-            "package version",
-        ), // Package version.
-        (r#""name":"example""#, r#""name":"""#, "target name"),        // Target name.
-        (r#""profile":"release""#, r#""profile":"""#, "profile"),      // Profile name.
-        (
-            r#""cargo_program":"cargo""#,
-            r#""cargo_program":"""#,
-            "Cargo program",
-        ), // Cargo program.
+        ("/build/package", "package name"), // Require the package name.
+        ("/build/package_version", "package version"), // Require the package version.
+        ("/build/target/name", "target name"), // Require the target name.
+        ("/build/profile", "profile"),      // Require the profile name.
+        ("/build/cargo_program", "Cargo program"), // Require the Cargo program.
     ];
 
-    for (original, replacement, field) in cases {
-        let empty_field = encoded.replace(original, replacement);
+    for (pointer, field) in cases {
+        let expected = format!("{field} must contain a valid value");
 
-        assert_record_error(&empty_field, &format!("{field} must contain a valid value"));
+        assert_empty_field_error::<CaptureRecord>(&encoded, pointer, &expected);
     }
 }
 
 #[test]
 fn rejects_an_empty_cargo_argument_list() {
-    let encoded = serde_json::to_string(&record()).expect("the fixture record can be encoded");
+    let encoded =
+        serde_json::to_string(&capture_record()).expect("the fixture record can be encoded");
     let empty_arguments =
         encoded.replace(r#""cargo_arguments":["rustc"]"#, r#""cargo_arguments":[]"#);
 
@@ -455,10 +503,12 @@ fn rejects_an_empty_cargo_argument_list() {
 
 #[test]
 fn rejects_each_invalid_invocation_directory() {
-    let encoded = serde_json::to_string(&record()).expect("the fixture record can be encoded");
+    let encoded =
+        serde_json::to_string(&capture_record()).expect("the fixture record can be encoded");
+
     let cases = [
-        ("", "an empty path"),    // Empty path.
-        (".", "a relative path"), // Relative path.
+        ("", "an empty path"),    // Reject an empty path.
+        (".", "a relative path"), // Reject a relative path.
     ];
 
     for (directory, actual) in cases {
@@ -474,7 +524,8 @@ fn rejects_each_invalid_invocation_directory() {
 
 #[test]
 fn rejects_unknown_record_fields() {
-    let encoded = serde_json::to_string(&record()).expect("the fixture record can be encoded");
+    let encoded =
+        serde_json::to_string(&capture_record()).expect("the fixture record can be encoded");
     let unknown_field = encoded.replacen('{', r#"{"unknown":true,"#, 1);
 
     assert_record_error(&unknown_field, "unknown field `unknown`");
@@ -483,15 +534,16 @@ fn rejects_unknown_record_fields() {
 #[test]
 fn validates_request_keys_at_parse_and_deserialization() {
     let valid = analysis().request_key().to_string();
+
     assert_eq!(valid.parse::<CaptureKey>().unwrap().as_str(), valid);
 
     for invalid in [
-        String::new(),  // Empty digest.
-        "a".repeat(63), // Short digest.
-        "a".repeat(65), // Long digest.
-        "A".repeat(64), // Uppercase digest.
-        "g".repeat(64), // Non-hexadecimal digest.
-        "é".repeat(32), // Non-ASCII digest.
+        String::new(),  // Reject an empty digest.
+        "a".repeat(63), // Reject a short digest.
+        "a".repeat(65), // Reject a long digest.
+        "A".repeat(64), // Reject an uppercase digest.
+        "g".repeat(64), // Reject a non-hexadecimal digest.
+        "é".repeat(32), // Reject a non-ASCII digest.
     ] {
         assert!(invalid.parse::<CaptureKey>().is_err(), "{invalid:?}");
         assert!(serde_json::from_value::<CaptureKey>(invalid.into()).is_err());
@@ -502,22 +554,20 @@ fn validates_request_keys_at_parse_and_deserialization() {
 fn generates_and_validates_analysis_tokens() {
     let first = AnalysisToken::generate();
     let second = AnalysisToken::generate();
+
     assert_ne!(first, second);
     assert_eq!(first.as_str().len(), 32);
     assert_eq!(first.as_str().parse::<AnalysisToken>().unwrap(), first);
-    assert_eq!(
-        serde_json::from_value::<AnalysisToken>(serde_json::to_value(&first).unwrap()).unwrap(),
-        first
-    );
+    assert_json_round_trip(&first);
 
     for invalid in [
-        "",                                     // Empty token.
-        "0123456789ab4def8123456789abcde",      // Short token.
-        "01234567-89ab-4def-8123-456789abcdef", // Hyphenated UUID.
-        "0123456789AB4DEF8123456789ABCDEF",     // Uppercase UUID.
-        "0123456789ab1def8123456789abcdef",     // Wrong UUID version.
-        "0123456789ab4def7123456789abcdef",     // Wrong UUID variant.
-        "0123456789ab4def8123456789abcdeg",     // Non-hexadecimal digit.
+        "",                                     // Reject an empty token.
+        "0123456789ab4def8123456789abcde",      // Reject a short token.
+        "01234567-89ab-4def-8123-456789abcdef", // Reject a hyphenated UUID.
+        "0123456789AB4DEF8123456789ABCDEF",     // Reject an uppercase UUID.
+        "0123456789ab1def8123456789abcdef",     // Reject another UUID version.
+        "0123456789ab4def7123456789abcdef",     // Reject another UUID variant.
+        "0123456789ab4def8123456789abcdeg",     // Reject a non-hexadecimal digit.
     ] {
         assert!(invalid.parse::<AnalysisToken>().is_err(), "{invalid:?}");
         assert!(serde_json::from_value::<AnalysisToken>(invalid.into()).is_err());
@@ -528,6 +578,7 @@ fn generates_and_validates_analysis_tokens() {
 fn normalizes_cargo_observations_without_changing_profile_settings() {
     let artifact = cargo_artifact();
     let expected = CargoArtifactRecord::new(artifact.clone()).unwrap();
+
     let mut reordered = artifact;
     reordered.fresh = true;
     reordered.features.reverse();
@@ -553,30 +604,33 @@ fn normalizes_cargo_observations_without_changing_profile_settings() {
 #[test]
 fn validates_cargo_artifact_identity_and_paths() {
     let encoded = serde_json::to_value(cargo_artifact()).unwrap();
+
     let cases = [
-        ("/package_id", serde_json::json!("")), // Missing package identity.
-        ("/target/name", serde_json::json!("")), // Missing target name.
-        ("/target/kind", serde_json::json!([])), // Missing target kinds.
-        ("/target/crate_types", serde_json::json!([])), // Missing crate types.
-        ("/target/kind", serde_json::json!([""])), // Empty target kind.
-        ("/target/crate_types", serde_json::json!([""])), // Empty crate type.
-        ("/profile/opt_level", serde_json::json!("")), // Missing optimization level.
-        ("/manifest_path", serde_json::json!("Cargo.toml")), // Relative manifest path.
-        ("/target/src_path", serde_json::json!("src/lib.rs")), // Relative source path.
+        ("/package_id", serde_json::json!("")), // Require the package identity.
+        ("/target/name", serde_json::json!("")), // Require the target name.
+        ("/target/kind", serde_json::json!([])), // Require the target kinds.
+        ("/target/crate_types", serde_json::json!([])), // Require the crate types.
+        ("/target/kind", serde_json::json!([""])), // Reject an empty target kind.
+        ("/target/crate_types", serde_json::json!([""])), // Reject an empty crate type.
+        ("/profile/opt_level", serde_json::json!("")), // Require the optimization level.
+        ("/manifest_path", serde_json::json!("Cargo.toml")), // Reject a relative manifest path.
+        ("/target/src_path", serde_json::json!("src/lib.rs")), // Reject a relative source path.
         (
             "/target/src_path",
             serde_json::json!("/workspace/../lib.rs"),
-        ), // Parent traversal.
-        ("/filenames", serde_json::json!(["target/lib.rlib"])), // Relative output path.
-        ("/executable", serde_json::json!("target/example")), // Relative executable path.
-        ("/features", serde_json::json!([""])), // Empty feature.
-        ("/target/required-features", serde_json::json!([""])), // Empty required feature.
+        ), // Reject `..` components.
+        ("/filenames", serde_json::json!(["target/lib.rlib"])), // Reject a relative output path.
+        ("/executable", serde_json::json!("target/example")), // Reject a relative executable path.
+        ("/features", serde_json::json!([""])), // Reject an empty feature.
+        ("/target/required-features", serde_json::json!([""])), // Reject an empty feature.
     ];
 
     for (pointer, value) in cases {
         let mut invalid = encoded.clone();
         *invalid.pointer_mut(pointer).unwrap() = value;
+
         let artifact = serde_json::from_value(invalid.clone()).unwrap();
+
         assert!(CargoArtifactRecord::new(artifact).is_err(), "{pointer}");
         assert!(
             serde_json::from_value::<CargoArtifactRecord>(invalid).is_err(),
@@ -597,7 +651,7 @@ fn accepts_empty_cargo_features_and_outputs() {
 
 #[test]
 fn requires_analysis_in_current_capture_records() {
-    let mut encoded = serde_json::to_value(record()).unwrap();
+    let mut encoded = serde_json::to_value(capture_record()).unwrap();
     encoded.as_object_mut().unwrap().remove("analysis");
 
     assert_record_error(

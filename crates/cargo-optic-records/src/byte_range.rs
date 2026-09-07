@@ -60,6 +60,7 @@ struct RawByteRange {
 
 impl TryFrom<RawByteRange> for ByteRange {
     type Error = Error;
+
     fn try_from(raw: RawByteRange) -> Result<Self, Error> {
         Self::new(raw.start, raw.length)
     }

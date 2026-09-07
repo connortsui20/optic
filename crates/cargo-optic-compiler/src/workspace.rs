@@ -90,24 +90,30 @@ fn resolve_executable(program: &Path, directory: &Path) -> Result<PathBuf, Error
         return Ok(directory.join(program));
     }
 
-    if let Some(path) = env::var_os("PATH") {
-        for entry in env::split_paths(&path) {
-            let candidate = directory.join(entry).join(program);
-            // An earlier non-executable file must not hide a later Cargo executable on PATH.
-            if candidate.is_file()
-                && accessat(CWD, &candidate, Access::EXEC_OK, AtFlags::EACCESS).is_ok()
-            {
-                return Ok(candidate);
-            }
-        }
-    }
-
-    Err(Error::CompilerEnvironment {
+    find_executable_on_path(program, directory).ok_or_else(|| Error::CompilerEnvironment {
         message: format!(
             "Cargo must resolve to an executable on PATH, got {}",
             program.display()
         ),
     })
+}
+
+/// Retains the first executable's invocation path, including its symlink name.
+fn find_executable_on_path(program: &Path, directory: &Path) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+
+    for entry in env::split_paths(&path) {
+        let candidate = directory.join(entry).join(program);
+
+        // An earlier non-executable file must not hide a later Cargo executable on PATH.
+        if candidate.is_file()
+            && accessat(CWD, &candidate, Access::EXEC_OK, AtFlags::EACCESS).is_ok()
+        {
+            return Some(candidate);
+        }
+    }
+
+    None
 }
 
 fn query_metadata(
@@ -122,9 +128,11 @@ fn query_metadata(
         if !request.features().is_empty() {
             command.features(CargoOpt::SomeFeatures(request.features().to_vec()));
         }
+
         if request.all_features() {
             command.features(CargoOpt::AllFeatures);
         }
+
         if request.no_default_features() {
             command.features(CargoOpt::NoDefaultFeatures);
         }

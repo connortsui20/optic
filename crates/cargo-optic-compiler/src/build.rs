@@ -23,6 +23,7 @@ pub(crate) fn resolve_package<'a>(
         .workspace_packages()
         .into_iter()
         .find(|package| package.name == name);
+
     let Some(package) = package else {
         return PackageNotFoundSnafu { package: name }.fail();
     };
@@ -77,9 +78,11 @@ pub(crate) fn cargo_arguments(request: &BuildRequest) -> Vec<String> {
         arguments.push("--features".to_owned());
         arguments.push(request.features().join(","));
     }
+
     if request.all_features() {
         arguments.push("--all-features".to_owned());
     }
+
     if request.no_default_features() {
         arguments.push("--no-default-features".to_owned());
     }
