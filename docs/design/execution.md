@@ -275,7 +275,7 @@ does not change product behavior, MVP scope, or test requirements.
 - [x] Correct obsolete setup instructions and claims that temporary evidence remains available.
 - [x] Add a review entry point for `main`, linked from `AGENTS.md` and the README.
 - [x] Verify Markdown links, branch roles, scope boundaries, and the documentation-only diff.
-- [ ] Publish the documentation and rebase `planning` onto the updated `main`.
+- [x] Publish the documentation and rebase `planning` onto the updated `main`.
 
 The review entry point identifies the required documents, evidence limits, and full-tree review
 scope. It requires no prior conversation or personal skill installation. Historical results remain
@@ -287,3 +287,13 @@ The local link check passed 161 repository links and anchors across both documen
 Standalone/workspace formatting, Clippy with warnings denied, and workspace rustdoc with warnings
 denied passed locally. The prose checks covered sentence length, terminology, and branch authority.
 The diff changes Markdown only. Product code, manifests, tests, and CI configuration are unchanged.
+
+PR #19 merged on 2026-09-07 at 12:26:55 UTC as `34e01f7`.
+The merged tree matches the reviewed documentation candidate `fcaa707`.
+[CI run 34121567684](https://github.com/connortsui20/optic/actions/runs/34121567684) passed all jobs
+on that candidate. The jobs included Linux/macOS workspace tests and installed-product verification,
+plus formatting, Clippy, and workspace rustdoc.
+The final link check passed 175 repository links and anchors across main and the rebased planning tree.
+
+Planning is rebased onto the updated main. The [review guide](../review.md) is the entry point for a
+fresh review. The cleanup preserves the original MVP contracts, the `prototype` branch, and the stash.
