@@ -96,6 +96,13 @@ These are resource budgets, not compiler limits or a bound on total process memo
 The `cargo-optic-api` package exposes the `optic` library. It provides the same capture policy,
 capture outcome, search references, and typed evidence availability as the CLI.
 
-Read [the architecture](https://github.com/connortsui20/optic/blob/main/docs/architecture.md) for subsystem boundaries and
-[the contributor instructions](https://github.com/connortsui20/optic/blob/main/AGENTS.md) before changing Rust code. The active roadmap and execution
-ledger live on the repository's `planning` branch.
+Read [the architecture][architecture] for subsystem boundaries.
+Before changing Rust code, read [the contributor instructions][contributors].
+Start a code review with [the review guide][review].
+The [planning index][planning] separates current contracts, completed work, and optional research.
+The separate `prototype` branch is experimental context, not a feature-parity requirement.
+
+[architecture]: https://github.com/connortsui20/optic/blob/main/docs/architecture.md
+[contributors]: https://github.com/connortsui20/optic/blob/main/AGENTS.md
+[review]: https://github.com/connortsui20/optic/blob/main/docs/review.md
+[planning]: https://github.com/connortsui20/optic/blob/planning/docs/design/README.md

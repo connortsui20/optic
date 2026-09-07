@@ -2,7 +2,8 @@
 
 Keep code simple enough that a contributor can follow each workflow in one pass.
 
-- Read [the Rust style reference](docs/rust-style.md) before designing or changing Rust code.
+- For a review, start with [the review guide](docs/review.md).
+- Before Rust review or implementation, read [the Rust style reference](docs/rust-style.md).
 - Follow the active contracts on the `planning` branch. Historical research is not additional scope.
 - Preserve the seven product crates. Add internal abstractions only for a current contract or caller.
 - Document public fields, variants, entry points, and non-obvious correctness arguments.
@@ -12,7 +13,9 @@ Keep code simple enough that a contributor can follow each workflow in one pass.
 - Run formatting, Clippy, rustdoc, and the affected tests before handing off a change.
 - Use independent correctness and Rust-style review before merging an integrated product change.
 
-The complete MVP uses one integration branch with cached capture/list/find before narrow show.
+The MVP is complete. Its scope includes cached capture/list/find and narrow source/LLVM show.
+The `main` and `planning` branches contain the required review context. The separate `prototype`
+branch is optional experimental evidence, not a specification or a feature-parity target.
 Persist decisions and checkpoint evidence on `planning` before dependent implementation starts.
 
 Use `bash scripts/check-format.sh` to include the standalone driver in formatting checks.
