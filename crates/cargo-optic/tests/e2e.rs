@@ -14,6 +14,8 @@ use cargo_optic_test_support::TestWorkspace;
 use cargo_optic_test_support::assert_success;
 use cargo_optic_test_support::run as run_command;
 
+/// Runs the public Cargo subcommand and requires successful completion.
+#[track_caller]
 fn run<I, S>(workspace: &TestWorkspace, arguments: I) -> Output
 where
     I: IntoIterator<Item = S>,
@@ -21,6 +23,7 @@ where
 {
     let mut command = command(workspace);
     command.args(arguments);
+
     let output = run_command(&mut command);
     assert_success(&command, &output);
 
@@ -30,15 +33,10 @@ where
 fn command(workspace: &TestWorkspace) -> Command {
     let mut command = Command::new("cargo");
     workspace.apply(&mut command);
+
     let executable = Path::new(env!("CARGO_BIN_EXE_cargo-optic"));
-    let path = command
-        .get_envs()
-        .find(|(name, _)| *name == "PATH")
-        .unwrap()
-        .1
-        .unwrap();
     let mut paths = vec![executable.parent().unwrap().to_owned()];
-    paths.extend(std::env::split_paths(path));
+    paths.extend(std::env::split_paths(command_path(&command)));
     command
         .env("PATH", std::env::join_paths(paths).unwrap())
         .arg("optic");
@@ -46,6 +44,17 @@ fn command(workspace: &TestWorkspace) -> Command {
     command
 }
 
+/// Reads the path that [`TestWorkspace::apply`] sets on the child command.
+#[track_caller]
+fn command_path(command: &Command) -> &OsStr {
+    command
+        .get_envs()
+        .find(|(name, _)| *name == "PATH")
+        .and_then(|(_, value)| value)
+        .expect("TestWorkspace::apply sets PATH before the child command reads it")
+}
+
+/// Retains one successful generic capture for CLI search and history scenarios.
 struct CapturedGenericFixture {
     /// Keeps the captured workspace and its store alive for each command.
     workspace: TestWorkspace,
@@ -56,6 +65,7 @@ struct CapturedGenericFixture {
 }
 
 impl CapturedGenericFixture {
+    #[track_caller]
     fn new() -> Self {
         let workspace = TestWorkspace::new("capture");
 
@@ -70,6 +80,7 @@ impl CapturedGenericFixture {
                 "--release",
             ],
         );
+
         let capture_output = String::from_utf8(captured.stdout).expect("capture output is UTF-8");
         let capture_id = capture_output
             .lines()
@@ -85,6 +96,7 @@ impl CapturedGenericFixture {
         }
     }
 
+    #[track_caller]
     fn find(&self, arguments: &[&str]) -> Output {
         let mut command = command(&self.workspace);
         command
@@ -92,6 +104,7 @@ impl CapturedGenericFixture {
             .arg("--capture")
             .arg(&self.capture_id)
             .args(arguments);
+
         let output = run_command(&mut command);
         assert_success(&command, &output);
 
@@ -106,7 +119,9 @@ fn instance_names(output: &str) -> Vec<&str> {
         .collect()
 }
 
-fn capture_show(workspace: &TestWorkspace, profile: &str) -> String {
+/// Captures the show fixture and returns the capture ID printed by the command.
+#[track_caller]
+fn capture_show_fixture(workspace: &TestWorkspace, profile: &str) -> String {
     let output = run(
         workspace,
         [
@@ -130,6 +145,7 @@ fn capture_show(workspace: &TestWorkspace, profile: &str) -> String {
         .to_owned()
 }
 
+/// Runs a query that must produce exactly one printed instance reference.
 #[track_caller]
 fn find_reference(workspace: &TestWorkspace, capture: &str, query: &str) -> String {
     let output = run(workspace, ["find", "--capture", capture, query]);
@@ -138,6 +154,7 @@ fn find_reference(workspace: &TestWorkspace, capture: &str, query: &str) -> Stri
         .lines()
         .filter_map(|line| line.strip_prefix("  Reference   "))
         .collect::<Vec<_>>();
+
     assert_eq!(references.len(), 1, "{stdout}");
 
     references[0].to_owned()
@@ -154,26 +171,27 @@ fn direct_cli_skips_non_executable_cargo_on_path() {
 
     let mut ordinary = Command::new("cargo");
     workspace.apply(&mut ordinary);
-    let path = ordinary
-        .get_envs()
-        .find(|(name, _)| *name == "PATH")
-        .unwrap()
-        .1
-        .unwrap();
-    let paths = std::iter::once(shadow).chain(std::env::split_paths(path));
+    let paths = std::iter::once(shadow).chain(std::env::split_paths(command_path(&ordinary)));
     let path = std::env::join_paths(paths).unwrap();
     ordinary.env("PATH", &path).env_remove("CARGO").arg("-V");
+
     let output = run_command(&mut ordinary);
     assert_success(&ordinary, &output);
 
-    for cargo in [None, Some(""), Some("cargo")] {
+    for cargo in [
+        None,          // Cargo has no override.
+        Some(""),      // The Cargo override is empty.
+        Some("cargo"), // Cargo uses the ordinary command name.
+    ] {
         let mut direct = Command::new(env!("CARGO_BIN_EXE_cargo-optic"));
         workspace.apply(&mut direct);
         direct.env("PATH", &path).args(["optic", "list-captures"]);
+
         match cargo {
             Some(cargo) => direct.env("CARGO", cargo),
             None => direct.env_remove("CARGO"),
         };
+
         let output = run_command(&mut direct);
         assert_success(&direct, &output);
     }
@@ -189,26 +207,26 @@ fn direct_cli_keeps_path_order_and_the_cargo_symlink_name() {
     )
     .unwrap();
     fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+
     let first = workspace.workspace().join("tools");
     fs::create_dir(&first).unwrap();
     let cargo = first.join("cargo");
     std::os::unix::fs::symlink(&shim, &cargo).unwrap();
 
-    for entry in [first.as_path(), Path::new("tools")] {
+    for entry in [
+        first.as_path(),    // The PATH entry is absolute.
+        Path::new("tools"), // The PATH entry is relative to the workspace.
+    ] {
         let mut direct = Command::new(env!("CARGO_BIN_EXE_cargo-optic"));
         workspace.apply(&mut direct);
-        let path = direct
-            .get_envs()
-            .find(|(name, _)| *name == "PATH")
-            .unwrap()
-            .1
-            .unwrap();
-        let paths = std::iter::once(entry.to_owned()).chain(std::env::split_paths(path));
+        let paths =
+            std::iter::once(entry.to_owned()).chain(std::env::split_paths(command_path(&direct)));
         let path = std::env::join_paths(paths).unwrap();
         direct
             .env("PATH", path)
             .env_remove("CARGO")
             .args(["optic", "list-captures"]);
+
         let output = run_command(&mut direct);
 
         assert!(!output.status.success());
@@ -226,12 +244,16 @@ fn direct_cli_does_not_replace_explicit_non_executable_cargo() {
     fs::write(&cargo, "not an executable\n").unwrap();
     fs::set_permissions(&cargo, fs::Permissions::from_mode(0o644)).unwrap();
 
-    for selected in [cargo.as_os_str(), OsStr::new("./chosen-cargo")] {
+    for selected in [
+        cargo.as_os_str(),            // The Cargo path is absolute.
+        OsStr::new("./chosen-cargo"), // The Cargo path is relative to the workspace.
+    ] {
         let mut direct = Command::new(env!("CARGO_BIN_EXE_cargo-optic"));
         workspace.apply(&mut direct);
         direct
             .env("CARGO", selected)
             .args(["optic", "list-captures"]);
+
         let output = run_command(&mut direct);
 
         assert!(!output.status.success());
@@ -242,25 +264,30 @@ fn direct_cli_does_not_replace_explicit_non_executable_cargo() {
 #[test]
 fn shows_exact_api_bytes_after_checkout_changes() {
     let workspace = TestWorkspace::new("show");
-    let capture = capture_show(&workspace, "release");
+    let capture = capture_show_fixture(&workspace, "release");
     let reference = find_reference(&workspace, &capture, "show_fixture::source_items::ordinary");
+
     let mut expected = Command::new(std::env::current_exe().unwrap());
     workspace.apply(&mut expected);
     expected
         .args(["--exact", "write_api_evidence_in_child", "--nocapture"])
         .env("OPTIC_TEST_INSTANCE", &reference)
         .env("OPTIC_TEST_EVIDENCE", workspace.observations());
+
     let output = run_command(&mut expected);
     assert_success(&expected, &output);
+
     let source_bytes = fs::read(workspace.observations().join("source")).unwrap();
     let llvm_bytes = fs::read(workspace.observations().join("llvm")).unwrap();
-    assert!(!llvm_bytes.is_empty());
     let whole_function =
         fs::read_to_string(workspace.workspace().join("expected/ordinary.txt")).unwrap();
+
+    assert!(!llvm_bytes.is_empty());
     assert_eq!(
         source_bytes,
         whole_function.strip_suffix('\n').unwrap().as_bytes()
     );
+
     fs::write(
         workspace.workspace().join("src/source_items.rs"),
         "pub fn broken( {\n",
@@ -278,6 +305,7 @@ fn shows_exact_api_bytes_after_checkout_changes() {
             &workspace,
             ["show", "--instance", &reference, "--output", format],
         );
+
         assert_eq!(output.stdout, bytes, "{format}");
         assert!(
             String::from_utf8(output.stderr)
@@ -287,7 +315,9 @@ fn shows_exact_api_bytes_after_checkout_changes() {
     }
 
     assert!(!drivers.exists());
+
     let output = run(&workspace, ["list-captures"]);
+
     assert_eq!(
         String::from_utf8(output.stdout)
             .unwrap()
@@ -301,7 +331,7 @@ fn shows_exact_api_bytes_after_checkout_changes() {
 #[test]
 fn show_exits_successfully_when_stdout_closes() {
     let workspace = TestWorkspace::new("show");
-    let capture = capture_show(&workspace, "release");
+    let capture = capture_show_fixture(&workspace, "release");
     let reference = find_reference(&workspace, &capture, "show_fixture::source_items::ordinary");
 
     for format in ["source", "llvm"] {
@@ -310,6 +340,7 @@ fn show_exits_successfully_when_stdout_closes() {
             .args(["show", "--instance", &reference, "--output", format])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+
         let mut child = command.spawn().unwrap();
         drop(child.stdout.take());
         let output = child.wait_with_output().unwrap();
@@ -326,15 +357,15 @@ fn show_exits_successfully_when_stdout_closes() {
 #[test]
 fn unavailable_show_has_empty_stdout_and_a_failing_status() {
     let workspace = TestWorkspace::new("show");
-    let capture = capture_show(&workspace, "incremental");
+    let capture = capture_show_fixture(&workspace, "incremental");
 
     for (query, format, reason) in [
-        ("show_dependency::external_generic", "source", "nonlocal"), // Unsupported source provenance.
+        ("show_dependency::external_generic", "source", "nonlocal"), // The definition is nonlocal.
         (
             "show_fixture::source_items::generated",
             "source",
             "expansion",
-        ), // Generated function source.
+        ), // The function source is generated.
         (
             "show_fixture::source_items::ordinary",
             "llvm",
@@ -344,10 +375,12 @@ fn unavailable_show_has_empty_stdout_and_a_failing_status() {
         let reference = find_reference(&workspace, &capture, query);
         let mut command = command(&workspace);
         command.args(["show", "--instance", &reference, "--output", format]);
+
         let output = run_command(&mut command);
+        let stderr = String::from_utf8(output.stderr).unwrap();
+
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
-        let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(stderr.contains(&reference), "{stderr}");
         assert!(stderr.contains(reason), "{stderr}");
     }
@@ -358,20 +391,26 @@ fn write_api_evidence_in_child() {
     let Ok(reference) = std::env::var("OPTIC_TEST_INSTANCE") else {
         return;
     };
+
     let reference = reference.parse::<optic::InstanceRef>().unwrap();
     let optic = optic::Optic::open(&std::env::current_dir().unwrap()).unwrap();
     let directory = std::path::PathBuf::from(std::env::var_os("OPTIC_TEST_EVIDENCE").unwrap());
+
     let optic::SourceEvidence::Available { evidence, .. } = optic.source(&reference).unwrap()
     else {
         panic!("expected stored function source");
     };
+
     let mut source = Vec::new();
     optic.copy_evidence(&evidence, &mut source).unwrap();
     fs::write(directory.join("source"), source).unwrap();
+
     let optic::LlvmEvidence::Available(bodies) = optic.llvm(&reference).unwrap() else {
         panic!("expected stored optimized LLVM");
     };
+
     assert!(!bodies.is_empty());
+
     let mut llvm = Vec::new();
 
     for (index, body) in bodies.iter().enumerate() {
@@ -508,8 +547,10 @@ fn reports_reuse_and_forced_capture_through_cargo_discovery() {
         "generic",
         "--release",
     ];
+
     let reused = run(&fixture.workspace, arguments);
     let reused_text = String::from_utf8(reused.stdout).unwrap();
+
     assert_eq!(
         reused_text.lines().next().unwrap(),
         format!("Reused {}", fixture.capture_id)
@@ -517,6 +558,7 @@ fn reports_reuse_and_forced_capture_through_cargo_discovery() {
 
     let listed = run(&fixture.workspace, ["list-captures"]);
     let listed_text = String::from_utf8(listed.stdout).unwrap();
+
     assert_eq!(
         listed_text
             .lines()
@@ -533,9 +575,12 @@ fn reports_reuse_and_forced_capture_through_cargo_discovery() {
         .unwrap()
         .strip_prefix("Captured ")
         .unwrap();
+
     assert_ne!(fresh_id, fixture.capture_id);
+
     let repeated = run(&fixture.workspace, arguments);
     let repeated_text = String::from_utf8(repeated.stdout).unwrap();
+
     assert_eq!(
         repeated_text.lines().next().unwrap(),
         format!("Reused {fresh_id}")
@@ -543,6 +588,7 @@ fn reports_reuse_and_forced_capture_through_cargo_discovery() {
 
     let listed = run(&fixture.workspace, ["list-captures"]);
     let listed_text = String::from_utf8(listed.stdout).unwrap();
+
     assert_eq!(
         listed_text
             .lines()
@@ -563,6 +609,7 @@ fn captures_the_documented_library_target() {
         ["capture", "-p", "capture_fixture", "--lib", "--release"],
     );
     let captured_text = String::from_utf8(captured.stdout).expect("capture output is UTF-8");
+
     assert!(captured_text.contains("Target     lib capture_fixture"));
     assert!(
         temporary
@@ -590,6 +637,7 @@ fn forwards_named_feature_and_no_default_feature_selection() {
             "--no-default-features",
         ],
     );
+
     assert!(
         temporary
             .target()
@@ -623,12 +671,12 @@ fn forwards_all_feature_selection() {
 fn exits_successfully_when_stdout_closes() {
     let temporary = TestWorkspace::new("capture");
     let mut command = command(&temporary);
-    let mut child = command
+    command
         .arg("list-captures")
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("the Cargo Optic binary can run");
+        .stderr(Stdio::piped());
+
+    let mut child = command.spawn().expect("the Cargo Optic binary can run");
     drop(child.stdout.take());
 
     let output = child

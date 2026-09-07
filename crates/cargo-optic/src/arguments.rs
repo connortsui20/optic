@@ -177,6 +177,9 @@ pub(crate) enum Command {
     },
 }
 
+/// Parses the process arguments and validates the selected build request.
+///
+/// Clap handles help and grammar errors by exiting. Invalid product selectors return an error.
 pub(crate) fn parse() -> Result<Command, InvalidBuildRequest> {
     let Cargo::Optic { command } = Cargo::parse();
 
@@ -229,9 +232,11 @@ impl CaptureOptions {
 
         let mut request =
             BuildRequest::new(self.package, target, profile)?.with_features(self.features)?;
+
         if self.all_features {
             request = request.with_all_features();
         }
+
         if self.no_default_features {
             request = request.without_default_features();
         }
@@ -252,9 +257,12 @@ mod tests {
     use super::FindOptions;
     use super::ParsedCommand;
 
-    fn capture_options(arguments: Vec<&str>) -> CaptureOptions {
+    /// Requires valid capture syntax and returns its selectors for request assertions.
+    #[track_caller]
+    fn parse_capture_options(arguments: &[&str]) -> CaptureOptions {
         let Cargo::Optic { command } =
             Cargo::try_parse_from(arguments).expect("the fixture command is valid");
+
         let ParsedCommand::Capture(options) = command else {
             panic!("the fixture command is a capture command");
         };
@@ -262,9 +270,12 @@ mod tests {
         options
     }
 
-    fn find_options(arguments: &[&str]) -> FindOptions {
+    /// Requires valid find syntax and returns its selectors for query assertions.
+    #[track_caller]
+    fn parse_find_options(arguments: &[&str]) -> FindOptions {
         let Cargo::Optic { command } =
             Cargo::try_parse_from(arguments).expect("the fixture command is valid");
+
         let ParsedCommand::Find(options) = command else {
             panic!("the fixture command is a find command");
         };
@@ -312,7 +323,8 @@ mod tests {
                 selector,
             ];
             arguments.extend(name);
-            let options = capture_options(arguments);
+
+            let options = parse_capture_options(&arguments);
             let request = options
                 .into_request()
                 .expect("the fixture request is valid");
@@ -368,7 +380,7 @@ mod tests {
 
     #[test]
     fn accepts_an_explicit_profile() {
-        let options = capture_options(vec![
+        let options = parse_capture_options(&[
             "cargo",
             "optic",
             "capture",
@@ -397,17 +409,18 @@ mod tests {
                 "--lib",
                 "--release",
             ];
+
             if fresh {
                 arguments.push("--fresh");
             }
 
-            assert_eq!(capture_options(arguments).fresh, fresh);
+            assert_eq!(parse_capture_options(&arguments).fresh, fresh);
         }
     }
 
     #[test]
     fn accepts_cargo_feature_selection() {
-        let options = capture_options(vec![
+        let options = parse_capture_options(&[
             "cargo",
             "optic",
             "capture",
@@ -443,7 +456,7 @@ mod tests {
 
     #[test]
     fn parses_a_capture_scoped_find_with_the_default_limit() {
-        let options = find_options(&[
+        let options = parse_find_options(&[
             "cargo",
             "optic",
             "find",
@@ -483,6 +496,7 @@ mod tests {
                 name,
             ])
             .unwrap();
+
             let ParsedCommand::Show(options) = command else {
                 panic!("the explicit show command must parse as show");
             };

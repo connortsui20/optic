@@ -24,23 +24,30 @@ use crate::captures::validate_capture_scope;
 use crate::error::InvalidCandidateSnafu;
 use crate::record_io::read_record;
 
-/// Revision 1 associates a request digest, compilation token, and completed capture ID.
-/// The request digest includes the compiler's driver key and evidence policy revision.
-const POINTER_FORMAT_VERSION: u32 = 1;
-
+/// A durable association whose identities are checked by [`Store::read_candidate`].
+///
+/// Deserialization validates each field's representation. The store then checks the format and
+/// agreement with the pointer path and completed capture before returning evidence.
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CandidatePointer {
     format_version: u32,
+    /// Must match the request key encoded in the pointer's filename and capture header.
     request_key: CaptureKey,
+    /// Must match the selected compilation recorded by the completed capture.
     token: AnalysisToken,
     capture_id: CaptureId,
 }
 
 impl CandidatePointer {
+    /// Revision 1 associates a request digest, compilation token, and completed capture ID.
+    ///
+    /// The request digest includes the compiler's driver key and evidence policy revision.
+    const FORMAT_VERSION: u32 = 1;
+
     pub(crate) fn new(capture: &CaptureRecord) -> Self {
         Self {
-            format_version: POINTER_FORMAT_VERSION,
+            format_version: Self::FORMAT_VERSION,
             request_key: capture.analysis().request_key().clone(),
             token: capture.analysis().token().clone(),
             capture_id: capture.id().clone(),
@@ -77,14 +84,16 @@ impl Store {
             }
             Err(error) => return Err(error),
         };
-        if pointer.format_version != POINTER_FORMAT_VERSION {
+
+        if pointer.format_version != CandidatePointer::FORMAT_VERSION {
             return InvalidCandidateSnafu {
                 path,
-                expected: format!("pointer format {POINTER_FORMAT_VERSION}"),
+                expected: format!("pointer format {}", CandidatePointer::FORMAT_VERSION),
                 actual: format!("pointer format {}", pointer.format_version),
             }
             .fail();
         }
+
         if &pointer.request_key != key {
             return InvalidCandidateSnafu {
                 path,
@@ -99,7 +108,9 @@ impl Store {
             Err(Error::CaptureNotFound { .. }) => return Ok(None),
             Err(error) => return Err(error),
         };
+
         let capture = read_capture_from_directory(&directory, &pointer.capture_id)?;
+
         if capture.analysis().request_key() != key {
             return InvalidCandidateSnafu {
                 path,
@@ -108,6 +119,7 @@ impl Store {
             }
             .fail();
         }
+
         if capture.analysis().token() != &pointer.token {
             return InvalidCandidateSnafu {
                 path,

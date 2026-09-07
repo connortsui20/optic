@@ -86,12 +86,14 @@ pub fn prepare_build<'a>(
         path: package.manifest_path.clone().into(),
         source,
     })?;
+
     let compiler = CompilerContext::discover(workspace)?;
     let driver = RustcDriver::provision(workspace, compiler.identity())?;
 
     if compiler.wrappers_configured() {
         eprintln!(
-            "warning: Cargo Optic does not support configured rustc wrappers; disabling them for this capture"
+            "warning: Cargo Optic does not support configured rustc wrappers; \
+             disabling them for this capture"
         );
         eprintln!("warning: the captured compiler output can differ from a normal wrapped build");
     }
@@ -105,6 +107,7 @@ pub fn prepare_build<'a>(
         workspace.invocation_directory().to_owned(),
         cargo_arguments(request),
     )?;
+
     let output = Command::new(workspace.cargo())
         .current_dir(workspace.invocation_directory())
         .arg("-vV")
@@ -113,6 +116,7 @@ pub fn prepare_build<'a>(
             program: workspace.cargo().to_owned(),
             source,
         })?;
+
     if !output.status.success() {
         return Err(Error::ProcessFailed {
             program: workspace.cargo().to_owned(),
@@ -126,6 +130,7 @@ pub fn prepare_build<'a>(
         path: workspace.invocation_directory().to_owned(),
         source,
     })?;
+
     let request_key = request_key(
         &build,
         &package.id,
@@ -162,14 +167,16 @@ impl PreparedBuild<'_> {
     ///
     /// # Errors
     ///
-    /// Returns an error for a mismatched candidate, repeated probe, unclassified Cargo failure,
-    /// conflicting receipts, or success without one affirmative matching fresh artifact.
+    /// Returns an error for a mismatched candidate, a probe after a stopped probe, an unclassified
+    /// Cargo failure, conflicting receipts, or success without one affirmative matching fresh
+    /// artifact.
     pub fn probe(&mut self, candidate: &CaptureAnalysis) -> Result<Freshness, Error> {
         if candidate.request_key() != &self.request_key {
             return Err(invalid_environment(
                 "candidate request key must match the prepared request, got another key",
             ));
         }
+
         if self.stopped_probe.is_some() {
             return Err(invalid_environment(
                 "a stopped probe requires collection, got another probe",
@@ -180,6 +187,7 @@ impl PreparedBuild<'_> {
         let temporary = temporary_directory()?;
         let mut command = self.command(&marker, temporary.path())?;
         command.env(protocol::MODE_ENV, "probe");
+
         let mut attempt = CargoAttempt::run(command, temporary, &self.package, &self.target)?;
         let result = self.classify_probe(&attempt, candidate, &marker);
 
@@ -206,6 +214,7 @@ impl PreparedBuild<'_> {
     /// artifact and the selected driver produces a complete manifest for this token.
     pub fn collect(mut self) -> Result<CollectedBuild, Error> {
         let result = self.collect_new_token();
+
         if result.is_err()
             && let Some(probe) = &mut self.stopped_probe
         {
@@ -221,11 +230,14 @@ impl PreparedBuild<'_> {
         let temporary = temporary_directory()?;
         let mut command = self.command(&marker, temporary.path())?;
         command.env(protocol::MODE_ENV, "collect");
+
         let mut attempt = CargoAttempt::run(command, temporary, &self.package, &self.target)?;
         attempt.replay()?;
+
         if !attempt.status.success() {
             return Err(attempt.failure(self.workspace.cargo()));
         }
+
         if verified_stale_receipt(&attempt.path("stale"), &marker)? {
             return Err(invalid_environment(
                 "collection requires no stale receipt, got a stopped probe receipt",
@@ -253,6 +265,7 @@ impl PreparedBuild<'_> {
         marker: &str,
     ) -> Result<Freshness, Error> {
         let stale = verified_stale_receipt(&attempt.path("stale"), marker)?;
+
         if attempt
             .path("manifest")
             .try_exists()
@@ -274,6 +287,7 @@ impl PreparedBuild<'_> {
 
             return Err(attempt.failure(self.workspace.cargo()));
         }
+
         if stale {
             return Err(invalid_environment(
                 "successful probe requires no stale receipt, got a stopped invocation",
@@ -281,9 +295,11 @@ impl PreparedBuild<'_> {
         }
 
         let artifact = attempt.observation.completed(&self.target, true)?;
+
         if &artifact != candidate.artifact() {
             return Err(invalid_environment(
-                "fresh selected artifact must match the stored observation, got different Cargo artifact fields",
+                "fresh selected artifact must match the stored observation, \
+                 got different Cargo artifact fields",
             ));
         }
 
@@ -297,6 +313,7 @@ impl PreparedBuild<'_> {
                 path: self.target.src_path.clone().into(),
                 source,
             })?;
+
         let mut command = Command::new(self.workspace.cargo());
         command
             .current_dir(self.workspace.invocation_directory())
@@ -332,6 +349,10 @@ fn selected_target_marker(token: &AnalysisToken) -> String {
     format!("{}\"{}\"", protocol::MARKER_PREFIX, token.as_str())
 }
 
+/// Accepts only this attempt's exact receipt, with an absent file returning false.
+///
+/// A present receipt must be a regular file with the exact protocol header and token. Wrong file
+/// kinds, malformed bytes, and filesystem failures return errors instead of an absent receipt.
 fn verified_stale_receipt(path: &Path, marker: &str) -> Result<bool, Error> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -344,17 +365,21 @@ fn verified_stale_receipt(path: &Path, marker: &str) -> Result<bool, Error> {
             });
         }
     };
+
     let expected = protocol::header(marker);
+
     if !metadata.is_file() || metadata.len() != expected.len() as u64 {
         return Err(invalid_environment(
             "stale receipt must contain exactly this attempt's header, got an invalid file",
         ));
     }
+
     let actual = fs::read(path).map_err(|source| Error::Filesystem {
         operation: "read stale receipt",
         path: path.to_owned(),
         source,
     })?;
+
     if actual != expected {
         return Err(invalid_environment(
             "stale receipt must match this analysis token and protocol, got a different header",
@@ -379,9 +404,12 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("stale");
         let marker = selected_target_marker(&AnalysisToken::generate());
+
         assert!(!verified_stale_receipt(&path, &marker).unwrap());
+
         fs::write(&path, protocol::header(&marker)).unwrap();
         assert!(verified_stale_receipt(&path, &marker).unwrap());
+
         let other = selected_target_marker(&AnalysisToken::generate());
         assert!(verified_stale_receipt(&path, &other).is_err());
 
@@ -391,9 +419,16 @@ mod tests {
         wrong_magic[0] = 0;
         let mut trailing = protocol::header(&marker);
         trailing.push(0);
-        for bytes in [wrong_version, wrong_magic, trailing, Vec::new()] {
+
+        for (case, bytes) in [
+            ("version", wrong_version), // Reject an unsupported protocol version.
+            ("magic", wrong_magic),     // Reject a different file signature.
+            ("trailing", trailing),     // Reject bytes after the exact header.
+            ("empty", Vec::new()),      // Reject an empty receipt.
+        ] {
             fs::write(&path, bytes).unwrap();
-            assert!(verified_stale_receipt(&path, &marker).is_err());
+
+            assert!(verified_stale_receipt(&path, &marker).is_err(), "{case}");
         }
     }
 }

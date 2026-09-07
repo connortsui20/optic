@@ -20,19 +20,35 @@ use crate::driver::RustcDriver;
 use crate::prepare_build;
 use crate::toolchain::CompilerContext;
 
+/// Supplies one fresh selected artifact whose feature order still needs normalization.
+#[track_caller]
 pub(crate) fn artifact() -> cargo_metadata::Artifact {
     serde_json::from_value(serde_json::json!({
         "package_id": "path+file:///workspace#fixture@0.1.0",
         "manifest_path": "/workspace/Cargo.toml",
         "target": {
-            "kind": ["lib"], "crate_types": ["lib"], "name": "fixture",
-            "src_path": "/workspace/src/lib.rs", "edition": "2024",
-            "doc": true, "doctest": true, "test": true
+            "kind": ["lib"],
+            "crate_types": ["lib"],
+            "name": "fixture",
+            "src_path": "/workspace/src/lib.rs",
+            "edition": "2024",
+            "doc": true,
+            "doctest": true,
+            "test": true
         },
-        "profile": {"opt_level": "2", "debuginfo": 2, "debug_assertions": false, "overflow_checks": true, "test": false},
-        "features": ["beta", "alpha"], "filenames": ["/target/libfixture.rlib"],
-        "executable": null, "fresh": true
-    })).unwrap()
+        "profile": {
+            "opt_level": "2",
+            "debuginfo": 2,
+            "debug_assertions": false,
+            "overflow_checks": true,
+            "test": false
+        },
+        "features": ["beta", "alpha"],
+        "filenames": ["/target/libfixture.rlib"],
+        "executable": null,
+        "fresh": true
+    }))
+    .unwrap()
 }
 
 /// Owns an inline package and isolated child environment for private compiler tests.
@@ -43,6 +59,7 @@ struct PrivateFixture {
 }
 
 impl PrivateFixture {
+    #[track_caller]
     fn new() -> Self {
         let output = run(Command::new("rustc").args(["--print", "sysroot"]));
         let toolchain = fs::canonicalize(String::from_utf8(output.stdout).unwrap().trim()).unwrap();
@@ -54,7 +71,16 @@ impl PrivateFixture {
         fs::create_dir_all(root.join("package/src")).unwrap();
         fs::create_dir(root.join("cargo-home")).unwrap();
         fs::create_dir(root.join("temp")).unwrap();
-        fs::write(root.join("package/Cargo.toml"), "[package]\nname = 'compiler_fixture'\nversion = '0.0.0'\nedition = '2024'\n\n[workspace]\n").unwrap();
+        fs::write(
+            root.join("package/Cargo.toml"),
+            "[package]\n\
+             name = 'compiler_fixture'\n\
+             version = '0.0.0'\n\
+             edition = '2024'\n\
+             \n\
+             [workspace]\n",
+        )
+        .unwrap();
         fs::write(
             root.join("package/src/lib.rs"),
             "#[unsafe(no_mangle)]\npub fn retained(value: u64) -> u64 { value.wrapping_add(1) }\n",

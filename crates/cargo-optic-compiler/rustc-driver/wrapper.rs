@@ -1,11 +1,12 @@
 //! Implements Cargo's outer rustc-wrapper calling convention.
 //!
 //! Cargo passes the real compiler as argument zero. Discovery and nonselected compilation forward
-//! to that compiler. A selected invocation must match the prepared compiler, source, and crate name.
-//! Probe mode writes a receipt and stops before analysis. Collection removes the marker and starts
-//! the inner driver with the original Rust arguments.
+//! to that compiler. A selected invocation must match the prepared compiler, source, and crate
+//! name. Probe mode writes a receipt and stops before analysis. Collection removes the marker and
+//! starts the inner driver with the original Rust arguments.
 
 use std::env;
+use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
@@ -20,6 +21,7 @@ use crate::protocol::SELECTED_TARGET_MARKER_ENV;
 /// Replaces the wrapper with rustc or with the inner analysis invocation.
 pub(crate) fn run() -> ExitCode {
     let mut arguments = env::args_os().skip(1).collect::<Vec<_>>();
+
     if arguments.is_empty() {
         return failure("optic rustc wrapper must receive a compiler path, got none");
     }
@@ -27,13 +29,12 @@ pub(crate) fn run() -> ExitCode {
     let Some(marker) = env::var_os(SELECTED_TARGET_MARKER_ENV) else {
         return failure(format!("{SELECTED_TARGET_MARKER_ENV} is not set"));
     };
-    let selected_target = arguments.iter().position(|argument| argument == &marker);
-    if selected_target.is_none() {
-        if arguments.iter().any(|argument| {
-            argument
-                .as_encoded_bytes()
-                .starts_with(protocol::MARKER_PREFIX.as_bytes())
-        }) {
+
+    let Some(selected_target) = arguments.iter().position(|argument| argument == &marker) else {
+        if arguments
+            .iter()
+            .any(|argument| is_analysis_marker(argument))
+        {
             return failure(
                 "selected invocation must use this analysis marker, got another marker",
             );
@@ -44,78 +45,74 @@ pub(crate) fn run() -> ExitCode {
         command.args(arguments);
 
         return execute(command);
-    }
+    };
 
     if let Err(error) = verify_selected(&arguments, &marker) {
         return failure(error);
     }
 
     match env::var(protocol::MODE_ENV).as_deref() {
-        Ok("probe") => {
-            let Some(path) = env::var_os(protocol::STALE_RECEIPT_ENV) else {
-                return failure(format!("{} is not set", protocol::STALE_RECEIPT_ENV));
-            };
-            let Some(marker) = marker.to_str() else {
-                return failure("selected marker must be UTF-8, got a non-UTF-8 argument");
-            };
-            if let Err(error) = fs::write(path, protocol::header(marker)) {
-                return failure(format!("failed to write stale receipt: {error}"));
-            }
-
-            return failure("Cargo Optic stopped a stale selected-target probe before analysis");
-        }
+        Ok("probe") => return stop_probe(&marker),
         Ok("collect") => {}
         _ => return failure("compiler mode must be probe or collect, got an unsupported value"),
     }
 
-    arguments.remove(selected_target.expect("the forwarding branch returned for an absent marker"));
+    arguments.remove(selected_target);
+
     let executable = match env::current_exe() {
         Ok(executable) => executable,
         Err(error) => return failure(format!("failed to find the rustc driver: {error}")),
     };
+
     let mut command = Command::new(executable);
     command.args(arguments).env(DRIVER_INNER_ENV, "1");
 
     execute(command)
 }
 
+/// Verifies the prepared target identity before either selected-invocation route can run.
+///
+/// The arguments **must** be nonempty, as checked by [`run`] before it calls this helper.
 fn verify_selected(arguments: &[OsString], marker: &OsString) -> Result<(), String> {
     let compiler = env::var_os(protocol::RUSTC_ENV).ok_or("selected compiler is not set")?;
     let source = env::var_os(protocol::SOURCE_ENV).ok_or("selected source is not set")?;
     let crate_name =
         env::var_os(protocol::CRATE_NAME_ENV).ok_or("selected crate name is not set")?;
+
     let markers = arguments
         .iter()
-        .filter(|argument| {
-            argument
-                .as_encoded_bytes()
-                .starts_with(protocol::MARKER_PREFIX.as_bytes())
-        })
+        .filter(|argument| is_analysis_marker(argument))
         .count();
+
     if markers != 1 || !arguments.contains(marker) {
         return Err(format!(
             "selected invocation requires one matching marker, got {markers} markers"
         ));
     }
+
     if arguments[0] != compiler {
         return Err(format!(
             "selected invocation requires the prepared compiler, got {:?}",
             arguments[0]
         ));
     }
+
     let actual_name = arguments
         .windows(2)
         .find(|pair| pair[0] == "--crate-name")
         .map(|pair| &pair[1]);
+
     if actual_name != Some(&crate_name) {
         return Err(format!(
             "selected invocation requires the prepared crate name, got {actual_name:?}"
         ));
     }
+
     let source_matches = arguments.iter().skip(1).any(|argument| {
         !argument.as_encoded_bytes().starts_with(b"-")
             && fs::canonicalize(argument).is_ok_and(|path| path == Path::new(&source))
     });
+
     if !source_matches {
         return Err(
             "selected invocation requires the prepared source path, got no matching source"
@@ -124,6 +121,30 @@ fn verify_selected(arguments: &[OsString], marker: &OsString) -> Result<(), Stri
     }
 
     Ok(())
+}
+
+/// Writes a verified selected-target receipt and stops Cargo before rustc analysis.
+fn stop_probe(marker: &OsStr) -> ExitCode {
+    let Some(path) = env::var_os(protocol::STALE_RECEIPT_ENV) else {
+        return failure(format!("{} is not set", protocol::STALE_RECEIPT_ENV));
+    };
+
+    let Some(marker) = marker.to_str() else {
+        return failure("selected marker must be UTF-8, got a non-UTF-8 argument");
+    };
+
+    if let Err(error) = fs::write(path, protocol::header(marker)) {
+        return failure(format!("failed to write stale receipt: {error}"));
+    }
+
+    failure("Cargo Optic stopped a stale selected-target probe before analysis")
+}
+
+/// Recognizes the reserved marker prefix without requiring UTF-8 compiler arguments.
+fn is_analysis_marker(argument: &OsStr) -> bool {
+    argument
+        .as_encoded_bytes()
+        .starts_with(protocol::MARKER_PREFIX.as_bytes())
 }
 
 /// Replaces the wrapper process so rustc receives signals and exit handling directly from Cargo.

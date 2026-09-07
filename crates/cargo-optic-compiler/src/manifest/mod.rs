@@ -20,9 +20,6 @@ use optic_records::UnsupportedLlvmConfiguration;
 
 use crate::Error;
 
-mod decoder;
-use decoder::ManifestDecoder;
-
 #[derive(Eq, Ord, PartialEq, PartialOrd)]
 struct InstanceKey {
     definition_crate: String,
@@ -31,6 +28,7 @@ struct InstanceKey {
     raw_symbol: String,
 }
 
+/// The driver's complete transport result before artifact conversion and final capture validation.
 #[derive(Debug)]
 pub(crate) struct CompilerManifest {
     /// Grouped instances with their required source relationship.
@@ -48,22 +46,30 @@ pub(crate) struct CompilerManifest {
 pub(crate) struct Configuration {
     /// The initialized backend's reported name.
     pub(crate) backend: String,
+
     /// The effective target tuple or target-specification identity.
     pub(crate) target: String,
+
     /// The compiler's effective optimization level, not the Cargo profile name.
     pub(crate) optimization: String,
+
     /// The LTO mode computed by the selected compiler session.
     pub(crate) lto: LlvmLto,
+
     /// Whether this invocation has an incremental compilation directory.
     pub(crate) incremental: bool,
+
     /// Whether this invocation delegates LTO to the linker plugin.
     pub(crate) linker_plugin: bool,
+
     /// The configured CGU count, not the count of expected modules.
     pub(crate) codegen_units: u32,
+
     /// A reason classified before extra temporary files were requested.
     pub(crate) unsupported: Option<UnsupportedLlvmConfiguration>,
 }
 
+/// A regular codegen unit whose optimized bitcode must exist after successful compilation.
 #[derive(Debug)]
 pub(crate) struct ExpectedModule {
     /// The regular CGU identity provided by rustc's mono-item partition query.
@@ -74,9 +80,19 @@ pub(crate) struct ExpectedModule {
 
 struct InstancePlacements {
     placements: Vec<PlacementRecord>,
+    /// All placements grouped under the same instance key must agree on this relationship.
     source: SourceAvailability,
 }
 
+type PlacementsByInstance = BTreeMap<InstanceKey, InstancePlacements>;
+
+mod decoder;
+use decoder::ManifestDecoder;
+
+/// Reads a completed driver manifest bound to the selected analysis marker.
+///
+/// Repeated placements become one instance. Malformed fields, conflicting records, incomplete
+/// output, and trailing bytes return an error.
 pub(crate) fn read_manifest(path: &Path, marker: &str) -> Result<CompilerManifest, Error> {
     let file = File::open(path).map_err(|source| Error::Filesystem {
         operation: "open compiler manifest",
@@ -87,7 +103,7 @@ pub(crate) fn read_manifest(path: &Path, marker: &str) -> Result<CompilerManifes
     ManifestDecoder::new(path, BufReader::new(file), marker).read()
 }
 
-fn instances(placements: PlacementsByInstance) -> Result<Vec<InstanceRecord>, Error> {
+fn assemble_instances(placements: PlacementsByInstance) -> Result<Vec<InstanceRecord>, Error> {
     placements
         .into_iter()
         .map(|(key, placements)| {
@@ -104,8 +120,6 @@ fn instances(placements: PlacementsByInstance) -> Result<Vec<InstanceRecord>, Er
         })
         .collect()
 }
-
-type PlacementsByInstance = BTreeMap<InstanceKey, InstancePlacements>;
 
 #[cfg(test)]
 mod tests;

@@ -16,6 +16,10 @@ pub struct EvidenceRange {
 }
 
 impl EvidenceRange {
+    /// Retains an artifact range from a validated manifest.
+    ///
+    /// The artifact and range **must** come from a manifest validated for `capture_id`. Combining
+    /// fields from different manifests can select unrelated bytes when the store copies the range.
     pub(crate) fn new(capture_id: CaptureId, artifact: ArtifactId, range: ByteRange) -> Self {
         Self {
             capture_id,

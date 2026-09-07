@@ -66,6 +66,7 @@ fn available_source_preserves_snapshot_range_and_display_metadata() {
     else {
         panic!("the fixture supplies available source");
     };
+
     let mut bytes = Vec::new();
     fixture
         .store
@@ -135,7 +136,9 @@ fn a_missing_snapshot_is_a_store_error_with_artifact_context() {
 
     let error = source_evidence(&fixture.store, &InstanceRef::new(id, 0)).unwrap_err();
 
-    assert!(
-        matches!(error, crate::Error::Store { ref source } if source.to_string().contains(&path.display().to_string()))
-    );
+    let crate::Error::Store { source } = error else {
+        panic!("the missing snapshot must return a store error, got {error}");
+    };
+
+    assert!(source.to_string().contains(&path.display().to_string()));
 }

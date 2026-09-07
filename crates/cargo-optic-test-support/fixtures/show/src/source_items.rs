@@ -6,6 +6,7 @@
 /// Doubles the input with an operation that LLVM can simplify.
 pub fn ordinary(value: u64) -> u64 {
     let doubled = value.wrapping_add(value);
+
     doubled.wrapping_add(0)
 }
 

@@ -53,6 +53,7 @@ impl fmt::Display for InstanceRef {
 
 impl FromStr for InstanceRef {
     type Err = Error;
+
     fn from_str(value: &str) -> Result<Self, Error> {
         let invalid = || {
             InvalidFieldSnafu {
@@ -62,6 +63,7 @@ impl FromStr for InstanceRef {
             .build()
         };
         let (capture, ordinal) = value.split_once(':').ok_or_else(invalid)?;
+
         if ordinal.is_empty()
             || !ordinal.bytes().all(|byte| byte.is_ascii_digit())
             || (ordinal.len() > 1 && ordinal.starts_with('0'))

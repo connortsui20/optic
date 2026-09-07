@@ -48,6 +48,7 @@ impl FromStr for AnalysisToken {
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
             && value.as_bytes()[12] == b'4'
             && matches!(value.as_bytes()[16], b'8' | b'9' | b'a' | b'b');
+
         if !valid {
             return InvalidFieldSnafu {
                 field: "analysis token (32 lowercase hexadecimal UUID-v4 characters)",

@@ -1,8 +1,9 @@
-//! Scopes concrete compiler instances to one capture.
+//! Joins concrete compiler instances and their evidence within one capture.
 //!
 //! [`InstanceManifest`] is the durable boundary between compiler collection and evidence queries.
-//! Its [`CaptureId`] prevents evidence from one capture from satisfying a query
-//! for another capture.
+//! It joins instances, artifact metadata, LLVM provenance, and collected modules under one
+//! [`CaptureId`]. Construction and deserialization validate the relationships and declared ranges.
+//! The store checks the referenced files and their actual lengths.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -57,6 +58,7 @@ impl InstanceManifest {
         llvm: LlvmCollection,
     ) -> Result<Self, Error> {
         let mut artifact_table = HashMap::with_capacity(artifacts.len());
+
         for artifact in &artifacts {
             if artifact_table.insert(artifact.id(), artifact).is_some() {
                 return InvalidFieldSnafu {
@@ -67,20 +69,23 @@ impl InstanceManifest {
             }
         }
 
-        let mut identities = HashSet::with_capacity(instances.len());
+        let mut instance_identities = HashSet::with_capacity(instances.len());
+
         for instance in &instances {
             let identity = (
                 instance.definition(),
                 instance.display_name(),
                 instance.raw_symbol(),
             );
-            if !identities.insert(identity) {
+
+            if !instance_identities.insert(identity) {
                 return InvalidFieldSnafu {
                     field: "instance manifest",
                     actual: format!("a duplicate instance ({})", instance.display_name()),
                 }
                 .fail();
             }
+
             if let SourceAvailability::Available(source) = instance.source() {
                 validate_artifact_range(
                     &artifact_table,
@@ -180,6 +185,7 @@ fn validate_artifact_range(
         }
         .build()
     })?;
+
     if artifact.kind() != kind || range.end() > artifact.byte_len() {
         return InvalidFieldSnafu {
             field: "artifact range",
@@ -221,10 +227,12 @@ fn validate_llvm(
         }
     };
 
-    let mut modules = HashSet::new();
+    let mut module_identities = HashSet::new();
     let mut module_artifacts = HashSet::new();
+
     for module in collected {
-        if !modules.insert(module.compiler_module()) || !module_artifacts.insert(module.artifact())
+        if !module_identities.insert(module.compiler_module())
+            || !module_artifacts.insert(module.artifact())
         {
             return InvalidFieldSnafu {
                 field: "LLVM modules",
@@ -232,6 +240,7 @@ fn validate_llvm(
             }
             .fail();
         }
+
         if !matches!(
             (module.stage(), provenance.lto()),
             (LlvmStage::NoLtoOptimized, LlvmLto::Off)
@@ -243,12 +252,14 @@ fn validate_llvm(
             }
             .fail();
         }
+
         validate_artifact_range(
             artifacts,
             module.artifact(),
             ArtifactKind::Llvm,
             ByteRange::new(0, 0)?,
         )?;
+
         for definition in module.definitions() {
             validate_artifact_range(
                 artifacts,
@@ -265,7 +276,8 @@ fn validate_llvm(
         let missing = instances
             .iter()
             .flat_map(InstanceRecord::placements)
-            .find(|placement| !modules.contains(placement.codegen_unit()));
+            .find(|placement| !module_identities.contains(placement.codegen_unit()));
+
         if let Some(placement) = missing {
             return InvalidFieldSnafu {
                 field: "LLVM modules",

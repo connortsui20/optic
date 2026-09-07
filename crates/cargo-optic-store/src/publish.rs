@@ -1,7 +1,7 @@
 //! Installs the new candidate immediately before the atomic capture commit.
 //!
 //! A failure before pointer replacement preserves the old candidate. A failure after replacement
-//! leaves a dangling pointer, which is a miss. No required fallible operation follows capture commit.
+//! leaves a dangling pointer, which is a miss. Capture commit has no required fallible follow-up.
 
 use std::fs;
 use std::path::Path;
@@ -57,6 +57,7 @@ impl Store {
         self.initialize()?;
         let staging = self.root.join("staging").join(capture.id().as_str());
         let completed = self.root.join("captures").join(capture.id().as_str());
+
         match fs::symlink_metadata(&completed) {
             Ok(_) => {
                 return CaptureExistsSnafu {
@@ -102,6 +103,7 @@ impl Store {
             &CandidatePointer::new(capture),
             MAX_HEADER_BYTES,
         )?;
+
         let pointer = self.candidate_path(capture.analysis().request_key());
 
         // Installing the pointer after commit adds a fallible cache update after visible capture.
@@ -129,14 +131,19 @@ impl Store {
 pub(crate) enum PublicationBoundary {
     /// Before the staged capture header is written.
     CaptureWrite,
+
     /// After the header is flushed and before the instance manifest is written.
     InstancesWrite,
+
     /// After both records are flushed and before declared artifacts are copied.
     ArtifactCopy,
+
     /// After both records are flushed and before the candidate pointer is written.
     PointerWrite,
+
     /// After the staged pointer is flushed and before it replaces the old pointer.
     PointerReplace,
+
     /// After pointer replacement and before the capture becomes visible.
     CaptureRename,
 }

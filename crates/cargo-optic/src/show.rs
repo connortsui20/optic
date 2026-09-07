@@ -14,6 +14,7 @@ use optic::SourceEvidence;
 use crate::arguments::EvidenceOutput;
 use crate::cli::Error;
 
+/// Resolves one evidence form, reports its origin, and writes the exact captured bytes.
 pub(crate) fn run(
     optic: &Optic,
     instance: &InstanceRef,
@@ -42,7 +43,7 @@ fn show_source(
                 display_path.display()
             );
 
-            copy(optic, &evidence, stdout)
+            copy_evidence(optic, &evidence, stdout)
         }
         SourceEvidence::Unavailable(reason) => {
             Err(unavailable(instance, "source", reason.to_string()))
@@ -78,6 +79,7 @@ fn show_llvm(optic: &Optic, instance: &InstanceRef, stdout: &mut impl Write) -> 
 
     for (index, body) in bodies.iter().enumerate() {
         eprintln!("LLVM {} ({})", body.compiler_module(), body.stage());
+
         if !body.aliases().is_empty() {
             eprintln!(
                 "Alias {} -> {}",
@@ -85,20 +87,25 @@ fn show_llvm(optic: &Optic, instance: &InstanceRef, stdout: &mut impl Write) -> 
                 body.raw_symbol()
             );
         }
+
         if index != 0 {
             stdout
                 .write_all(b"\n")
                 .map_err(|source| Error::Write { source })?;
         }
 
-        copy(optic, body.evidence(), stdout)?;
+        copy_evidence(optic, body.evidence(), stdout)?;
     }
 
     Ok(())
 }
 
-/// Preserves the CLI's closed-stdout policy without treating artifact read failures as pipe closure.
-fn copy(optic: &Optic, evidence: &EvidenceRange, stdout: &mut impl Write) -> Result<(), Error> {
+/// Preserves the CLI's closed-stdout policy while retaining artifact read errors.
+fn copy_evidence(
+    optic: &Optic,
+    evidence: &EvidenceRange,
+    stdout: &mut impl Write,
+) -> Result<(), Error> {
     match optic.copy_evidence(evidence, stdout) {
         Err(optic::Error::Store {
             source: optic::StoreError::WriteEvidence { source, .. },

@@ -10,7 +10,7 @@ use crate::Error;
 use crate::error::InvalidFieldSnafu;
 use crate::validation::require_text;
 
-/// The effective LTO mode observed by the selected compiler.
+/// The effective link-time optimization (LTO) mode observed by the selected compiler.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LlvmLto {
@@ -47,7 +47,8 @@ impl LlvmProvenance {
     ///
     /// # Errors
     ///
-    /// Returns an error for empty identity text, an invalid optimization level, or zero CGUs or recipe.
+    /// Returns an error for empty identity text, an invalid optimization level, a zero codegen-unit
+    /// count, or a zero recipe revision.
     // Every setting records an actual compiler observation. A builder with defaults can silently
     // substitute configuration that the selected compiler did not use.
     #[allow(clippy::too_many_arguments)]
@@ -65,11 +66,14 @@ impl LlvmProvenance {
         let backend = backend.into();
         let target = target.into();
         let optimization = optimization.into();
+
         require_text("codegen backend", &backend)?;
         require_text("LLVM effective target", &target)?;
+
         if let Some(version) = &llvm_version {
             require_text("LLVM version", version)?;
         }
+
         if !matches!(optimization.as_str(), "0" | "1" | "2" | "3" | "s" | "z") {
             return InvalidFieldSnafu {
                 field: "LLVM optimization",
@@ -77,6 +81,7 @@ impl LlvmProvenance {
             }
             .fail();
         }
+
         if codegen_units == 0 || recipe_revision == 0 {
             return InvalidFieldSnafu {
                 field: "LLVM provenance",
@@ -160,6 +165,7 @@ struct RawLlvmProvenance {
 
 impl TryFrom<RawLlvmProvenance> for LlvmProvenance {
     type Error = Error;
+
     fn try_from(raw: RawLlvmProvenance) -> Result<Self, Error> {
         Self::new(
             raw.backend,

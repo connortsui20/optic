@@ -31,7 +31,11 @@ pub enum Error {
     },
 
     /// A finite requested range extended beyond the artifact.
-    #[snafu(display("artifact {} range must fit within {byte_len} bytes, got start {start} and length {length}", artifact.value()))]
+    #[snafu(display(
+        "artifact {} range must fit within {byte_len} bytes, \
+         got start {start} and length {length}",
+        artifact.value()
+    ))]
     ArtifactRange {
         /// The requested artifact.
         artifact: ArtifactId,
@@ -55,14 +59,21 @@ pub enum Error {
     },
 
     /// The Optic ignore file contained user configuration that initialization cannot replace.
-    #[snafu(display("Optic initialization requires `*` and a newline in {}, got different contents. Preserve or move this file before capture", path.display()))]
+    #[snafu(display(
+        "Optic initialization requires `*` and a newline in {}, got different contents. \
+         Preserve or move this file before capture",
+        path.display()
+    ))]
     ConflictingIgnoreFile {
         /// The existing ignore file that needs user attention.
         path: PathBuf,
     },
 
     /// A store path was a symlink or had the wrong filesystem type.
-    #[snafu(display("store path must be a regular {expected}, got another file type at {}", path.display()))]
+    #[snafu(display(
+        "store path must be a regular {expected}, got another file type at {}",
+        path.display()
+    ))]
     UnexpectedFileType {
         /// The expected filesystem type.
         expected: &'static str,
@@ -71,7 +82,10 @@ pub enum Error {
     },
 
     /// Encoded durable data exceeded the shared reader and writer budget.
-    #[snafu(display("record at {} must contain at most {limit} encoded bytes, got {actual}", path.display()))]
+    #[snafu(display(
+        "record at {} must contain at most {limit} encoded bytes, got {actual}",
+        path.display()
+    ))]
     RecordTooLarge {
         /// The rejected record path.
         path: PathBuf,

@@ -1,3 +1,7 @@
+//! Supplies generic, nested, and trait-method definitions for instance search tests.
+//!
+//! Tests replace one function name between captures to check that results stay scoped to a capture.
+
 use std::hint::black_box;
 use std::ops::Add;
 

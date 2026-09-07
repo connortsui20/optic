@@ -32,12 +32,16 @@ pub enum SourceAvailability {
 pub enum SourceUnavailable {
     /// The definition belongs to another crate, including external path dependencies.
     Nonlocal,
+
     /// The compiler did not retain source text for the definition.
     Unloaded,
+
     /// The definition comes from an unsupported expansion or synthetic instance.
     Generated,
+
     /// The compiler could not establish one complete, valid source-file span.
     UnsupportedSpan,
+
     /// The source lies outside the canonical selected package root.
     OutsidePackage,
 }
@@ -79,6 +83,7 @@ impl SourceRecord {
         starting_line: u64,
     ) -> Result<Self, Error> {
         require_path("source display path", &display_path)?;
+
         if starting_line == 0 {
             return InvalidFieldSnafu {
                 field: "source starting line",
@@ -127,6 +132,7 @@ struct RawSourceRecord {
 
 impl TryFrom<RawSourceRecord> for SourceRecord {
     type Error = Error;
+
     fn try_from(raw: RawSourceRecord) -> Result<Self, Error> {
         Self::new(raw.artifact, raw.range, raw.display_path, raw.starting_line)
     }

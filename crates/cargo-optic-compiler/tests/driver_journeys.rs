@@ -29,13 +29,88 @@ use optic_records::UnsupportedLlvmConfiguration;
 fn child(fixture: &TestWorkspace, test: &str) -> std::process::Output {
     let mut command = Command::new(env::current_exe().unwrap());
     fixture.apply(&mut command);
+
     command
         .args(["--exact", test, "--nocapture"])
         .env("OPTIC_TEST_CHILD", "1");
+
     let output = cargo_optic_test_support::run(&mut command);
     cargo_optic_test_support::assert_success(&command, &output);
 
     output
+}
+
+/// Checks retained optimization results and unchanged settings for one LTO configuration.
+///
+/// The root contains the compiled `stage-proof` driver and its `input.rs` fixture. Each run gets a
+/// separate directory so that assertions about retained files cannot observe an earlier invocation.
+#[track_caller]
+fn assert_retained_stage(root: &Path, llvm_dis: &Path, label: &str, lto: Option<&str>) {
+    let driver = root.join("stage-proof");
+    let input = root.join("input.rs");
+    let mut configurations = Vec::new();
+
+    for retain in [
+        false, // Compile without retaining bitcode.
+        true,  // Compile with retained bitcode.
+    ] {
+        let directory = root.join(format!("{label}-{retain}"));
+        fs::create_dir(&directory).unwrap();
+        let executable = directory.join("proof-input");
+        let mut command = Command::new(&driver);
+        command
+            .arg(&input)
+            .args([
+                "--crate-name",
+                "proof_input",
+                "--edition=2024",
+                "-C",
+                "opt-level=3",
+                "-C",
+                "codegen-units=4",
+            ])
+            .arg("-o")
+            .arg(&executable)
+            .env("OPTIC_PROOF_DIRECTORY", &directory);
+
+        if let Some(lto) = lto {
+            command.arg("-C").arg(lto);
+        }
+
+        if retain {
+            command.env("OPTIC_PROOF_RETAIN", "1");
+        }
+
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{command:?}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(Command::new(&executable).status().unwrap().success());
+        configurations.push(fs::read_to_string(directory.join("configuration")).unwrap());
+
+        if !retain {
+            continue;
+        }
+
+        let modules = fs::read_to_string(directory.join("modules")).unwrap();
+        assert!(modules.lines().count() > 1, "{modules}");
+        let mut folded = 0;
+
+        for module in modules.lines() {
+            folded += assert_module_folding(llvm_dis, module);
+        }
+
+        assert_eq!(folded, 2);
+        eprintln!(
+            "{label}: {} regular modules\n{}",
+            modules.lines().count(),
+            configurations.last().unwrap()
+        );
+    }
+
+    assert_eq!(configurations[0], configurations[1]);
 }
 
 /// Counts fixture definitions folded only in this module's selected optimized output.
@@ -44,6 +119,7 @@ fn assert_module_folding(llvm_dis: &Path, module: &str) -> usize {
     let (_, paths) = module.split_once('\t').unwrap();
     let (path, before) = paths.split_once('\t').unwrap();
     assert!(fs::metadata(path).unwrap().len() > 0, "{path}");
+
     let text = disassemble(llvm_dis, path);
     let mut folded = 0;
 
@@ -54,6 +130,7 @@ fn assert_module_folding(llvm_dis: &Path, module: &str) -> usize {
         let Some(body) = function_body(&text, symbol) else {
             continue;
         };
+
         assert!(body.contains(expected), "{path}: {body}");
 
         let before = disassemble(llvm_dis, before);
@@ -74,6 +151,7 @@ fn disassemble(llvm_dis: &Path, bitcode: &str) -> String {
         .args([bitcode, "-o", "-"])
         .output()
         .unwrap();
+
     assert!(
         output.status.success(),
         "{bitcode}: {}",
@@ -97,6 +175,7 @@ fn function_body<'a>(text: &'a str, symbol: &str) -> Option<&'a str> {
 #[test]
 fn driver_protocol_stops_stale_probes_and_collects_new_tokens() {
     let output = child(&TestWorkspace::new("capture"), "driver_protocol_child");
+
     assert!(
         !String::from_utf8_lossy(&output.stderr).contains("stopped a stale selected-target probe")
     );
@@ -133,6 +212,7 @@ fn failed_retry_child() {
         "pub fn broken() { let = ; }\n",
     )
     .unwrap();
+
     let mut prepared = prepare_build(&workspace, &request).unwrap();
     assert_eq!(prepared.probe(&analysis).unwrap(), Freshness::Stale);
     assert!(prepared.collect().is_err());
@@ -152,6 +232,7 @@ fn driver_protocol_child() {
         .unwrap()
         .into_parts(CaptureId::generate())
         .unwrap();
+
     assert!(
         manifest
             .instances()
@@ -165,6 +246,7 @@ fn driver_protocol_child() {
     let LlvmCollection::Collected(modules) = manifest.llvm() else {
         panic!("the nonincremental LLVM target has a proven stage");
     };
+
     assert!(!modules.is_empty());
     assert!(
         modules
@@ -180,8 +262,10 @@ fn driver_protocol_child() {
         "pub fn kernel(value: u64) -> u64 { value + 200 }\n",
     )
     .unwrap();
+
     let mut prepared = prepare_build(&workspace, &request).unwrap();
     assert_eq!(prepared.probe(&analysis).unwrap(), Freshness::Stale);
+
     let (_, _, changed, _, _changed_temporary) = prepared
         .collect()
         .unwrap()
@@ -189,6 +273,7 @@ fn driver_protocol_child() {
         .unwrap();
     assert_ne!(changed.token(), analysis.token());
     assert_eq!(changed.request_key(), analysis.request_key());
+
     let mut prepared = prepare_build(&workspace, &request).unwrap();
     assert_eq!(prepared.probe(&changed).unwrap(), Freshness::Fresh);
 
@@ -223,6 +308,7 @@ fn retained_bitcode_stage_child() {
         .output()
         .unwrap();
     assert!(compiler.status.success());
+
     let sysroot = PathBuf::from(String::from_utf8(compiler.stdout).unwrap().trim());
     let rustc = sysroot.join("bin/rustc");
     let version = Command::new(&rustc).arg("-vV").output().unwrap();
@@ -233,6 +319,7 @@ fn retained_bitcode_stage_child() {
         .find_map(|line| line.strip_prefix("host: "))
         .unwrap();
     let llvm_dis = sysroot.join("lib/rustlib").join(host).join("bin/llvm-dis");
+
     let driver = root.join("stage-proof");
     let source = root.join("stage-proof.rs");
     fs::write(&source, include_str!("fixtures/stage-proof.rs")).unwrap();
@@ -251,6 +338,7 @@ fn retained_bitcode_stage_child() {
         .arg("-o")
         .arg(&driver)
         .env("RUSTC_BOOTSTRAP", "optic_stage_proof");
+
     let output = compile.output().unwrap();
     assert!(
         output.status.success(),
@@ -259,79 +347,30 @@ fn retained_bitcode_stage_child() {
     );
 
     let input = root.join("input.rs");
-    fs::write(&input, r#"
-pub mod first {
-    #[unsafe(no_mangle)]
-    #[inline(never)]
-    pub fn folded_first(value: u64) -> u64 { value.wrapping_add(7).wrapping_sub(value).wrapping_add(35) }
-}
+    fs::write(
+        &input,
+        concat!(
+            "\npub mod first {\n",
+            "    #[unsafe(no_mangle)]\n",
+            "    #[inline(never)]\n",
+            "    pub fn folded_first(value: u64) -> u64 { \
+                 value.wrapping_add(7).wrapping_sub(value).wrapping_add(35) }\n",
+            "}\n\npub mod second {\n",
+            "    #[unsafe(no_mangle)]\n",
+            "    #[inline(never)]\n",
+            "    pub fn folded_second(value: u64) -> u64 { \
+                 value.wrapping_add(7).wrapping_sub(value).wrapping_add(10) }\n",
+            "}\n",
+            "fn main() { assert_eq!(first::folded_first(10) + second::folded_second(20), 59); }\n",
+        ),
+    )
+    .unwrap();
 
-pub mod second {
-    #[unsafe(no_mangle)]
-    #[inline(never)]
-    pub fn folded_second(value: u64) -> u64 { value.wrapping_add(7).wrapping_sub(value).wrapping_add(10) }
-}
-fn main() { assert_eq!(first::folded_first(10) + second::folded_second(20), 59); }
-"#).unwrap();
-
-    for (label, lto) in [("no-lto", Some("lto=off")), ("local-thin", None)] {
-        let mut configurations = Vec::new();
-
-        for retain in [false, true] {
-            let directory = root.join(format!("{label}-{retain}"));
-            fs::create_dir(&directory).unwrap();
-            let executable = directory.join("proof-input");
-            let mut command = Command::new(&driver);
-            command
-                .arg(&input)
-                .args([
-                    "--crate-name",
-                    "proof_input",
-                    "--edition=2024",
-                    "-C",
-                    "opt-level=3",
-                    "-C",
-                    "codegen-units=4",
-                ])
-                .arg("-o")
-                .arg(&executable)
-                .env("OPTIC_PROOF_DIRECTORY", &directory);
-            if let Some(lto) = lto {
-                command.arg("-C").arg(lto);
-            }
-            if retain {
-                command.env("OPTIC_PROOF_RETAIN", "1");
-            }
-
-            let output = command.output().unwrap();
-            assert!(
-                output.status.success(),
-                "{command:?}\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert!(Command::new(&executable).status().unwrap().success());
-            configurations.push(fs::read_to_string(directory.join("configuration")).unwrap());
-            if !retain {
-                continue;
-            }
-
-            let modules = fs::read_to_string(directory.join("modules")).unwrap();
-            assert!(modules.lines().count() > 1, "{modules}");
-            let mut folded = 0;
-
-            for module in modules.lines() {
-                folded += assert_module_folding(&llvm_dis, module);
-            }
-
-            assert_eq!(folded, 2);
-            eprintln!(
-                "{label}: {} regular modules\n{}",
-                modules.lines().count(),
-                configurations.last().unwrap()
-            );
-        }
-
-        assert_eq!(configurations[0], configurations[1]);
+    for (label, lto) in [
+        ("no-lto", Some("lto=off")), // Explicitly disable all LTO.
+        ("local-thin", None),        // Retain the compiler's default local ThinLTO.
+    ] {
+        assert_retained_stage(root, &llvm_dis, label, lto);
     }
 }
 
@@ -355,7 +394,10 @@ fn source_lines_child() {
         format!("{first}\n// Unicode before a later definition: λ.\n\n{later}\nmod other;\n");
     let other = format!("{other_first}\n\n// Another Unicode prefix: é.\n\n{other_later}\n");
 
-    for (file, normalized) in [("lib.rs", &root), ("other.rs", &other)] {
+    for (file, normalized) in [
+        ("lib.rs", &root),    // Use the root module.
+        ("other.rs", &other), // Use a separate source module.
+    ] {
         fs::write(
             workspace.root().join("src").join(file),
             format!("\u{feff}{}", normalized.replace('\n', "\r\n")),
@@ -404,6 +446,7 @@ fn source_lines_child() {
             let SourceAvailability::Available(source) = instance.source() else {
                 panic!("the local definition has source: {name}");
             };
+
             let artifact = manifest
                 .artifacts()
                 .iter()
@@ -411,6 +454,7 @@ fn source_lines_child() {
                 .unwrap();
             let snapshot = fs::read_to_string(temporary.path().join(artifact.file_name())).unwrap();
             assert_eq!(&snapshot, normalized);
+
             let start = normalized.find(definition).unwrap();
             assert_eq!(source.range().start(), start as u64);
             assert_eq!(source.range().end(), (start + definition.len()) as u64);
@@ -433,6 +477,7 @@ fn source_snapshots_child() {
     if env::var_os("OPTIC_TEST_CHILD").is_none() {
         return;
     }
+
     let workspace = discover_workspace(&env::current_dir().unwrap()).unwrap();
     let path = workspace.root().join("src/lib.rs");
     let normalized = r#"// A Unicode prefix: λ.
@@ -462,6 +507,7 @@ mod outside;
         "pub fn identity<T>(value: T) -> T { value }\n",
     )
     .unwrap();
+
     let request = BuildRequest::new("capture_fixture", CargoTarget::Library, "dev").unwrap();
     let (_, _, _, manifest, temporary) = prepare_build(&workspace, &request)
         .unwrap()
@@ -491,6 +537,7 @@ mod outside;
     let SourceAvailability::Available(source) = generic[0].source() else {
         panic!("the local generic definition has source")
     };
+
     let start = usize::try_from(source.range().start()).unwrap();
     let end = usize::try_from(source.range().end()).unwrap();
     assert_eq!(
@@ -499,6 +546,7 @@ mod outside;
     );
     assert_eq!(source.starting_line(), 3);
     assert_eq!(source.display_path(), fs::canonicalize(&path).unwrap());
+
     let generated = manifest
         .instances()
         .iter()
@@ -508,6 +556,7 @@ mod outside;
         generated.source(),
         &SourceAvailability::Unavailable(SourceUnavailable::Generated)
     );
+
     let outside = manifest
         .instances()
         .iter()
@@ -517,6 +566,7 @@ mod outside;
         outside.source(),
         &SourceAvailability::Unavailable(SourceUnavailable::OutsidePackage)
     );
+
     let dependency = manifest
         .instances()
         .iter()
@@ -530,6 +580,7 @@ mod outside;
         dependency.source(),
         &SourceAvailability::Unavailable(SourceUnavailable::Nonlocal)
     );
+
     fs::write(&path, "// Changed after collection.\n").unwrap();
     assert_eq!(
         fs::read_to_string(temporary.path().join(manifest.artifacts()[0].file_name())).unwrap(),
@@ -547,16 +598,40 @@ fn explicit_lto_modes_child() {
     if env::var_os("OPTIC_TEST_CHILD").is_none() {
         return;
     }
+
     let workspace = discover_workspace(&env::current_dir().unwrap()).unwrap();
     let path = workspace.root().join("Cargo.toml");
     let original = fs::read_to_string(&path).unwrap();
     fs::write(
         workspace.root().join("src/lib.rs"),
-        "#[unsafe(no_mangle)]\npub extern \"C\" fn exported(value: u64) -> u64 { value + 1 }\n",
+        "#[unsafe(no_mangle)]\n\
+         pub extern \"C\" fn exported(value: u64) -> u64 { value + 1 }\n",
     )
     .unwrap();
-    fs::write(workspace.root().join("src/generic.rs"), "#[unsafe(no_mangle)]\npub extern \"C\" fn exported(value: u64) -> u64 { value + 1 }\nfn main() { println!(\"{}\", exported(41)); }\n").unwrap();
-    fs::write(&path, format!("{original}\n[profile.off]\ninherits = 'release'\nlto = 'off'\ncodegen-units = 4\n[profile.thin]\ninherits = 'release'\nlto = 'thin'\n[profile.fat]\ninherits = 'release'\nlto = 'fat'\n")).unwrap();
+    fs::write(
+        workspace.root().join("src/generic.rs"),
+        "#[unsafe(no_mangle)]\n\
+         pub extern \"C\" fn exported(value: u64) -> u64 { value + 1 }\n\
+         fn main() { println!(\"{}\", exported(41)); }\n",
+    )
+    .unwrap();
+    fs::write(
+        &path,
+        format!(
+            "{original}\n\
+             [profile.off]\n\
+             inherits = 'release'\n\
+             lto = 'off'\n\
+             codegen-units = 4\n\
+             [profile.thin]\n\
+             inherits = 'release'\n\
+             lto = 'thin'\n\
+             [profile.fat]\n\
+             inherits = 'release'\n\
+             lto = 'fat'\n"
+        ),
+    )
+    .unwrap();
 
     for (profile, expected_lto, unsupported) in [
         ("off", LlvmLto::Off, None), // Explicitly disabled local and cross-crate LTO.
@@ -595,17 +670,20 @@ fn explicit_lto_modes_child() {
         if let Some(reason) = unsupported {
             assert_eq!(manifest.llvm(), &LlvmCollection::NotCaptured(reason));
             assert!(!temporary.path().join("llvm").exists());
-        } else {
-            assert_eq!(manifest.llvm_provenance().codegen_units(), 4);
-            let LlvmCollection::Collected(modules) = manifest.llvm() else {
-                panic!("no-LTO optimized LLVM is supported")
-            };
-            assert!(!modules.is_empty());
-            assert!(
-                modules
-                    .iter()
-                    .all(|module| module.stage() == LlvmStage::NoLtoOptimized)
-            );
+
+            continue;
         }
+
+        assert_eq!(manifest.llvm_provenance().codegen_units(), 4);
+        let LlvmCollection::Collected(modules) = manifest.llvm() else {
+            panic!("no-LTO optimized LLVM is supported")
+        };
+
+        assert!(!modules.is_empty());
+        assert!(
+            modules
+                .iter()
+                .all(|module| module.stage() == LlvmStage::NoLtoOptimized)
+        );
     }
 }

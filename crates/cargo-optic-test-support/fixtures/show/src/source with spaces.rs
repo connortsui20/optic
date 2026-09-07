@@ -8,5 +8,6 @@ const LABEL: &str = "π 雪 🦀";
 /// Keeps Unicode text before the function's byte range.
 pub fn unicode_function(value: u64) -> u64 {
     std::hint::black_box(LABEL);
+
     value.wrapping_add(11)
 }

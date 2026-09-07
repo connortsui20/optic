@@ -12,6 +12,7 @@ use std::hint::black_box;
 fn main() {
     let value = black_box(7_u64);
     let widget = source_items::Widget(value);
+
     black_box((
         source_items::ordinary(value),
         widget.method(value),

@@ -17,6 +17,7 @@ use rustc_driver::Compilation;
 use rustc_hir::attrs::Linkage;
 use rustc_interface::interface::Compiler;
 use rustc_interface::interface::Config;
+use rustc_middle::mono::CodegenUnit;
 use rustc_middle::mono::MonoItem;
 use rustc_middle::mono::Visibility;
 use rustc_middle::ty::TyCtxt;
@@ -31,18 +32,31 @@ use crate::manifest::Placement;
 use crate::protocol::MANIFEST_PATH_ENV;
 use crate::source::Snapshots;
 
+/// Retains one compilation's output until rustc and the analysis callback both succeed.
 struct InstanceCallbacks {
+    /// Writes the temporary manifest, which [`run`] publishes only after successful compilation.
     manifest: ManifestWriter,
+
+    /// Is absent until [`Callbacks::after_analysis`] runs, then records if collection completed.
     analysis: Option<io::Result<()>>,
-    /// Retains the pre-retention classification or setup error until the analysis callback.
+
+    /// Is set by [`Callbacks::config`] and consumed once by [`Self::collect`] before record writes.
     configuration: Option<io::Result<u32>>,
+
+    /// The private attempt directory that owns the manifest, bitcode, and source snapshots.
     directory: PathBuf,
+
+    /// Deduplicates source files across all codegen units in this compilation.
     sources: Snapshots,
 }
 
+/// The inner driver's arguments and destinations supplied by the prepared collection attempt.
 struct DriverInvocation {
+    /// Nonempty UTF-8 arguments, beginning with Cargo's real compiler path.
     arguments: Vec<String>,
+    /// An absolute file path inside the private attempt directory, supplied by the collector.
     manifest_path: PathBuf,
+    /// The canonical package root supplied by the collector to bound source capture.
     package_root: PathBuf,
 }
 
@@ -58,6 +72,7 @@ impl Callbacks for InstanceCallbacks {
         } else {
             Compilation::Stop
         };
+
         self.analysis = Some(result);
 
         compilation
@@ -65,13 +80,15 @@ impl Callbacks for InstanceCallbacks {
 }
 
 impl InstanceCallbacks {
+    /// Writes configuration before module and placement records in rustc's codegen-unit order.
     fn collect<'tcx>(&mut self, compiler: &Compiler, tcx: TyCtxt<'tcx>) -> io::Result<()> {
         let unsupported = self
             .configuration
             .take()
-            .expect("config runs before after_analysis")?;
+            .expect("rustc called config before after_analysis to set the configuration result")?;
         let configuration = Configuration::observed(compiler, unsupported)?;
         self.manifest.write_configuration(&configuration)?;
+
         let partitions = tcx.collect_and_partition_mono_items(());
 
         for codegen_unit in partitions.codegen_units {
@@ -80,37 +97,49 @@ impl InstanceCallbacks {
                 let path = tcx
                     .output_filenames(())
                     .temp_path_ext_for_cgu(extension, &name);
+
                 self.manifest.write_module(&name, &path)?;
             }
 
-            for (mono_item, data) in codegen_unit.items_in_deterministic_order(tcx) {
-                let MonoItem::Fn(instance) = mono_item else {
-                    continue;
-                };
+            self.write_function_placements(tcx, codegen_unit)?;
+        }
 
-                let definition_id = instance.def_id();
-                let concrete = ConcreteInstance {
-                    definition_crate: tcx.crate_name(definition_id.krate).to_string(),
-                    definition_path: with_resolve_crate_name!(with_no_trimmed_paths!(
-                        tcx.def_path_str(definition_id)
-                    )),
-                    display_name: with_resolve_crate_name!(with_no_trimmed_paths!(
-                        tcx.def_path_str_with_args(definition_id, instance.args)
-                    )),
-                    raw_symbol: tcx.symbol_name(instance).name.to_owned(),
-                };
-                let placement = Placement {
-                    codegen_unit: codegen_unit.name().to_string(),
-                    linkage: linkage_name(data.linkage),
-                    visibility: visibility_name(data.visibility),
-                    local_copy: data.inlined,
-                    size_estimate: data.size_estimate,
-                };
+        Ok(())
+    }
 
-                let source = self.sources.capture(tcx, instance, &mut self.manifest)?;
-                self.manifest
-                    .write_placement(&concrete, &placement, &source)?;
-            }
+    /// Records each function copy in one codegen unit, excluding static data and assembly.
+    fn write_function_placements<'tcx>(
+        &mut self,
+        tcx: TyCtxt<'tcx>,
+        codegen_unit: &CodegenUnit<'tcx>,
+    ) -> io::Result<()> {
+        for (mono_item, data) in codegen_unit.items_in_deterministic_order(tcx) {
+            let MonoItem::Fn(instance) = mono_item else {
+                continue;
+            };
+
+            let definition_id = instance.def_id();
+            let concrete = ConcreteInstance {
+                definition_crate: tcx.crate_name(definition_id.krate).to_string(),
+                definition_path: with_resolve_crate_name!(with_no_trimmed_paths!(
+                    tcx.def_path_str(definition_id)
+                )),
+                display_name: with_resolve_crate_name!(with_no_trimmed_paths!(
+                    tcx.def_path_str_with_args(definition_id, instance.args)
+                )),
+                raw_symbol: tcx.symbol_name(instance).name.to_owned(),
+            };
+            let placement = Placement {
+                codegen_unit: codegen_unit.name().to_string(),
+                linkage: linkage_name(data.linkage),
+                visibility: visibility_name(data.visibility),
+                local_copy: data.inlined,
+                size_estimate: data.size_estimate,
+            };
+
+            let source = self.sources.capture(tcx, instance, &mut self.manifest)?;
+            self.manifest
+                .write_placement(&concrete, &placement, &source)?;
         }
 
         Ok(())
@@ -123,6 +152,7 @@ pub(crate) fn run() -> ExitCode {
         Ok(invocation) => invocation,
         Err(error) => return failure(error),
     };
+
     let manifest = match ManifestWriter::create(&invocation.manifest_path) {
         Ok(manifest) => manifest,
         Err(error) => {
@@ -132,10 +162,11 @@ pub(crate) fn run() -> ExitCode {
             ));
         }
     };
+
     let directory = invocation
         .manifest_path
         .parent()
-        .expect("the collector supplies an absolute manifest path")
+        .expect("the collector supplies a manifest file path inside its attempt directory")
         .to_owned();
     let mut callbacks = InstanceCallbacks {
         manifest,
@@ -148,6 +179,7 @@ pub(crate) fn run() -> ExitCode {
     let exit_code = rustc_driver::catch_with_exit_code(|| {
         rustc_driver::run_compiler(&invocation.arguments, &mut callbacks);
     });
+
     if exit_code != ExitCode::SUCCESS {
         return exit_code;
     }
@@ -185,6 +217,7 @@ fn prepare_invocation() -> Result<DriverInvocation, String> {
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
+
     if arguments.is_empty() {
         return Err(
             "optic rustc driver must receive rustc as its first argument, got none".to_owned(),
@@ -194,13 +227,14 @@ fn prepare_invocation() -> Result<DriverInvocation, String> {
     let manifest_path = env::var_os(MANIFEST_PATH_ENV)
         .map(PathBuf::from)
         .ok_or_else(|| format!("{MANIFEST_PATH_ENV} is not set"))?;
+    let package_root = env::var_os(crate::protocol::PACKAGE_ROOT_ENV)
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("{} is not set", crate::protocol::PACKAGE_ROOT_ENV))?;
 
     Ok(DriverInvocation {
         arguments,
         manifest_path,
-        package_root: env::var_os(crate::protocol::PACKAGE_ROOT_ENV)
-            .map(PathBuf::from)
-            .ok_or_else(|| format!("{} is not set", crate::protocol::PACKAGE_ROOT_ENV))?,
+        package_root,
     })
 }
 

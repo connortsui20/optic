@@ -26,7 +26,8 @@ The script prints its temporary evidence directory and retains it for diagnosis.
 `git archive` so it does not inherit ancestor Cargo configuration or write into the checkout's store.
 
 CI runs workspace and installed-CLI tests on Linux and macOS. Formatting includes standalone
-compiler sources, not just modules that Cargo discovers.
+compiler sources, not just modules that Cargo discovers. The formatting check also requires Python 3.
+It rejects Rust lines over 100 columns, except exact compiler-source permalinks in documentation.
 
 ## Choose the test boundary
 

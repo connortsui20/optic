@@ -21,6 +21,7 @@ const FIRST_SCOPE: &str = "first_scope_kernel";
 const SECOND_SCOPE: &str = "second_scope_kernel";
 const FIXTURE_SOURCE: &str = include_str!("fixtures/find/src/main.rs");
 
+#[track_caller]
 fn write_fixture(workspace: &Path, scoped_kernel: &str) {
     fs::write(
         workspace.join("src/main.rs"),
@@ -41,8 +42,11 @@ struct CapturedFindFixture {
 }
 
 impl CapturedFindFixture {
+    /// Captures the first scope in the workspace retained by the parent process.
+    #[track_caller]
     fn new(workspace: PathBuf) -> Self {
         write_fixture(&workspace, FIRST_SCOPE);
+
         let optic = Optic::open(&workspace).expect("the fixture workspace can be opened");
         let request = BuildRequest::new(
             "find_fixture",
@@ -50,6 +54,7 @@ impl CapturedFindFixture {
             "release",
         )
         .expect("the fixture request is valid");
+
         let first = optic
             .capture(&request, CapturePolicy::Reuse)
             .expect("the first generic fixture capture succeeds")
@@ -71,7 +76,9 @@ fn finds_concrete_generic_instances() {
     else {
         return;
     };
+
     let fixture = CapturedFindFixture::new(workspace);
+
     let found = fixture
         .optic
         .find(fixture.first.id(), "find_fixture::generic_kernel", 100)
@@ -98,11 +105,14 @@ fn finds_nested_generics_and_canonical_trait_methods() {
     ) else {
         return;
     };
+
     let fixture = CapturedFindFixture::new(workspace);
+
     let nested = fixture
         .optic
         .find(fixture.first.id(), "nested_kernel::chunk", 100)
         .expect("a nested generic instance remains searchable");
+
     assert!(!nested.instances().is_empty());
     assert_eq!(nested.capture_id(), fixture.first.id());
 
@@ -114,6 +124,7 @@ fn finds_nested_generics_and_canonical_trait_methods() {
             100,
         )
         .expect("the fully qualified trait method can be found");
+
     assert_eq!(trait_method.instances().len(), 1);
 }
 
@@ -124,8 +135,11 @@ fn isolates_instances_between_captures() {
     else {
         return;
     };
+
     let fixture = CapturedFindFixture::new(workspace);
+
     write_fixture(&fixture.workspace, SECOND_SCOPE);
+
     let second = fixture
         .optic
         .capture(&fixture.request, CapturePolicy::Reuse)

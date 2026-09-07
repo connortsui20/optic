@@ -5,8 +5,8 @@
 //! session configuration and the complete regular codegen-unit list before code generation.
 //!
 //! Rust 1.98.1 writes the no-LTO `bc` file in [`codegen`] after optimization. Local ThinLTO saves
-//! `thin-lto-after-pm.bc` immediately after [`run_pass_manager`]. Both paths use [`OutputFilenames`],
-//! so module identity and the configured output stem determine the expected file without a glob.
+//! `thin-lto-after-pm.bc` just after [`run_pass_manager`]. Both paths use [`OutputFilenames`].
+//! Module identity and the configured output stem determine the expected file without a glob.
 //!
 //! [codegen]: https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/compiler/rustc_codegen_llvm/src/back/write.rs#L968-L1028
 //! [run_pass_manager]: https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/compiler/rustc_codegen_llvm/src/back/lto.rs#L778-L782

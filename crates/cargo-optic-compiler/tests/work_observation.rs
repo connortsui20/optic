@@ -20,9 +20,11 @@ use optic_compiler::discover_workspace;
 use optic_compiler::prepare_build;
 use optic_records::CaptureId;
 
+#[track_caller]
 fn run_in_process(workspace: &TestWorkspace, operation: &str) {
     let mut command = Command::new(env::current_exe().unwrap());
     workspace.apply(&mut command);
+
     let cargo = command
         .get_envs()
         .find(|(name, _)| *name == "CARGO")
@@ -30,6 +32,7 @@ fn run_in_process(workspace: &TestWorkspace, operation: &str) {
         .1
         .unwrap()
         .to_owned();
+
     command
         .args(["--exact", "observed_collection_child", "--nocapture"])
         .env("OPTIC_TEST_CHILD", operation)
@@ -44,11 +47,13 @@ fn run_in_process(workspace: &TestWorkspace, operation: &str) {
             "OPTIC_TEST_ANALYSIS",
             workspace.observations().join("analysis.json"),
         );
+
     let output = run(&mut command);
     eprintln!(
         "observations: {}",
         fs::read_to_string(workspace.observations().join("events")).unwrap_or_default()
     );
+
     assert_success(&command, &output);
 }
 
@@ -57,8 +62,8 @@ fn counts_cold_warm_stale_and_forced_selected_work() {
     let workspace = TestWorkspace::new("capture");
 
     for (name, source) in [
-        ("cargo", include_str!("fixtures/observe-cargo.sh")),
-        ("rustc-observer", include_str!("fixtures/observe-rustc.sh")),
+        ("cargo", include_str!("fixtures/observe-cargo.sh")), // Forward Cargo commands.
+        ("rustc-observer", include_str!("fixtures/observe-rustc.sh")), // Observe rustc invocations.
     ] {
         let path = workspace.observations().join(name);
         fs::write(&path, source).unwrap();
@@ -74,16 +79,19 @@ fn counts_cold_warm_stale_and_forced_selected_work() {
     let source = workspace.workspace().join("src/generic.rs");
     let contents = fs::read_to_string(&source).unwrap();
     fs::write(source, contents.replace("outlined_kernel", "edited_kernel")).unwrap();
+
     run_in_process(&workspace, "stale");
     assert_counts(&workspace, 1, 1, 1);
 
     run_in_process(&workspace, "collect");
     assert_counts(&workspace, 2, 1, 1);
+
     run_in_process(&workspace, "fresh");
     assert_counts(&workspace, 2, 1, 1);
 
     run_in_process(&workspace, "collect");
     assert_counts(&workspace, 3, 1, 1);
+
     run_in_process(&workspace, "fresh");
     assert_counts(&workspace, 3, 1, 1);
 }
@@ -110,13 +118,16 @@ fn observed_collection_child() {
             let collection = prepared.collect().unwrap();
             let (_, _, analysis, manifest, _artifacts) =
                 collection.into_parts(CaptureId::generate()).unwrap();
+
             assert!(!manifest.instances().is_empty());
             assert_eq!(analysis.request_key(), &request_key);
+
             fs::write(analysis_path, serde_json::to_vec(&analysis).unwrap()).unwrap();
         }
         "fresh" | "stale" => {
             let analysis = serde_json::from_slice(&fs::read(analysis_path).unwrap()).unwrap();
             let freshness = prepared.probe(&analysis).unwrap();
+
             match operation.as_str() {
                 "fresh" => assert!(matches!(freshness, Freshness::Fresh)),
                 "stale" => assert!(matches!(freshness, Freshness::Stale)),
@@ -135,6 +146,7 @@ fn assert_counts(
     dependencies: usize,
 ) {
     let events = fs::read_to_string(workspace.observations().join("events")).unwrap();
+
     assert_eq!(
         events
             .lines()

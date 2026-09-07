@@ -16,14 +16,12 @@ pub enum Error {
         /// The compiler subsystem error.
         source: optic_compiler::Error,
     },
-
     /// Collected evidence could not become a valid durable record.
     #[snafu(transparent)]
     Record {
         /// The record validation error.
         source: optic_records::Error,
     },
-
     /// The complete capture could not be published.
     #[snafu(transparent)]
     Store {

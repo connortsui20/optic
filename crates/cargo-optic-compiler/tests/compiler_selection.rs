@@ -26,6 +26,7 @@ use optic_records::CargoTargetKind;
 fn child_command(workspace: &TestWorkspace, scenario: &str) -> Command {
     let mut command = Command::new(env::current_exe().unwrap());
     workspace.apply(&mut command);
+
     command
         .args(["--exact", "collect_in_child", "--nocapture"])
         .env("OPTIC_TEST_WORKSPACE", workspace.workspace())
@@ -41,6 +42,7 @@ fn collects_with_the_default_rustc() {
     command
         .env("RUSTC_WRAPPER", "")
         .env("RUSTC_WORKSPACE_WRAPPER", "");
+
     let output = run(&mut command);
 
     assert_success(&command, &output);
@@ -53,6 +55,7 @@ fn collects_a_warm_target_again() {
     command
         .env("RUSTC_WRAPPER", "")
         .env("RUSTC_WORKSPACE_WRAPPER", "");
+
     let output = run(&mut command);
 
     assert_success(&command, &output);
@@ -62,6 +65,7 @@ fn collects_a_warm_target_again() {
 fn disables_a_configured_wrapper_with_a_warning() {
     let workspace = TestWorkspace::new("capture");
     fs::create_dir(workspace.workspace().join(".cargo")).unwrap();
+
     let wrapper = workspace.workspace().join("wrapper");
     fs::write(
         &wrapper,
@@ -82,7 +86,8 @@ fn disables_a_configured_wrapper_with_a_warning() {
     assert!(output.status.success(), "{diagnostics}");
     assert!(!workspace.workspace().join("wrapper-ran").exists());
     assert!(diagnostics.contains(
-        "warning: Cargo Optic does not support configured rustc wrappers; disabling them for this capture"
+        "warning: Cargo Optic does not support configured rustc wrappers; \
+         disabling them for this capture"
     ));
     assert!(
         diagnostics.contains(
@@ -100,10 +105,12 @@ fn rejects_a_configured_compiler() {
         "[build]\nrustc = \"rustc\"\n",
     )
     .unwrap();
+
     let mut command = child_command(&workspace, "compiler-error");
     command
         .env("RUSTC_WRAPPER", "")
         .env("RUSTC_WORKSPACE_WRAPPER", "");
+
     let output = run(&mut command);
 
     assert_success(&command, &output);
@@ -117,6 +124,7 @@ fn rejects_an_environment_compiler() {
         .env("RUSTC", "rustc")
         .env("RUSTC_WRAPPER", "")
         .env("RUSTC_WORKSPACE_WRAPPER", "");
+
     let output = run(&mut command);
 
     assert_success(&command, &output);
@@ -128,10 +136,12 @@ fn collects_and_probes_named_targets_from_a_subdirectory() {
     let subdirectory = workspace.workspace().join("src/subdir");
     fs::create_dir(&subdirectory).unwrap();
     let subdirectory = fs::canonicalize(subdirectory).unwrap();
+
     let mut command = child_command(&workspace, "named-targets");
     command
         .current_dir(&subdirectory)
         .env("OPTIC_TEST_WORKSPACE", &subdirectory);
+
     let output = run(&mut command);
 
     assert_success(&command, &output);
@@ -173,6 +183,7 @@ fn collect_and_probe_named_targets(workspace: &Workspace) {
             .iter()
             .filter(|instance| instance.definition().definition_path() == definition)
             .collect::<Vec<_>>();
+
         assert_eq!(
             selected.len(),
             1,
@@ -193,6 +204,7 @@ fn collect_in_child() {
     let Some(directory) = env::var_os("OPTIC_TEST_WORKSPACE") else {
         return;
     };
+
     let workspace = discover_workspace(Path::new(&directory)).unwrap();
 
     if env::var("OPTIC_TEST_SCENARIO").unwrap() == "named-targets" {
@@ -219,6 +231,7 @@ fn collect_in_child() {
             let Err(error) = result else {
                 panic!("custom compiler selection must fail");
             };
+
             assert!(
                 error
                     .to_string()

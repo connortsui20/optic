@@ -29,6 +29,7 @@ use crate::manifest::CompilerManifest;
 use crate::manifest::ExpectedModule;
 use crate::protocol::LLVM_RECIPE_REVISION;
 
+/// Retains manifest metadata after source checks and optimized-module materialization.
 pub(crate) struct CollectedEvidence {
     /// Concrete instances with checked source relationships.
     pub(crate) instances: Vec<InstanceRecord>,
@@ -49,6 +50,7 @@ pub(crate) fn collect(
     let version = if configuration.backend == "llvm" {
         let output = run(Command::new(compiler.rustc()).arg("-vV"))?;
         let text = String::from_utf8_lossy(&output.stdout);
+
         Some(
             text.lines()
                 .find_map(|line| line.strip_prefix("LLVM version: "))
@@ -62,6 +64,7 @@ pub(crate) fn collect(
     } else {
         None
     };
+
     let provenance = LlvmProvenance::new(
         configuration.backend,
         version,
@@ -78,6 +81,7 @@ pub(crate) fn collect(
     for artifact in &artifacts {
         let path = directory.join(artifact.file_name());
         let metadata = regular_file(&path)?;
+
         if metadata.len() != artifact.byte_len() {
             return Err(invalid_environment(format!(
                 "source snapshot length must match the compiler manifest, got {}",
@@ -94,6 +98,7 @@ pub(crate) fn collect(
             llvm: LlvmCollection::NotCaptured(reason),
         });
     }
+
     let modules = collect_modules(
         manifest.modules,
         compiler,
@@ -123,6 +128,7 @@ fn collect_modules(
             "collected LLVM requires a supported effective configuration, got conflicting metadata",
         ));
     }
+
     let stage = match provenance.lto() {
         LlvmLto::Off => LlvmStage::NoLtoOptimized,
         LlvmLto::LocalThin => LlvmStage::LocalThinLtoPostPassManager,
@@ -132,20 +138,25 @@ fn collect_modules(
             ));
         }
     };
+
     let disassembler = compiler
         .sysroot()
         .join("lib/rustlib")
         .join(compiler.host())
         .join("bin/llvm-dis");
+
     if !disassembler.is_file() {
         return Err(invalid_environment(format!(
-            "optimized LLVM collection requires {}. Install the matching component with rustup component add llvm-tools",
+            "optimized LLVM collection requires {}. \
+             Install the matching component with rustup component add llvm-tools",
             disassembler.display()
         )));
     }
+
     let output = run(Command::new(&disassembler).arg("--version"))?;
     let text = String::from_utf8_lossy(&output.stdout);
     let actual = disassembler_version(&text);
+
     if actual != provenance.llvm_version() {
         return Err(invalid_environment(format!(
             "llvm-dis must match the compiler's LLVM version, got {actual:?}"
@@ -167,11 +178,13 @@ fn collect_modules(
                 module.path.display()
             )));
         }
+
         let id = ArtifactId::new(next_id);
         next_id = next_id
             .checked_add(1)
             .ok_or_else(|| invalid_environment("artifact IDs must fit in u64, got overflow"))?;
         let path = directory.join(ArtifactRecord::new(id, ArtifactKind::Llvm, 0).file_name());
+
         run(Command::new(&disassembler)
             .arg(&module.path)
             .arg("-o")
@@ -181,18 +194,21 @@ fn collect_modules(
             path: module.path.clone(),
             source: io::Error::other(error),
         })?;
+
         let length = regular_file(&path)?.len();
         let file = File::open(&path).map_err(|source| Error::Filesystem {
             operation: "open optimized LLVM artifact",
             path: path.clone(),
             source,
         })?;
+
         let definitions =
             crate::llvm_index::index(BufReader::new(file)).map_err(|source| Error::Filesystem {
                 operation: "index optimized LLVM artifact",
                 path: path.clone(),
                 source,
             })?;
+
         modules.push(LlvmModuleRecord::new(id, module.name, stage, definitions)?);
         artifacts.push(ArtifactRecord::new(id, ArtifactKind::Llvm, length));
     }
@@ -206,6 +222,7 @@ fn regular_file(path: &Path) -> Result<fs::Metadata, Error> {
         path: path.to_owned(),
         source,
     })?;
+
     if !metadata.is_file() {
         return Err(Error::Filesystem {
             operation: "read regular compiler artifact",
@@ -226,6 +243,7 @@ fn run(command: &mut Command) -> Result<std::process::Output, Error> {
         program: program.clone(),
         source,
     })?;
+
     if !output.status.success() {
         return Err(Error::ProcessFailed {
             program,

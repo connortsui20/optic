@@ -61,6 +61,7 @@ impl Store {
                 }
                 .build()
             })?;
+
         if range.end() > record.byte_len() {
             return ArtifactRangeSnafu {
                 artifact,
@@ -106,6 +107,7 @@ pub(crate) fn copy_artifacts(
         operation: "read artifact directory",
         path: input_directory.to_owned(),
     })?;
+
     if !metadata.is_dir() {
         return UnexpectedFileTypeSnafu {
             expected: "directory",
@@ -115,10 +117,12 @@ pub(crate) fn copy_artifacts(
     }
 
     let mut buffer = [0; COPY_BUFFER_BYTES];
+
     for artifact in manifest.artifacts() {
         let source = input_directory.join(artifact.file_name());
         let destination = staging.join(artifact.file_name());
         validate_artifact_file(&source, artifact)?;
+
         let mut reader = File::open(&source).with_context(|_| FilesystemSnafu {
             operation: "open artifact",
             path: source.clone(),
@@ -132,6 +136,7 @@ pub(crate) fn copy_artifacts(
                 path: destination.clone(),
             })?;
         let mut remaining = artifact.byte_len();
+
         while remaining > 0 {
             let count = remaining.min(buffer.len() as u64) as usize;
             reader
@@ -148,6 +153,7 @@ pub(crate) fn copy_artifacts(
                 })?;
             remaining -= count as u64;
         }
+
         validate_artifact_file(&source, artifact)?;
     }
 
@@ -159,6 +165,7 @@ fn validate_artifact_file(path: &Path, artifact: &ArtifactRecord) -> Result<(), 
         operation: "read artifact metadata",
         path: path.to_owned(),
     })?;
+
     if !metadata.is_file() {
         return UnexpectedFileTypeSnafu {
             expected: "file",
@@ -166,6 +173,7 @@ fn validate_artifact_file(path: &Path, artifact: &ArtifactRecord) -> Result<(), 
         }
         .fail();
     }
+
     if metadata.len() != artifact.byte_len() {
         return ArtifactLengthSnafu {
             path: path.to_owned(),
@@ -187,6 +195,7 @@ pub(crate) fn copy_evidence_bytes(
 ) -> Result<(), Error> {
     let mut buffer = [0; COPY_BUFFER_BYTES];
     let mut remaining = length;
+
     while remaining > 0 {
         let count = remaining.min(buffer.len() as u64) as usize;
         reader

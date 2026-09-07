@@ -1,3 +1,8 @@
+//! Checks the private wire format with explicit complete and malformed byte streams.
+//!
+//! These tests isolate decoding and durable value construction. Compiler integration tests cover
+//! the real driver's writes, callback ordering, and artifact paths.
+
 use std::fs;
 
 use optic_records::ArtifactId;
@@ -19,6 +24,8 @@ use crate::protocol::PROTOCOL_VERSION;
 
 const MARKER: &str = "--cfg=cargo_optic_selected_target=\"38a90c21244546ad8a2b3770f6cb370c\"";
 
+/// Decodes an isolated manifest with the default marker and no external artifact dependencies.
+#[track_caller]
 fn decode(bytes: &[u8]) -> Result<CompilerManifest, Error> {
     let temporary = tempfile::tempdir().unwrap();
     let path = temporary.path().join("manifest.bin");
@@ -45,9 +52,15 @@ fn configuration(lto: u32, unsupported: u32) -> Vec<u8> {
     write_u32(&mut bytes, PROTOCOL_VERSION);
     write_string(&mut bytes, MARKER);
     write_u32(&mut bytes, crate::protocol::CONFIGURATION_RECORD);
-    for value in ["llvm", "x86_64-unknown-linux-gnu", "3"] {
+
+    for value in [
+        "llvm",                     // The backend is LLVM.
+        "x86_64-unknown-linux-gnu", // The target is x86_64 Linux.
+        "3",                        // The optimization level is 3.
+    ] {
         write_string(&mut bytes, value);
     }
+
     for value in [
         lto,                                   // Effective LTO.
         0,                                     // Incremental compilation is disabled.
@@ -65,20 +78,23 @@ fn configuration(lto: u32, unsupported: u32) -> Vec<u8> {
 fn manifest(source: u32) -> Vec<u8> {
     let mut bytes = configuration(protocol::LTO_LOCAL_THIN, protocol::LLVM_SUPPORTED);
     write_u32(&mut bytes, PLACEMENT_RECORD);
+
     for value in [
-        "fixture",
-        "fixture::kernel",
-        "fixture::kernel::<u64>",
-        "_RNvCfixture6kernelm",
-        "fixture.0",
-        "External",
-        "Default",
+        "fixture",                // The crate owns the definition.
+        "fixture::kernel",        // This path names the definition.
+        "fixture::kernel::<u64>", // This name includes concrete arguments.
+        "_RNvCfixture6kernelm",   // This is the compiler's raw symbol.
+        "fixture.0",              // This codegen unit contains the instance.
+        "External",               // The linkage is external.
+        "Default",                // The visibility is the default.
     ] {
         write_string(&mut bytes, value);
     }
+
     write_u32(&mut bytes, 0);
     write_u64(&mut bytes, 17);
     write_u32(&mut bytes, source);
+
     if source == protocol::SOURCE_AVAILABLE {
         write_u64(&mut bytes, 7);
         write_u64(&mut bytes, 2);
@@ -89,6 +105,7 @@ fn manifest(source: u32) -> Vec<u8> {
         write_u64(&mut bytes, 7);
         write_u64(&mut bytes, 15);
     }
+
     write_u32(&mut bytes, END_RECORD);
 
     bytes
@@ -96,11 +113,9 @@ fn manifest(source: u32) -> Vec<u8> {
 
 #[test]
 fn reads_a_complete_manifest() {
-    let temporary = tempfile::tempdir().unwrap();
-    let path = temporary.path().join("manifest.bin");
-    fs::write(&path, manifest(protocol::SOURCE_NONLOCAL)).unwrap();
-
-    let instances = read_manifest(&path, MARKER).unwrap().instances;
+    let instances = decode(&manifest(protocol::SOURCE_NONLOCAL))
+        .unwrap()
+        .instances;
 
     assert_eq!(instances.len(), 1);
     assert_eq!(instances[0].display_name(), "fixture::kernel::<u64>");
@@ -108,27 +123,21 @@ fn reads_a_complete_manifest() {
 
 #[test]
 fn rejects_a_truncated_manifest() {
-    let temporary = tempfile::tempdir().unwrap();
-    let path = temporary.path().join("manifest.bin");
     let mut bytes = manifest(protocol::SOURCE_NONLOCAL);
     bytes.pop();
-    fs::write(&path, bytes).unwrap();
 
-    let error = read_manifest(&path, MARKER).unwrap_err();
+    let error = decode(&bytes).unwrap_err();
 
     assert!(error.to_string().contains("truncated"));
 }
 
 #[test]
 fn rejects_a_wrong_protocol_version() {
-    let temporary = tempfile::tempdir().unwrap();
-    let path = temporary.path().join("manifest.bin");
     let mut bytes = manifest(protocol::SOURCE_NONLOCAL);
     bytes[MANIFEST_MAGIC.len()..MANIFEST_MAGIC.len() + 4]
         .copy_from_slice(&(PROTOCOL_VERSION + 1).to_le_bytes());
-    fs::write(&path, bytes).unwrap();
 
-    let error = read_manifest(&path, MARKER).unwrap_err();
+    let error = decode(&bytes).unwrap_err();
 
     assert!(
         error
@@ -139,13 +148,10 @@ fn rejects_a_wrong_protocol_version() {
 
 #[test]
 fn rejects_trailing_bytes() {
-    let temporary = tempfile::tempdir().unwrap();
-    let path = temporary.path().join("manifest.bin");
     let mut bytes = manifest(protocol::SOURCE_NONLOCAL);
     bytes.push(1);
-    fs::write(&path, bytes).unwrap();
 
-    let error = read_manifest(&path, MARKER).unwrap_err();
+    let error = decode(&bytes).unwrap_err();
 
     assert!(error.to_string().contains("trailing bytes"));
 }
@@ -166,18 +172,15 @@ fn rejects_wrong_magic_and_truncated_headers() {
     let complete = manifest(protocol::SOURCE_NONLOCAL);
     let mut wrong_magic = complete.clone();
     wrong_magic[0] = 0;
+
     let cases = [
-        wrong_magic,
-        complete[..15].to_vec(),
-        complete[..18].to_vec(),
+        wrong_magic,             // The magic does not match.
+        complete[..15].to_vec(), // The magic is truncated.
+        complete[..18].to_vec(), // The version is truncated.
     ];
 
     for bytes in cases {
-        let temporary = tempfile::tempdir().unwrap();
-        let path = temporary.path().join("manifest.bin");
-        fs::write(&path, bytes).unwrap();
-
-        assert!(read_manifest(&path, MARKER).is_err());
+        assert!(decode(&bytes).is_err());
     }
 }
 
@@ -194,6 +197,7 @@ fn reads_expected_modules_without_function_placements() {
     fs::write(&path, bytes).unwrap();
 
     let manifest = read_manifest(&path, MARKER).unwrap();
+
     assert!(manifest.instances.is_empty());
     assert_eq!(manifest.modules.len(), 1);
     assert_eq!(manifest.modules[0].name, "empty");
@@ -216,13 +220,16 @@ fn rejects_unsupported_duplicate_and_outside_module_paths() {
         (protocol::LLVM_SUPPORTED, 1, "llvm/../outside.bc"), // Parent traversal.
     ] {
         let mut bytes = configuration(protocol::LTO_LOCAL_THIN, unsupported);
+
         for _ in 0..count {
             write_u32(&mut bytes, crate::protocol::MODULE_RECORD);
             write_string(&mut bytes, "module");
             write_string(&mut bytes, temporary.path().join(name).to_str().unwrap());
         }
+
         write_u32(&mut bytes, END_RECORD);
         fs::write(&path, bytes).unwrap();
+
         assert!(read_manifest(&path, MARKER).is_err());
     }
 }
@@ -245,6 +252,7 @@ fn unavailable_source_codes_keep_their_wire_values_and_meanings() {
         ), // Outside the package.
     ] {
         assert_eq!(code, wire);
+
         let manifest = decode(&manifest(code)).unwrap();
 
         assert_eq!(
@@ -257,6 +265,7 @@ fn unavailable_source_codes_keep_their_wire_values_and_meanings() {
 #[test]
 fn available_source_code_keeps_its_wire_value_and_payload() {
     assert_eq!(protocol::SOURCE_AVAILABLE, 0);
+
     let manifest = decode(&manifest(protocol::SOURCE_AVAILABLE)).unwrap();
     let expected = SourceRecord::new(
         ArtifactId::new(7),
@@ -282,6 +291,7 @@ fn lto_codes_keep_their_wire_values_and_meanings() {
         (protocol::LTO_FAT, 3, LlvmLto::Fat),              // Fat LTO.
     ] {
         assert_eq!(code, wire);
+
         let mut bytes = configuration(code, protocol::LLVM_SUPPORTED);
         write_u32(&mut bytes, END_RECORD);
 
@@ -325,6 +335,7 @@ fn llvm_support_codes_keep_their_wire_values_and_meanings() {
         ), // Unverified compiler.
     ] {
         assert_eq!(code, wire);
+
         let mut bytes = configuration(protocol::LTO_LOCAL_THIN, code);
         write_u32(&mut bytes, END_RECORD);
 

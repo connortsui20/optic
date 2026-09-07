@@ -1,7 +1,7 @@
 //! Identifies the normalized request used to select a capture candidate.
 //!
-//! The compiler computes the SHA-256 digest. This type validates its representation without making
-//! any claim about Cargo freshness.
+//! The compiler uses [`CaptureKey`] to locate completed captures before it asks Cargo to verify
+//! freshness.
 
 use std::fmt;
 use std::str::FromStr;
@@ -14,6 +14,9 @@ use crate::Error;
 use crate::error::InvalidFieldSnafu;
 
 /// A SHA-256 digest encoded as exactly 64 lowercase hexadecimal characters.
+///
+/// The compiler hashes length-prefixed request inputs, including its request-policy revision.
+/// Parsing checks only the digest text. A matching key selects a candidate for Cargo verification.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct CaptureKey(String);

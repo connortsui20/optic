@@ -1,7 +1,8 @@
 //! Resolves exact raw symbols through stored LLVM indexes.
 //!
 //! Every captured module participates, even without an original compiler placement. Direct aliases
-//! resolve only within their module. Queries do not parse LLVM text or infer why a symbol is absent.
+//! resolve only within their module. Queries do not parse LLVM text or infer why a symbol is
+//! absent.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -90,10 +91,12 @@ pub fn llvm_evidence(store: &Store, reference: &InstanceRef) -> Result<LlvmEvide
         .read_instances(reference.capture_id())
         .context(error::StoreSnafu)?;
     let instance = referenced_instance(&manifest, reference)?;
+
     let modules = match manifest.llvm() {
         LlvmCollection::Collected(modules) => modules,
         LlvmCollection::NotCaptured(reason) => return Ok(LlvmEvidence::NotCaptured(*reason)),
     };
+
     let mut bodies = Vec::new();
     let mut unsupported_alias = false;
 

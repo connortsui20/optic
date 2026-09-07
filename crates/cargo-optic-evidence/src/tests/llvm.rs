@@ -21,6 +21,10 @@ use crate::Error;
 use crate::LlvmEvidence;
 use crate::llvm_evidence;
 
+/// Publishes modules with fixed 32-byte artifacts and an extra `fixture.0` placement module.
+///
+/// Definition ranges **must** fit those artifacts. Supplied module names **must** exclude
+/// `fixture.0`, which this helper reserves for the instance's original compiler placement.
 fn publish_modules(
     fixture: &TestStore,
     raw_symbol: &str,
@@ -180,8 +184,10 @@ fn aliases_never_resolve_through_another_module() {
 fn missing_exact_definitions_do_not_use_nearby_names() {
     for definitions in [
         Vec::new(), // A declaration has no indexed definition.
-        vec![definition("display", 0, LlvmDefinitionKind::Function)], // A display name is not identity.
-        vec![definition("entry.extra", 0, LlvmDefinitionKind::Function)], // A substring is not identity.
+        // A display name is not identity.
+        vec![definition("display", 0, LlvmDefinitionKind::Function)], //
+        // A substring is not identity.
+        vec![definition("entry.extra", 0, LlvmDefinitionKind::Function)], //
         vec![alias("entry", "missing")], // A direct target can lack a standalone definition.
     ] {
         let fixture = TestStore::new();
@@ -243,6 +249,7 @@ fn alias_cycles_are_errors_even_with_a_valid_body_in_another_module() {
                 module(1, "cycle.cgu", aliases), //
             ],
         );
+
         let error = llvm_evidence(&fixture.store, &reference).unwrap_err();
 
         assert!(matches!(

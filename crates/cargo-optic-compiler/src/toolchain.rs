@@ -1,7 +1,7 @@
 //! Selects the default compiler used for collection.
 //!
-//! The first implementation uses `rustc` from `PATH`. It rejects compiler overrides and disables
-//! configured wrappers instead of reproducing Cargo's complete compiler configuration.
+//! Collection uses `rustc` from `PATH`. It rejects compiler overrides and disables configured
+//! wrappers instead of reproducing Cargo's complete compiler configuration.
 
 use std::env;
 use std::fs;
@@ -30,6 +30,7 @@ impl CompilerContext {
     /// Inspects `rustc` from `PATH` and rejects explicit compiler selection.
     pub(crate) fn discover(workspace: &Workspace) -> Result<Self, Error> {
         let configuration = read_compiler_configuration(workspace)?;
+
         if RUSTC_ENVIRONMENT
             .iter()
             .any(|name| env::var_os(name).is_some())
@@ -80,6 +81,7 @@ fn read_compiler_configuration(workspace: &Workspace) -> Result<CompilerConfigur
             program: workspace.cargo().to_owned(),
             source,
         })?;
+
     if !output.status.success() {
         return Err(Error::ProcessFailed {
             program: workspace.cargo().to_owned(),
@@ -89,6 +91,7 @@ fn read_compiler_configuration(workspace: &Workspace) -> Result<CompilerConfigur
     }
 
     let mut configuration = CompilerConfiguration::default();
+
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let Some((field, _)) = line.split_once(" = ") else {
             continue;
@@ -126,6 +129,7 @@ fn inspect_rustc(workspace: &Workspace) -> Result<CompilerIdentity, Error> {
             source,
         }
     })?;
+
     let output =
         Command::new(&rustc)
             .arg("-vV")
@@ -134,6 +138,7 @@ fn inspect_rustc(workspace: &Workspace) -> Result<CompilerIdentity, Error> {
                 program: rustc.clone(),
                 source,
             })?;
+
     if !output.status.success() {
         return Err(Error::ProcessFailed {
             program: rustc,
@@ -141,6 +146,7 @@ fn inspect_rustc(workspace: &Workspace) -> Result<CompilerIdentity, Error> {
             diagnostics: Some(String::from_utf8_lossy(&output.stderr).into_owned()),
         });
     }
+
     let verbose = String::from_utf8_lossy(&output.stdout);
     let release = compiler_field(&verbose, "release")?;
     let commit_hash = compiler_field(&verbose, "commit-hash")?;
@@ -158,6 +164,7 @@ fn run_rustc(workspace: &Workspace, arguments: &[&str]) -> Result<String, Error>
             program: PathBuf::from("rustc"),
             source,
         })?;
+
     if !output.status.success() {
         return Err(Error::ProcessFailed {
             program: PathBuf::from("rustc"),
@@ -175,6 +182,7 @@ fn compiler_field(verbose: &str, name: &'static str) -> Result<String, Error> {
         .find_map(|line| line.strip_prefix(name)?.strip_prefix(':'))
         .map(str::trim)
         .filter(|value| !value.is_empty());
+
     let Some(value) = value else {
         return Err(Error::CompilerEnvironment {
             message: format!("rustc -vV must report {name}, got no value"),

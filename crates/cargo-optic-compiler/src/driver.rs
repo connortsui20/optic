@@ -29,6 +29,7 @@ const SOURCES: [(&str, &str); 7] = [
 
 /// Identifies the source layout, cache header, and scoped bootstrap compilation recipe.
 const RECIPE_REVISION: &[u8] = b"optic-driver-recipe-2";
+
 /// Fixed build options in command order. The resolved compiler supplies the final sysroot value.
 const BUILD_OPTIONS: [&str; 8] = [
     "--crate-name",
@@ -48,6 +49,7 @@ pub(crate) struct RustcDriver {
 }
 
 impl RustcDriver {
+    /// Reuses a validated entry or publishes a driver built from the current embedded recipe.
     pub(crate) fn provision(
         workspace: &Workspace,
         compiler: &CompilerIdentity,
@@ -112,6 +114,7 @@ impl RustcDriver {
             &executable,
             &key,
         )?;
+
         let header = temporary.path().join("identity");
         fs::write(&header, format!("optic-driver-1\n{key}\n")).map_err(|source| {
             Error::Filesystem {
@@ -121,6 +124,7 @@ impl RustcDriver {
             }
         })?;
         validate_entry(temporary.path(), &key)?;
+
         fs::rename(temporary.path(), &entry).map_err(|source| Error::Filesystem {
             operation: "publish driver cache entry",
             path: entry.clone(),
@@ -151,6 +155,7 @@ impl RustcDriver {
     }
 }
 
+/// Resolves a relative Cargo home against the invocation directory, as Cargo does.
 pub(crate) fn cargo_home(workspace: &Workspace) -> Result<PathBuf, Error> {
     let home = env::var_os("CARGO_HOME")
         .filter(|value| !value.is_empty())
@@ -213,6 +218,7 @@ fn validate_entry(entry: &Path, key: &str) -> Result<(), Error> {
         } else {
             metadata.is_file()
         };
+
         if metadata.file_type().is_symlink() || !correct_kind {
             return Err(Error::CompilerEnvironment {
                 message: format!(
@@ -221,6 +227,7 @@ fn validate_entry(entry: &Path, key: &str) -> Result<(), Error> {
                 ),
             });
         }
+
         if path
             .file_name()
             .is_some_and(|name| name == "optic-rustc-driver")
@@ -242,6 +249,7 @@ fn validate_entry(entry: &Path, key: &str) -> Result<(), Error> {
         path: path.clone(),
         source,
     })?;
+
     if metadata.len() != expected.len() as u64
         || fs::read(&path).map_err(|source| Error::Filesystem {
             operation: "read driver identity",
@@ -265,6 +273,7 @@ fn validate_entry(entry: &Path, key: &str) -> Result<(), Error> {
             program: executable.clone(),
             source,
         })?;
+
     if !output.status.success() || output.stdout != format!("{key}\n").as_bytes() {
         return Err(Error::CompilerEnvironment {
             message: format!(
@@ -313,12 +322,15 @@ fn build_driver(
             program: compiler.rustc().to_owned(),
             source,
         })?;
+
     if !output.status.success() {
         return Err(Error::ProcessFailed {
             program: compiler.rustc().to_owned(),
             status: output.status.to_string(),
             diagnostics: Some(format!(
-                "{}\nDriver compilation requires rustc-dev and llvm-tools for this exact toolchain. Install those components with rustup component add rustc-dev llvm-tools.",
+                "{}\nDriver compilation requires rustc-dev and llvm-tools for this exact \
+                 toolchain. Install those components with \
+                 rustup component add rustc-dev llvm-tools.",
                 String::from_utf8_lossy(&output.stderr)
             )),
         });
@@ -352,9 +364,11 @@ mod tests {
             RECIPE_REVISION,
             protocol::PROTOCOL_VERSION,
         );
+
         for index in 0..SOURCES.len() {
             let mut sources = SOURCES;
             sources[index].1 = "changed source";
+
             assert_ne!(
                 original,
                 driver_key(
@@ -366,6 +380,7 @@ mod tests {
                 )
             );
         }
+
         assert_ne!(
             original,
             driver_key(
@@ -436,6 +451,7 @@ mod tests {
         for (rustc, release, commit, host, sysroot) in cases {
             let changed =
                 CompilerIdentity::new(rustc.into(), release, commit, host, sysroot.into()).unwrap();
+
             assert_ne!(
                 original,
                 driver_key(
@@ -466,15 +482,20 @@ mod tests {
             fs::Permissions::from_mode(0o700),
         )
         .unwrap();
+
         validate_entry(entry, "key").unwrap();
         assert!(validate_entry(entry, "wrong key").is_err());
+
         fs::set_permissions(
             entry.join("optic-rustc-driver"),
             fs::Permissions::from_mode(0o600),
         )
         .unwrap();
+
         assert!(validate_entry(entry, "key").is_err());
+
         fs::remove_file(entry.join("optic-rustc-driver")).unwrap();
+
         assert!(validate_entry(entry, "key").is_err());
     }
 }
