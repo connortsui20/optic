@@ -6,6 +6,10 @@ The completed MVP remains the baseline. This follow-up does not add features or 
 The follow-up is complete in [PR #18](https://github.com/connortsui20/optic/pull/18), merged as
 `c94cc22` after explicit user approval. The merged tree matches the reviewed and tested `f84a25b`.
 
+This record preserves completed work, not active worker assignments. The task branches and worktrees
+are obsolete. Temporary evidence paths identify past runs whose local files are no longer available.
+Recorded results and committed regressions remain available without those files.
+
 ## Fixes and ownership
 
 - The integration owner fixes Cargo executable discovery and adds isolated process regressions.
@@ -46,8 +50,8 @@ the PR is merged, and planning is rebased onto main. No registry publication is 
 
 ## Execution evidence
 
-The integration branch is `ct/fix-mvp-review` from `bae4ca0`. The source worker uses the separate
-`ct/fix-source-line-index` worktree. Both follow the complete Rust style rules.
+The integration used `ct/fix-mvp-review` from `bae4ca0`. The source worker used a separate
+`ct/fix-source-line-index` worktree. Both followed the complete Rust style rules.
 
 The Cargo process regression fails before the permission fix: `cargo -V` succeeds while direct
 `cargo-optic optic list-captures` fails with `Permission denied`. Three new process tests pass after
@@ -58,8 +62,8 @@ The independent audit covered source identity/ranges, LLVM indexing and aliases,
 freshness, and publication failures at `bae4ca0`. All 170 relevant tests passed. An additional
 isolated workspace verified member features, warm reuse, shared-file source attribution, and LLVM
 lookup. No additional reproducible defect was found in those inspected paths and exercised cases.
-The audit fixture remains at `/tmp/optic-followup-repro.VC9jd4C9`. This is not a claim that all possible
-inputs are free of defects.
+The audit used `/tmp/optic-followup-repro.VC9jd4C9`, which is no longer available.
+The audit result does not establish correctness for all possible inputs.
 
 ## Corrective PR
 
@@ -93,8 +97,9 @@ with the same source and output locations. The baseline uses `bae4ca0`; the cand
 | Median. | 13.604 | 0.293 |
 
 The median time ratio is 46.4 on this workload. Manifests and source snapshots match byte-for-byte.
-The runner, input, binaries, output, and raw times remain under
-`/tmp/optic-source-line-fix/target/source-line-bench`. CI has no timing threshold.
+The run used `/tmp/optic-source-line-fix/target/source-line-bench`.
+The runner, generated input, binaries, output, and raw timing files are no longer available.
+The methodology and timing table remain here as historical evidence. CI has no timing threshold.
 
 The timed process includes compiler startup, parsing, analysis, Optic collection, code generation,
 and artifact output. It excludes driver compilation, parent-side manifest processing, LLVM
@@ -103,7 +108,7 @@ disassembly, and the comparison/archive steps.
 ## Final review and merge decision
 
 Independent correctness and style reviews approve `f84a25b`. The complete installed workflow also
-passes at that revision, with evidence retained in `/tmp/optic-install.Y4Q6DcbE`.
+passed at that revision. The run used the temporary directory `/tmp/optic-install.Y4Q6DcbE`.
 
 An extra standalone-driver rustdoc invocation finds three existing `private_intra_doc_links`
 warnings in the crate documentation. The links describe private entry points in a binary that has

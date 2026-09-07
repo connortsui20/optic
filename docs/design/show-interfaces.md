@@ -1,7 +1,8 @@
 # Checkpoint B interfaces
 
-These interfaces refine [narrow show](show.md) without changing its behavior. B implementation waits
-for the complete A gate. Workers start from the same accepted integration revision.
+This document records the interface decisions for the completed Checkpoint B.
+The decisions refined [narrow show](show.md) without changing its behavior.
+Current API names and signatures live on `main`. The assignments below are implementation history.
 
 ## Records
 

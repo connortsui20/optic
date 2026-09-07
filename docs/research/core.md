@@ -2,11 +2,12 @@
 
 ## Status
 
-This document summarizes the compiler research that controls the current architecture. The
-[`design plan`](../design/PLAN.md) defines current product behavior.
+This document summarizes historical research and the separate experimental `prototype` branch.
+References to the implemented prototype describe that branch, not `main`.
+The [`design plan`](../design/PLAN.md) defines the current MVP contract.
 
-The detailed reference documents preserve original experiments and planned extensions. They do not
-define the current prototype contract.
+This research is optional review context. Its broader compiler support, outputs, and recovery
+features are not requirements for the MVP.
 
 ## Conclusion
 

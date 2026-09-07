@@ -1,5 +1,9 @@
 # MVP implementation and review
 
+This document records the workflow used for the completed MVP. Its assignments, branch names, and
+landing authorization belong to that effort, not to a new task. Current contributor instructions
+live in [AGENTS.md](../../AGENTS.md). The [execution ledger](execution.md) records the results.
+
 One integration owner delivers the complete MVP in one implementation pull request. Internal
 checkpoints establish correctness before dependent work starts. They do not require separate merges
 or repeated maintainer review.
@@ -29,13 +33,12 @@ file because all workers can otherwise conflict there. Workers report the depend
 
 1. Record the integration base and planning commit in the implementation pull request.
 2. Read the applicable contracts and all affected consumers.
-3. Read the complete `$rust-style` skill before designing Rust types or editing Rust files.
+3. Read the complete [Rust style reference](../rust-style.md) before designing or changing Rust code.
 4. Establish shared signatures and record ownership before parallel edits begin.
 5. Give each worker its allowed files, required tests, dependencies, and excluded work.
 
-The initial implementation branch is `ct/complete-mvp`. PR #16 remains the existing CI proposal.
-Include its CI commit in the MVP branch. Close #16 as superseded after the MVP lands. A separate CI
-merge is not a prerequisite for the integrated implementation.
+The implementation used `ct/complete-mvp` and incorporated the CI commit from PR #16.
+PR #17 merged the MVP, and PR #16 closed as superseded. Both task branches are obsolete.
 
 ## Execution checkpoints
 
@@ -78,9 +81,9 @@ Apply the skill's restraint rules throughout:
 - Document format markers, versions, and durable input limits beside their constants.
 - Remove stale TODOs, unnecessary layers, and unsupported compatibility code deliberately.
 
-All worker and review prompts require the complete skill. Main will contain project instructions and
-a checked-in style reference so future agents do not depend on an unrecorded personal path. Project
-instructions link to that reference instead of maintaining duplicate rules.
+Main contains project instructions and the complete checked-in Rust style reference.
+Reviewers do not need a personal skill installation or prior conversation history.
+Available skills can supplement the reference, but cannot expand the authorized task.
 
 ## Independent review
 
@@ -102,8 +105,9 @@ contracts when a correction changes them. Run the complete quality gate on the f
 
 ## Landing
 
-The user authorizes automatic merging of a conforming MVP. The integration owner can squash-merge
-after the final checks and independent reviews pass. Agent workers never merge their own portions.
+The user authorized automatic merging of the conforming MVP after its checks and independent reviews.
+The integration owner merged PR #17. That completed authorization does not turn a later review request
+into permission to change code or merge a new feature.
 
 The check result must correspond to the revision being merged. Results from an earlier revision or
 another worktree do not establish that the final revision passes.

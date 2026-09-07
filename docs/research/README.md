@@ -6,21 +6,22 @@
 Optic records compiler evidence from real Cargo builds. It lets users and tools inspect and compare
 concrete Rust instances across compiler stages.
 
-This directory preserves the research that informed the current prototype. The
-[`design plan`](../design/PLAN.md) defines current product behavior.
+This directory preserves research from the separate experimental `prototype` branch.
+The [`design plan`](../design/PLAN.md) defines the current MVP contract.
 
-The research has one required document and one optional reference section.
+No document here is required for a review of `main`.
 
-## Required reading
+## Research summary
 
-Read [`core.md`](core.md). It explains the findings that still control the current architecture.
+[`core.md`](core.md) summarizes the historical experiments and their compiler background.
+Its implemented capabilities describe `prototype`, not the current MVP.
 
 It covers:
 
 - What Optic can implement.
 - The small amount of compiler background needed for the design.
 - The main findings from the compiler experiments.
-- The implemented product boundary.
+- The experimental product boundary.
 - The remaining research areas.
 
 ## Design reference
@@ -37,5 +38,5 @@ research, not the current product contract.
 ## Fixtures
 
 The [`fixtures/`](fixtures/) directory contains the programs and scripts used in the experiments.
-Use these fixtures to reproduce the historical findings. Use the product fixture on the prototype
-branch for current manual validation.
+Use these fixtures only to investigate historical findings.
+For current product verification, use [the testing guide](../testing.md) and the fixtures on `main`.

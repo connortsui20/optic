@@ -8,6 +8,11 @@ A at `0813fba`, B at `ed164a3`, and C at final reviewed revision `514b8a0`.
 The sections below retain the ordered execution history. Later acceptance supersedes earlier pending
 statuses. Current product documentation lives on `main`, and this planning history is rebased onto it.
 
+Worker assignments, branch names, and temporary paths below describe completed work.
+The obsolete task branches and worktree registrations are removed. Local temporary evidence files
+are no longer available. The tests, recorded results, and CI links remain the durable evidence.
+The [testing guide](../testing.md) gives current reproduction instructions.
+
 ## Ownership
 
 - The integration owner owns capture orchestration, API, CLI, root manifests, CI, and documentation.
@@ -78,7 +83,7 @@ show, testing, and installation documents remain the owning behavior contracts.
 The [acceptance evidence index](acceptance-evidence.md) maps claims to the owning tests.
 The [show interfaces](show-interfaces.md) fix the next checkpoint's worker boundaries before code.
 
-## Current verification
+## Checkpoint A verification
 
 Rust 1.98.1 and its required components are installed locally. The accepted revision `0813fba`
 passes 149 workspace tests, standalone/workspace formatting, Clippy with warnings denied, and
@@ -259,3 +264,19 @@ The subsequent [review follow-up](review-follow-up.md) is complete in
 [PR #18](https://github.com/connortsui20/optic/pull/18), merged as `c94cc22`. Both reported regressions
 are fixed. All 241 workspace tests, installed-product checks, independent reviews, and Linux/macOS
 CI pass on the reviewed revision. The follow-up record contains the detailed evidence and scope.
+
+## Reviewer handoff cleanup: 2026-09-07
+
+The user requested a self-contained review handoff through `main` and `planning`.
+The separate `prototype` branch remains optional experimental context. This documentation-only work
+does not change product behavior, MVP scope, or test requirements.
+
+- [x] Separate current contracts from completed delivery records and optional research.
+- [x] Correct obsolete setup instructions and claims that temporary evidence remains available.
+- [ ] Add a review entry point on `main`, linked from `AGENTS.md` and the README.
+- [ ] Verify Markdown links, branch roles, scope boundaries, and the documentation-only diff.
+- [ ] Publish the documentation and rebase `planning` onto the updated `main`.
+
+The review entry point will identify the required documents, evidence limits, and full-tree review
+scope. It will require no prior conversation or personal skill installation. Historical results
+will remain distinct from checks run during a new review.

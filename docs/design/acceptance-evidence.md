@@ -1,8 +1,13 @@
 # MVP acceptance evidence
 
-This index maps the required claims to their owning tests. Test paths refer to the implementation
-branch, not this docs-only branch. The [execution ledger](execution.md) records accepted revisions.
-An existing test name is not proof that the integrated checkpoint has passed.
+This index maps the required claims to their owning tests on `main`. Crate paths start under `crates/`.
+The [execution ledger](execution.md) records accepted revisions. The tables retain results from each
+checkpoint, not a claim that a later checkout passed. The [review follow-up](review-follow-up.md)
+records verification of the subsequent fixes in PR #18.
+
+Temporary evidence paths below identify past runs. Their local files are no longer available.
+The repository retains the tests, recorded results, and CI links. Current reproduction instructions
+live in [the testing guide](../testing.md).
 
 ## Checkpoint A
 
@@ -70,8 +75,8 @@ The stage proof runs both supported modes with the pinned compiler and matching 
 | The exact merge candidate passes both-host workspace and installed-product CI. | [CI run 33999328890](https://github.com/connortsui20/optic/actions/runs/33999328890). | All jobs pass at `514b8a0`. |
 
 The final candidate `514b8a0` passes all 236 workspace tests, formatting, Clippy with warnings denied,
-and public/private rustdoc with warnings denied. Its complete installation repeat passes with evidence
-at `/tmp/optic-install.I30jpiuX`, including every installed-product row above. Final both-host CI passes.
+and public/private rustdoc with warnings denied. Its complete installation repeat passed every
+installed-product row above. That run used `/tmp/optic-install.I30jpiuX`. Final both-host CI passed.
 
 The first complete installed run retained its evidence at `/tmp/optic-install.0Tnsjkqs` locally.
 It used Rust 1.98.1, compiler commit `48a229ceaefd4985c50990b14116b6d856af0985`, and LLVM 22.1.8.

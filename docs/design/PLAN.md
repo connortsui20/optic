@@ -4,9 +4,8 @@ The MVP supports one complete investigation: capture a Cargo target, find a conc
 and inspect its captured source or optimized LLVM output. Identical requests reuse evidence only
 after Cargo validates freshness. The exact-version driver is cached too.
 
-The user confirmed this scope on 2026-09-05. Capture, listing, search, and both caches must work
-well before development starts on narrow `show`. The implementation lands as one coherent MVP
-change.
+The user confirmed this scope on 2026-09-05. The implementation completed capture, listing, search,
+and both caches before narrow `show`. One integrated PR delivered the MVP.
 
 The MVP is complete on `main` at `bae4ca0`, merged through
 [PR #17](https://github.com/connortsui20/optic/pull/17). All three checkpoints pass.
@@ -67,20 +66,24 @@ the acceptance evidence defined in the test strategy.
 ## Reading order and authority
 
 1. This document defines product scope and the completion gate.
-2. [MVP plan](mvp-plan.md) assigns work and orders the integration checkpoints.
+2. [MVP plan](mvp-plan.md) records completed work and its integration checkpoints.
 3. [MVP architecture](mvp-architecture.md) fixes subsystem boundaries and shared contracts.
 4. [Foundation](stabilization.md) defines the preparation and simplification work.
 5. [Capture reuse](capture-reuse.md) defines the cache state machine.
 6. [Narrow show](show.md) defines source and LLVM evidence.
 7. [Test strategy](test-strategy.md) defines fixtures, observations, and acceptance scenarios.
 8. [Installation](installation.md) defines the packaged deliverable.
-9. [Agent workflow](agent-workflow.md) defines parallel work and independent review.
+9. [Agent workflow](agent-workflow.md) records the completed parallel work and independent review.
 
 These documents own different decisions. Link to the owner instead of repeating a contract.
 
-Other documents in this directory and `docs/research/` retain earlier prototype research or future
-designs. Their capabilities are not additional MVP requirements. The active documents take
-precedence when old research differs.
+The [design index](README.md) separates current contracts, acceptance history, and optional research.
+The execution ledger and acceptance records explain completed work. Their old assignments are not
+instructions to recreate branches or restart the MVP.
+
+The remaining design documents, `docs/research/`, and the separate `prototype` branch retain earlier
+experiments or future designs. They are optional context, not additional MVP requirements.
+The current contracts take precedence when historical research differs.
 
 ## Simplicity and quality
 
@@ -104,7 +107,7 @@ correctness.
 
 ## Delivery order
 
-The implementation has three internal checkpoints:
+The completed implementation used three internal checkpoints:
 
 1. **A: Reliable and efficient capture/list/find.** Establish the test harness and finish both
    caches.
@@ -113,8 +116,8 @@ The implementation has three internal checkpoints:
 3. **C: Release candidate.** Verify installation, finish documentation, and review the complete
    code.
 
-These checkpoints are not separate PR requirements. The integration owner can restructure code
-across crates during this effort. The final review covers the assembled implementation.
+These checkpoints did not require separate PRs. The final review covered the assembled implementation.
+They do not prescribe a new implementation effort or authorize further features.
 
 ## Deferred features
 
