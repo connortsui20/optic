@@ -1,14 +1,14 @@
 # Cargo Optic architecture
 
-The CLI calls the `optic` application API. The API composes capture, search, and stored evidence
-reads without moving compiler or filesystem policy into the command handlers.
+The CLI calls the `optic` application API from `cargo-optic-api`. The API coordinates capture,
+search, and stored evidence reads. Compiler and filesystem policy stay in their owning crates.
 
 ## Subsystems
 
 | Package | Responsibility |
 | --- | --- |
 | `cargo-optic-records` | Validated durable identities, provenance, and evidence metadata. |
-| `cargo-optic-compiler` | Cargo request preparation, exact-version driver, freshness, and collection. |
+| `cargo-optic-compiler` | Cargo requests, compiler driver, freshness, and collection. |
 | `cargo-optic-store` | Local persistence, bounded reads, cache pointers, and atomic publication. |
 | `cargo-optic-capture` | Probe/collect/publish orchestration and typed capture outcomes. |
 | `cargo-optic-evidence` | Capture-scoped search, availability, and evidence range selection. |
@@ -21,22 +21,22 @@ not publish captures. Applications use the API without coordinating these bounda
 ## Capture lifecycle
 
 Request preparation resolves the explicit target and compiler configuration from the invocation
-directory. The driver is compiled against that exact compiler and reused at a stable cache path.
-All embedded source, protocol, compiler, and driver-build inputs contribute to its cache key.
+directory. Optic compiles the driver against that exact compiler and reuses it at a stable cache
+path. All embedded source, protocol, compiler, and driver-build inputs contribute to its cache key.
 
 The request key selects a possible completed capture. It does not reproduce Cargo's fingerprint
 algorithm. Cargo remains responsible for tracked source, dependencies, build scripts, and
 configuration changes.
 
 A candidate probe either proves the selected target fresh or stops before selected-target analysis.
-Each actual compilation receives a new analysis token. A token associated with published evidence
-is never compiled again. This prevents a failed attempt or a configuration change from assigning
-different evidence to a previous Cargo build identity.
+Each actual compilation receives a new analysis token. Optic never compiles again with a token
+associated with published evidence. This prevents a failed attempt or a configuration change from
+assigning different evidence to a previous Cargo build identity.
 
 The capture layer preserves the complete old record on reuse. For new evidence, the store prepares
 and validates a private staging directory. It installs the request pointer immediately before
-renaming that directory into the completed namespace. No required fallible cache update follows
-the commit rename.
+renaming that directory into the completed namespace. No required fallible cache update follows the
+commit rename.
 
 A missing pointer or a pointer to an absent capture is a cache miss. Present malformed data is an
 error. The store does not search old headers to reconstruct eligibility after a failed publication.
@@ -47,11 +47,13 @@ Cargo invokes the standalone driver as its compiler wrapper. Discovery calls and
 pass through. A selected-target probe stops before analysis. A selected collection runs rustc's
 callbacks and completes its private manifest only after successful compilation.
 
-The runtime driver depends on unstable rustc internals. Its protocol is private to one tool release,
-separate from the durable store format. Unsupported revisions fail explicitly.
+The runtime driver depends on unstable rustc internals and builds against the selected compiler.
+Compiler API changes can prevent that build. LLVM retention also checks the exact compiler revision
+and reports unavailable LLVM evidence for unverified revisions. The driver protocol is private to
+one tool release, separate from the durable store format.
 
-Compiler output stays owned by its collection result until the store has copied the declared
-artifacts. Returning paths into a dropped temporary directory would violate publication's contract.
+The collection result owns compiler output until the store copies the declared artifacts. Returning
+paths into a dropped temporary directory violates the publication contract.
 
 ## Evidence identity
 
@@ -80,20 +82,19 @@ Artifact copying and evidence reads use fixed-size buffers and checked 64-bit ra
 does not reparse or hash entire LLVM modules. The store does not promise detection of same-length
 malicious edits to artifact contents.
 
-Capture mutation and shared driver provisioning require serialized callers. The MVP provides atomic
-publication visibility, not a journal, crash recovery, or filesystem durability protocol.
+Capture mutation and shared driver provisioning require serialized callers. Publication provides
+atomic visibility. It does not provide a journal, crash recovery, or filesystem durability
+guarantees.
 
 ## Testing
 
 The unpublished test-support crate supplies isolated Cargo workspaces, command environments, and
-diagnostics. Product-specific assertions remain with their owning subsystem or integration test.
-API scenarios that depend on environment variables run in fresh children, not by mutating the
-multithreaded test runner.
+diagnostics. Product-specific assertions remain with their owning subsystem or integration test. API
+scenarios that depend on environment variables run in fresh child processes. They leave the
+environment of the multithreaded test runner unchanged.
 
-Cache tests observe selected compilation and driver builds separately. They also verify failed
+Cache tests observe selected compilation and driver builds separately. They also check failed
 publication and configuration transitions. Installed CLI and external-library journeys establish
 that the package works without repository-relative files or a preexisting runtime driver.
 
-The detailed acceptance matrix and implementation status remain on `planning`. A unit-test result
-does not replace real Cargo behavior or installed-product verification.
 The [testing guide](testing.md) explains how to run checks and choose a regression's boundary.
