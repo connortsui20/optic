@@ -1,11 +1,12 @@
 # Testing Cargo Optic
 
-The tests use Cargo's test runner, small Rust fixtures, and real compiler processes. There is no
-separate scenario language or test backend.
+The tests use Cargo's test runner, small Rust fixtures, and real compiler processes.
 
 ## Run the checks
 
-The repository pins Rust 1.98.1. Install its required components before running the suite:
+The repository uses the compiler and components in [rust-toolchain.toml](../rust-toolchain.toml).
+The formatting check also requires Python 3.
+Run these commands from the repository root:
 
 ```console
 rustup component add rustc-dev llvm-tools clippy rustfmt
@@ -13,21 +14,38 @@ bash scripts/check-format.sh
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
+```
+
+Formatting includes the standalone driver and fixtures that `cargo fmt` does not discover.
+The check rejects Rust lines over 100 columns, except exact compiler-source permalinks in
+documentation.
+CI runs workspace tests on Linux and macOS.
+
+## Check the packages
+
+After committing the changes, run the installation check from a clean checkout:
+
+```console
 bash scripts/check-install.sh
 ```
 
-The installation check requires Python 3.11+, Git, and clean committed source. It needs registry
-access during package and dependency setup. It does not publish packages.
-It verifies archives, installs outside the checkout, and starts runtime tests
-with a fresh driver cache. Linux also checks an independent library consumer and runs the installed
-CLI on a clean snapshot of this repository's committed `cargo-optic-records` source.
+The script requires Python 3.11+, Git, and registry access during package and dependency setup.
+It rejects uncommitted changes and does not publish packages.
 
-The script prints its temporary evidence directory and retains it for diagnosis. Self-hosting uses
-`git archive` so it does not inherit ancestor Cargo configuration or write into the checkout's store.
+The script checks archives, installs outside the checkout, and starts runtime tests with a fresh
+driver cache. The Linux checks also cover an independent library consumer and a capture of the
+committed `cargo-optic-records` source.
 
-CI runs workspace and installed-CLI tests on Linux and macOS. Formatting includes standalone
-compiler sources, not just modules that Cargo discovers. The formatting check also requires Python 3.
-It rejects Rust lines over 100 columns, except exact compiler-source permalinks in documentation.
+The script prints its temporary evidence directory and retains it for diagnosis. The repository
+snapshot uses `git archive`. Its capture does not inherit ancestor Cargo configuration or write into
+the checkout's store.
+
+CI runs the installed CLI checks on Linux and macOS.
+
+When the compiler source layout changes, preserve every embedded source needed to build the driver.
+Keep the unpublished test helper as a path-only dev-dependency without a version.
+Exclude integration tests that require the helper from package archives.
+The script checks that the archives work without the helper or repository-relative files.
 
 ## Choose the test boundary
 
@@ -36,20 +54,24 @@ It rejects Rust lines over 100 columns, except exact compiler-source permalinks 
 | Identity parsing, record invariants, and deserialization. | Records unit tests. |
 | Durable limits, artifact ranges, and publication failures. | Store unit tests. |
 | Driver cache inputs, wire protocol, and bounded LLVM parsing. | Compiler unit tests. |
-| Actual Cargo selection, freshness, compiler settings, and retained stages. | Compiler integration tests. |
-| Search ordering, immutable references, availability, and exact alias resolution. | Evidence unit tests. |
+| Cargo selection, freshness, configuration, and retained stages. | Compiler integration tests. |
+| Search, immutable references, availability, and exact aliases. | Evidence unit tests. |
 | Capture policy, failure sequences, stored source, and LLVM. | API integration tests. |
-| Cargo subcommand discovery, output bytes, diagnostics, and closed stdout. | CLI integration tests. |
+| Subcommand discovery, output, diagnostics, and closed stdout. | CLI integration tests. |
 | Archive completeness and use outside the repository. | Installation script and consumer. |
 
-Put a regression at the smallest boundary that proves the behavior. Use a process test when the
-claim concerns Cargo or rustc behavior. A fabricated Cargo artifact does not prove real freshness.
+Put a regression at the smallest boundary that proves the behavior.
+For Cargo or rustc behavior, use a process test. A fabricated Cargo artifact does not prove real
+freshness.
+
+Use semantic assertions for command behavior. Use exact bytes for a source range or LLVM excerpt.
+Avoid whole-output snapshots of compiler diagnostics or full LLVM modules.
 
 ## Isolate process tests
 
 The unpublished `cargo-optic-test-support` crate copies fixtures into temporary workspaces. Each
 workspace has separate Cargo, target, build, temporary, and observation directories. Its child
-commands use the actual installed toolchain with cleared environments and offline local dependencies.
+commands use the installed toolchain with cleared environments and offline local dependencies.
 
 Apply scenario-specific environment variables to the child command. Never mutate the parent test
 runner's environment. API tests that need process configuration start a fresh test-executable child.
@@ -57,13 +79,15 @@ runner's environment. API tests that need process configuration start a fresh te
 Keep observations outside the fixture source tree. Otherwise, a counter or log file can invalidate
 Cargo's default build-script tracking and change the behavior under test.
 
-Private compiler tests use a small self-contained fixture when archive tests cannot use the
-unpublished helper. Do not expose product APIs or add feature switches solely to reach private code.
+When archive tests cannot use the unpublished helper, use a small self-contained compiler fixture.
+Do not expose product APIs or add feature switches solely to reach private code.
 
 ## Prove the claim
 
-Cache tests count actual selected-target compilation and driver compilation separately. Warm reuse
-must preserve the capture ID, completion time, and evidence files. Elapsed time is not a cache oracle.
+Cache tests count actual selected-target compilation and driver compilation separately. Each
+observation test must first establish a positive cold count. Zero-only assertions can pass with
+broken instrumentation. Warm reuse must preserve the capture ID, completion time, and evidence
+files. Elapsed time does not prove cache reuse.
 
 Source tests compare whole-item bytes against compiler-normalized snapshots. LLVM stage tests use
 the pinned compiler's expected output paths and compare optimized output with its earlier stage.
@@ -72,6 +96,6 @@ Exact indexing tests include quoted symbols, aliases, unrelated large input, and
 Failure tests assert what remains valid after failure, not just that an error occurred. For example,
 failed publication must preserve old evidence without making its analysis token eligible for reuse.
 
-For changes to compiler settings or capture publication, run the full cache journey after the focused
-test. Before merging a product change, run the complete suite and both-host CI on the final revision.
-The detailed acceptance contracts and execution evidence live on `planning`.
+For changes to compiler configuration or capture publication, run the full cache journey after the
+focused test. Before merging a product change, require the complete suite and both-host CI to pass
+on the final revision.
