@@ -13,6 +13,7 @@ use rustc_middle::ty::Instance;
 use rustc_middle::ty::InstanceKind;
 use rustc_middle::ty::TyCtxt;
 use rustc_span::FileName;
+use rustc_span::Pos;
 use rustc_span::StableSourceFileId;
 
 use crate::manifest::ManifestWriter;
@@ -134,15 +135,15 @@ impl Snapshots {
             return Ok(Source::Unavailable(protocol::SOURCE_OUTSIDE_PACKAGE));
         }
 
-        let start = (span.lo() - file.start_pos).0 as usize;
-        let end = (span.hi() - file.start_pos).0 as usize;
+        let start = file.relative_position(span.lo());
+        let end = file.relative_position(span.hi());
 
-        if text.get(start..end).is_none() {
+        if text.get(start.to_usize()..end.to_usize()).is_none() {
             return Ok(Source::Unavailable(protocol::SOURCE_UNSUPPORTED_SPAN));
         }
 
         // Rustc's line index uses normalized byte positions and returns a zero-based line.
-        let Some(line) = file.lookup_line(file.relative_position(span.lo())) else {
+        let Some(line) = file.lookup_line(start) else {
             return Ok(Source::Unavailable(protocol::SOURCE_UNSUPPORTED_SPAN));
         };
 
@@ -150,8 +151,8 @@ impl Snapshots {
 
         Ok(Source::Available(SourceSpan {
             artifact,
-            start: start as u64,
-            length: (end - start) as u64,
+            start: u64::from(start.to_u32()),
+            length: u64::from((end - start).to_u32()),
             display_path: path,
             starting_line: 1 + line as u64,
         }))
