@@ -18,7 +18,7 @@
 //! Booleans use zero or one. The named source-availability, LTO, and LLVM-support constants define
 //! the other field codes. Only [`SOURCE_AVAILABLE`] includes the bracketed source fields.
 //!
-//! Source-file IDs start at zero and increase by one for each new canonical source path, in
+//! Source-file IDs start at zero and increase by one for each new compiler source-file identity, in
 //! first-capture order. Each ID is a little-endian `u64`, unique only within its attempt. Source
 //! files use `artifact-<16-lowercase-hex-id>` in that directory. [`PROTOCOL_VERSION`] covers this
 //! ID encoding and the record layout independently of durable capture IDs.

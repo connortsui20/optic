@@ -468,6 +468,80 @@ fn source_lines_child() {
 }
 
 #[test]
+fn source_snapshots_distinguish_compiler_files_with_one_canonical_path() {
+    child(&TestWorkspace::new("capture"), "source_aliases_child");
+}
+
+#[test]
+fn source_aliases_child() {
+    if env::var_os("OPTIC_TEST_CHILD").is_none() {
+        return;
+    }
+
+    let workspace = discover_workspace(&env::current_dir().unwrap()).unwrap();
+    let path = workspace.root().join("src/shared.rs");
+    let definition = "pub fn shared<T: Copy>(value: T) -> T { value }";
+    let text = format!("#[inline(never)]\n{definition}\n");
+    fs::write(&path, &text).unwrap();
+    fs::create_dir(workspace.root().join("src/inner")).unwrap();
+    fs::write(
+        workspace.root().join("src/lib.rs"),
+        r#"#[path = "shared.rs"]
+mod direct;
+#[path = "inner/../shared.rs"]
+mod alias;
+pub fn uses_both(value: u64, other: u32) -> u64 {
+    direct::shared(value) + u64::from(direct::shared(other))
+        + alias::shared(value) + u64::from(alias::shared(other))
+}
+"#,
+    )
+    .unwrap();
+
+    let mut command = Command::new(env::var_os("CARGO").unwrap());
+    command.args(["rustc", "--lib", "--release"]);
+    let output = cargo_optic_test_support::run(&mut command);
+    cargo_optic_test_support::assert_success(&command, &output);
+
+    let request = BuildRequest::new("capture_fixture", CargoTarget::Library, "release").unwrap();
+    let (_, _, _, manifest, temporary) = prepare_build(&workspace, &request)
+        .unwrap()
+        .collect()
+        .unwrap()
+        .into_parts(CaptureId::generate())
+        .unwrap();
+    let sources = ["direct", "alias"].map(|module| {
+        let prefix = format!("capture_fixture::{module}::shared::<");
+        let instances: Vec<_> = manifest
+            .instances()
+            .iter()
+            .filter(|instance| instance.display_name().starts_with(&prefix))
+            .collect();
+        assert_eq!(instances.len(), 2, "{module}");
+        assert_eq!(instances[0].source(), instances[1].source());
+        let SourceAvailability::Available(source) = instances[0].source() else {
+            panic!("the local shared definition has source: {module}");
+        };
+
+        let artifact = manifest
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.id() == source.artifact())
+            .unwrap();
+        let snapshot = fs::read_to_string(temporary.path().join(artifact.file_name())).unwrap();
+        assert_eq!(snapshot, text);
+        let start = usize::try_from(source.range().start()).unwrap();
+        let end = usize::try_from(source.range().end()).unwrap();
+        assert_eq!(&snapshot[start..end], definition);
+        assert_eq!(source.starting_line(), 2);
+        assert_eq!(source.display_path(), fs::canonicalize(&path).unwrap());
+
+        source
+    });
+    assert_ne!(sources[0].artifact(), sources[1].artifact());
+}
+
+#[test]
 fn source_snapshots_preserve_normalized_whole_definitions_for_unsupported_llvm() {
     child(&TestWorkspace::new("capture"), "source_snapshots_child");
 }
