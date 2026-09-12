@@ -29,11 +29,11 @@ pub(crate) struct Configuration {
     /// The effective target tuple or target-specification identity.
     pub(crate) target: String,
 
-    /// The effective optimization level, encoded as rustc's CLI spelling.
-    pub(crate) optimization: &'static str,
+    /// The effective optimization level from the compiler session.
+    pub(crate) optimization: OptLevel,
 
-    /// The effective LTO code defined by the private protocol.
-    pub(crate) lto: u32,
+    /// The effective LTO mode after rustc resolves its defaults.
+    pub(crate) lto: Lto,
 
     /// Whether this invocation uses an incremental compilation directory.
     pub(crate) incremental: bool,
@@ -110,36 +110,21 @@ impl Configuration {
     pub(crate) fn observed(compiler: &Compiler, unsupported: u32) -> io::Result<Self> {
         let session = &compiler.sess;
 
-        let lto = match session.lto() {
-            Lto::No => protocol::LTO_OFF,
-            Lto::ThinLocal => protocol::LTO_LOCAL_THIN,
-            Lto::Thin => protocol::LTO_CROSS_CRATE_THIN,
-            Lto::Fat => protocol::LTO_FAT,
-        };
-
+        let lto = session.lto();
         let backend = compiler.codegen_backend.name().to_owned();
 
         if unsupported == protocol::LLVM_SUPPORTED
-            && (backend != "llvm" || !matches!(lto, protocol::LTO_OFF | protocol::LTO_LOCAL_THIN))
+            && (backend != "llvm" || !matches!(&lto, Lto::No | Lto::ThinLocal))
         {
             return Err(io::Error::other(
                 "retained LLVM requires the supported backend and LTO mode",
             ));
         }
 
-        let optimization = match session.opts.optimize {
-            OptLevel::No => "0",
-            OptLevel::Less => "1",
-            OptLevel::More => "2",
-            OptLevel::Aggressive => "3",
-            OptLevel::Size => "s",
-            OptLevel::SizeMin => "z",
-        };
-
         Ok(Self {
             backend,
             target: session.opts.target_triple.tuple().to_owned(),
-            optimization,
+            optimization: session.opts.optimize,
             lto,
             incremental: session.opts.incremental.is_some(),
             linker_plugin: session.opts.cg.linker_plugin_lto.enabled(),
@@ -158,9 +143,9 @@ impl Configuration {
     /// [No LTO]: https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/compiler/rustc_codegen_ssa/src/back/write.rs#L819-L840
     /// [Local ThinLTO]: https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/compiler/rustc_codegen_llvm/src/back/lto.rs#L778-L782
     pub(crate) fn extension(&self) -> Option<&'static str> {
-        match (self.unsupported, self.lto) {
-            (protocol::LLVM_SUPPORTED, protocol::LTO_OFF) => Some("bc"),
-            (protocol::LLVM_SUPPORTED, protocol::LTO_LOCAL_THIN) => Some("thin-lto-after-pm.bc"),
+        match (self.unsupported, &self.lto) {
+            (protocol::LLVM_SUPPORTED, Lto::No) => Some("bc"),
+            (protocol::LLVM_SUPPORTED, Lto::ThinLocal) => Some("thin-lto-after-pm.bc"),
             _ => None,
         }
     }

@@ -13,6 +13,9 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
+use rustc_session::config::Lto;
+use rustc_session::config::OptLevel;
+
 use crate::llvm::Configuration;
 use crate::protocol::END_RECORD;
 use crate::protocol::PLACEMENT_RECORD;
@@ -130,11 +133,26 @@ impl ManifestWriter {
 
     /// Writes the single effective configuration before any source, module, or placement record.
     pub(crate) fn write_configuration(&mut self, configuration: &Configuration) -> io::Result<()> {
+        let optimization = match configuration.optimization {
+            OptLevel::No => "0",
+            OptLevel::Less => "1",
+            OptLevel::More => "2",
+            OptLevel::Aggressive => "3",
+            OptLevel::Size => "s",
+            OptLevel::SizeMin => "z",
+        };
+        let lto = match &configuration.lto {
+            Lto::No => crate::protocol::LTO_OFF,
+            Lto::ThinLocal => crate::protocol::LTO_LOCAL_THIN,
+            Lto::Thin => crate::protocol::LTO_CROSS_CRATE_THIN,
+            Lto::Fat => crate::protocol::LTO_FAT,
+        };
+
         self.write_u32(crate::protocol::CONFIGURATION_RECORD)?;
         self.write_string(&configuration.backend)?;
         self.write_string(&configuration.target)?;
-        self.write_string(configuration.optimization)?;
-        self.write_u32(configuration.lto)?;
+        self.write_string(optimization)?;
+        self.write_u32(lto)?;
         self.write_u32(u32::from(configuration.incremental))?;
         self.write_u32(u32::from(configuration.linker_plugin))?;
         self.write_u32(configuration.codegen_units)?;
