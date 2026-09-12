@@ -6,7 +6,6 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::path::Path;
 use std::path::PathBuf;
 
 use rustc_hir::Node;
@@ -14,6 +13,7 @@ use rustc_middle::ty::Instance;
 use rustc_middle::ty::InstanceKind;
 use rustc_middle::ty::TyCtxt;
 use rustc_span::FileName;
+use rustc_span::StableSourceFileId;
 
 use crate::manifest::ManifestWriter;
 use crate::protocol;
@@ -53,16 +53,8 @@ pub(crate) struct Snapshots {
     directory: PathBuf,
     /// The canonical package root used to reject source outside the selected package.
     package_root: PathBuf,
-    /// Maps canonical source paths to files whose bytes and manifest records are already written.
-    files: BTreeMap<PathBuf, CapturedFile>,
-}
-
-/// Identifies the compiler file that supplied an already-written snapshot.
-struct CapturedFile {
-    /// Rustc's source-map start, retained to detect distinct files with one canonical path.
-    source_map_start: u32,
-    /// The attempt-local ID used by the snapshot file and its manifest declaration.
-    artifact: u64,
+    /// Maps compiler file identities to the attempt-local IDs of already-written snapshots.
+    files: BTreeMap<StableSourceFileId, u64>,
 }
 
 impl Snapshots {
@@ -80,9 +72,9 @@ impl Snapshots {
 
     /// Captures a whole local item from one compiler-loaded file inside the package root.
     ///
-    /// The range uses normalized UTF-8 bytes. Each canonical path is written and declared in the
-    /// manifest once. Unsupported definitions return [`Source::Unavailable`]. Returns an error if a
-    /// snapshot or manifest write fails, or one path identifies conflicting compiler files.
+    /// The range uses normalized UTF-8 bytes. Each compiler file is written and declared in the
+    /// manifest once, even when distinct files share a canonical path. Unsupported definitions
+    /// return [`Source::Unavailable`]. Returns an error if a snapshot or manifest write fails.
     pub(crate) fn capture<'tcx>(
         &mut self,
         tcx: TyCtxt<'tcx>,
@@ -154,7 +146,7 @@ impl Snapshots {
             return Ok(Source::Unavailable(protocol::SOURCE_UNSUPPORTED_SPAN));
         };
 
-        let artifact = self.capture_file(&path, file.start_pos.0, text, manifest)?;
+        let artifact = self.capture_file(file.stable_id, text, manifest)?;
 
         Ok(Source::Available(SourceSpan {
             artifact,
@@ -165,25 +157,17 @@ impl Snapshots {
         }))
     }
 
-    /// Reuses a checked file identity or writes its first snapshot and manifest declaration.
+    /// Reuses a compiler file's snapshot or writes its first snapshot and manifest declaration.
     ///
-    /// The caller supplies the canonical path, source-map start, and normalized text from one
-    /// compiler file. A reused path **must** identify that same file.
+    /// The identity and normalized text **must** come from the same compiler-loaded file.
     fn capture_file(
         &mut self,
-        path: &Path,
-        source_map_start: u32,
+        file_id: StableSourceFileId,
         text: &str,
         manifest: &mut ManifestWriter,
     ) -> io::Result<u64> {
-        if let Some(file) = self.files.get(path) {
-            if file.source_map_start != source_map_start {
-                return Err(io::Error::other(
-                    "one source path must identify one compiler-loaded file",
-                ));
-            }
-
-            return Ok(file.artifact);
+        if let Some(&artifact) = self.files.get(&file_id) {
+            return Ok(artifact);
         }
 
         let artifact = u64::try_from(self.files.len()).map_err(io::Error::other)?;
@@ -192,13 +176,7 @@ impl Snapshots {
             text.as_bytes(),
         )?;
         manifest.write_source_file(artifact, text.len() as u64)?;
-        self.files.insert(
-            path.to_owned(),
-            CapturedFile {
-                source_map_start,
-                artifact,
-            },
-        );
+        self.files.insert(file_id, artifact);
 
         Ok(artifact)
     }
