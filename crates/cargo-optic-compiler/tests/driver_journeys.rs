@@ -733,6 +733,7 @@ fn explicit_lto_modes_child() {
             .into_parts(CaptureId::generate())
             .unwrap();
         assert_eq!(manifest.llvm_provenance().lto(), expected_lto);
+        assert_eq!(manifest.llvm_provenance().optimization(), "3");
         assert!(
             manifest
                 .instances()
