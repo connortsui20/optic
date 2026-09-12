@@ -375,6 +375,68 @@ fn retained_bitcode_stage_child() {
 }
 
 #[test]
+fn placements_preserve_compiler_metadata_and_names() {
+    child(&TestWorkspace::new("capture"), "placement_metadata_child");
+}
+
+#[test]
+fn placement_metadata_child() {
+    if env::var_os("OPTIC_TEST_CHILD").is_none() {
+        return;
+    }
+
+    let workspace = discover_workspace(&env::current_dir().unwrap()).unwrap();
+    fs::write(
+        workspace.root().join("src/lib.rs"),
+        "#[unsafe(no_mangle)]\n\
+         pub extern \"C\" fn exported(value: u64) -> u64 { helper(value) }\n\
+         #[inline(always)]\n\
+         fn helper(value: u64) -> u64 { value.wrapping_add(1) }\n",
+    )
+    .unwrap();
+
+    let request = BuildRequest::new("capture_fixture", CargoTarget::Library, "dev").unwrap();
+    let (_, _, _, manifest, _temporary) = prepare_build(&workspace, &request)
+        .unwrap()
+        .collect()
+        .unwrap()
+        .into_parts(CaptureId::generate())
+        .unwrap();
+
+    let [exported, helper] = ["capture_fixture::exported", "capture_fixture::helper"].map(|name| {
+        let instances: Vec<_> = manifest
+            .instances()
+            .iter()
+            .filter(|instance| instance.definition().definition_path() == name)
+            .collect();
+        assert_eq!(instances.len(), 1, "{name}");
+        let instance = instances[0];
+        assert_eq!(instance.definition().crate_name(), "capture_fixture");
+        assert_eq!(instance.display_name(), name);
+        assert_eq!(instance.placements().len(), 1, "{name}");
+
+        instance
+    });
+    assert_eq!(exported.raw_symbol(), "exported");
+    assert_ne!(helper.raw_symbol(), exported.raw_symbol());
+
+    for (instance, linkage, local_copy) in [
+        (exported, "External", false), // The exported function owns its global definition.
+        (helper, "Internal", true),    // The caller's codegen unit owns a local helper copy.
+    ] {
+        let placement = &instance.placements()[0];
+        assert_eq!(placement.linkage(), linkage);
+        assert_eq!(placement.visibility(), "Default");
+        assert_eq!(placement.local_copy(), local_copy);
+        assert!(placement.size_estimate() > 0);
+        assert_eq!(
+            placement.codegen_unit(),
+            exported.placements()[0].codegen_unit()
+        );
+    }
+}
+
+#[test]
 fn source_lines_follow_each_normalized_file_for_repeated_instances() {
     child(&TestWorkspace::new("capture"), "source_lines_child");
 }
