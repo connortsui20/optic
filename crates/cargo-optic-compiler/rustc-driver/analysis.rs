@@ -14,12 +14,10 @@ use std::process::ExitCode;
 
 use rustc_driver::Callbacks;
 use rustc_driver::Compilation;
-use rustc_hir::attrs::Linkage;
 use rustc_interface::interface::Compiler;
 use rustc_interface::interface::Config;
 use rustc_middle::mono::CodegenUnit;
 use rustc_middle::mono::MonoItem;
-use rustc_middle::mono::Visibility;
 use rustc_middle::ty::TyCtxt;
 use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_middle::ty::print::with_resolve_crate_name;
@@ -28,7 +26,6 @@ use crate::failure;
 use crate::llvm::Configuration;
 use crate::manifest::ConcreteInstance;
 use crate::manifest::ManifestWriter;
-use crate::manifest::Placement;
 use crate::protocol::MANIFEST_PATH_ENV;
 use crate::source::Snapshots;
 
@@ -93,12 +90,12 @@ impl InstanceCallbacks {
 
         for codegen_unit in partitions.codegen_units {
             if let Some(extension) = configuration.extension() {
-                let name = codegen_unit.name().to_string();
+                let name = codegen_unit.name();
                 let path = tcx
                     .output_filenames(())
-                    .temp_path_ext_for_cgu(extension, &name);
+                    .temp_path_ext_for_cgu(extension, name.as_str());
 
-                self.manifest.write_module(&name, &path)?;
+                self.manifest.write_module(name.as_str(), &path)?;
             }
 
             self.write_function_placements(tcx, codegen_unit)?;
@@ -120,26 +117,19 @@ impl InstanceCallbacks {
 
             let definition_id = instance.def_id();
             let concrete = ConcreteInstance {
-                definition_crate: tcx.crate_name(definition_id.krate).to_string(),
+                definition_crate: tcx.crate_name(definition_id.krate),
                 definition_path: with_resolve_crate_name!(with_no_trimmed_paths!(
                     tcx.def_path_str(definition_id)
                 )),
                 display_name: with_resolve_crate_name!(with_no_trimmed_paths!(
                     tcx.def_path_str_with_args(definition_id, instance.args)
                 )),
-                raw_symbol: tcx.symbol_name(instance).name.to_owned(),
-            };
-            let placement = Placement {
-                codegen_unit: codegen_unit.name().to_string(),
-                linkage: linkage_name(data.linkage),
-                visibility: visibility_name(data.visibility),
-                local_copy: data.inlined,
-                size_estimate: data.size_estimate,
+                raw_symbol: tcx.symbol_name(instance),
             };
 
             let source = self.sources.capture(tcx, instance, &mut self.manifest)?;
             self.manifest
-                .write_placement(&concrete, &placement, &source)?;
+                .write_placement(&concrete, codegen_unit.name(), data, &source)?;
         }
 
         Ok(())
@@ -236,26 +226,4 @@ fn prepare_invocation() -> Result<DriverInvocation, String> {
         manifest_path,
         package_root,
     })
-}
-
-fn linkage_name(linkage: Linkage) -> &'static str {
-    match linkage {
-        Linkage::AvailableExternally => "AvailableExternally",
-        Linkage::Common => "Common",
-        Linkage::ExternalWeak => "ExternalWeak",
-        Linkage::External => "External",
-        Linkage::Internal => "Internal",
-        Linkage::LinkOnceAny => "LinkOnceAny",
-        Linkage::LinkOnceODR => "LinkOnceODR",
-        Linkage::WeakAny => "WeakAny",
-        Linkage::WeakODR => "WeakODR",
-    }
-}
-
-fn visibility_name(visibility: Visibility) -> &'static str {
-    match visibility {
-        Visibility::Default => "Default",
-        Visibility::Hidden => "Hidden",
-        Visibility::Protected => "Protected",
-    }
 }

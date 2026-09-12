@@ -13,8 +13,13 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
+use rustc_hir::attrs::Linkage;
+use rustc_middle::mono::MonoItemData;
+use rustc_middle::mono::Visibility;
+use rustc_middle::ty::SymbolName;
 use rustc_session::config::Lto;
 use rustc_session::config::OptLevel;
+use rustc_span::Symbol;
 
 use crate::llvm::Configuration;
 use crate::protocol::END_RECORD;
@@ -23,33 +28,15 @@ use crate::protocol::SELECTED_TARGET_MARKER_ENV;
 use crate::source::Source;
 
 /// The definition and symbol identity that rustc assigns to one monomorphized function.
-pub(crate) struct ConcreteInstance {
+pub(crate) struct ConcreteInstance<'tcx> {
     /// The crate that owns the generic or nongeneric function definition.
-    pub(crate) definition_crate: String,
+    pub(crate) definition_crate: Symbol,
     /// Rustc's canonical path to the function definition without generic arguments.
     pub(crate) definition_path: String,
     /// Rustc's canonical function path with this instance's concrete generic arguments.
     pub(crate) display_name: String,
     /// The symbol that identifies this concrete instance in compiler output.
-    pub(crate) raw_symbol: String,
-}
-
-/// One codegen unit's copy of a concrete function, as assigned by rustc's mono-item collector.
-pub(crate) struct Placement {
-    /// The codegen unit that contains this copy of the instance.
-    pub(crate) codegen_unit: String,
-
-    /// Rustc's linkage classification for this copy.
-    pub(crate) linkage: &'static str,
-
-    /// Rustc's symbol visibility for this copy.
-    pub(crate) visibility: &'static str,
-
-    /// Whether rustc placed this copy in the codegen unit for local use.
-    pub(crate) local_copy: bool,
-
-    /// Rustc's pre-codegen estimate of this copy's size.
-    pub(crate) size_estimate: usize,
+    pub(crate) raw_symbol: SymbolName<'tcx>,
 }
 
 /// Writes an attempt's private manifest and publishes it only when [`Self::finish`] succeeds.
@@ -89,21 +76,22 @@ impl ManifestWriter {
     /// Writes one function placement in the field order defined by the protocol.
     pub(crate) fn write_placement(
         &mut self,
-        instance: &ConcreteInstance,
-        placement: &Placement,
+        instance: &ConcreteInstance<'_>,
+        codegen_unit: Symbol,
+        placement: MonoItemData,
         source: &Source,
     ) -> io::Result<()> {
         self.write_u32(PLACEMENT_RECORD)?;
 
-        self.write_string(&instance.definition_crate)?;
+        self.write_string(instance.definition_crate.as_str())?;
         self.write_string(&instance.definition_path)?;
         self.write_string(&instance.display_name)?;
-        self.write_string(&instance.raw_symbol)?;
+        self.write_string(instance.raw_symbol.name)?;
 
-        self.write_string(&placement.codegen_unit)?;
-        self.write_string(placement.linkage)?;
-        self.write_string(placement.visibility)?;
-        self.write_u32(u32::from(placement.local_copy))?;
+        self.write_string(codegen_unit.as_str())?;
+        self.write_string(linkage_name(placement.linkage))?;
+        self.write_string(visibility_name(placement.visibility))?;
+        self.write_u32(u32::from(placement.inlined))?;
         let size_estimate = u64::try_from(placement.size_estimate).map_err(|_| {
             invalid_data(format!(
                 "placement size estimate must fit in u64, got {}",
@@ -217,6 +205,28 @@ impl ManifestWriter {
 
     fn write_bytes(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.file.write_all(bytes)
+    }
+}
+
+fn linkage_name(linkage: Linkage) -> &'static str {
+    match linkage {
+        Linkage::AvailableExternally => "AvailableExternally",
+        Linkage::Common => "Common",
+        Linkage::ExternalWeak => "ExternalWeak",
+        Linkage::External => "External",
+        Linkage::Internal => "Internal",
+        Linkage::LinkOnceAny => "LinkOnceAny",
+        Linkage::LinkOnceODR => "LinkOnceODR",
+        Linkage::WeakAny => "WeakAny",
+        Linkage::WeakODR => "WeakODR",
+    }
+}
+
+fn visibility_name(visibility: Visibility) -> &'static str {
+    match visibility {
+        Visibility::Default => "Default",
+        Visibility::Hidden => "Hidden",
+        Visibility::Protected => "Protected",
     }
 }
 
